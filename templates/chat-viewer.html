@@ -8,7 +8,7 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #f7f7f8;
             color: #2d3748;
             height: 100vh;
@@ -16,244 +16,234 @@
             flex-direction: column;
         }
 
-        /* ---- Header ---- */
+        /* ========= Header ========= */
         .header {
-            background: #ffffff;
-            padding: 14px 20px;
+            background: #fff;
+            padding: 12px 20px;
             border-bottom: 1px solid #e5e7eb;
-            box-shadow: 0 1px 2px rgba(0,0,0,.05);
+            box-shadow: 0 1px 3px rgba(0,0,0,.05);
             display: flex;
             align-items: center;
             justify-content: space-between;
             flex-shrink: 0;
-        }
-
-        .header h1 { font-size: 18px; font-weight: 600; color: #1a202c; }
-
-        .header-right {
-            display: flex;
-            align-items: center;
             gap: 12px;
         }
-
-        .min-msg-label { font-size: 13px; color: #6b7280; }
-
+        .header h1 { font-size: 17px; font-weight: 600; color: #1a202c; white-space: nowrap; }
+        .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .min-msg-label { font-size: 13px; color: #6b7280; white-space: nowrap; }
         .min-msg-input {
-            width: 64px;
-            padding: 6px 8px;
-            border: 1px solid #d1d5db;
-            border-radius: 6px;
-            font-size: 13px;
-            text-align: center;
+            width: 60px; padding: 5px 8px;
+            border: 1px solid #d1d5db; border-radius: 6px;
+            font-size: 13px; text-align: center;
         }
-
-        .refresh-btn {
-            padding: 8px 16px;
-            background: #10a37f;
-            color: white;
-            border: none;
-            border-radius: 7px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 500;
-            transition: background .2s;
+        .btn {
+            padding: 7px 14px; border: none; border-radius: 7px;
+            cursor: pointer; font-size: 13px; font-weight: 500;
+            transition: background .18s; white-space: nowrap;
         }
-        .refresh-btn:hover { background: #0d8c6e; }
-
-        /* upload fallback */
+        .btn-green  { background: #10a37f; color: #fff; }
+        .btn-green:hover { background: #0d8c6e; }
+        .btn-indigo { background: #6366f1; color: #fff; }
+        .btn-indigo:hover { background: #4f46e5; }
         .upload-wrapper { position: relative; }
         .upload-wrapper input[type="file"] { position: absolute; opacity: 0; width: 0; height: 0; }
-        .upload-label {
-            display: inline-block;
-            padding: 8px 16px;
-            background: #6366f1;
-            color: white;
-            border-radius: 7px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 500;
-            transition: background .2s;
-        }
-        .upload-label:hover { background: #4f46e5; }
 
-        /* ---- Main body ---- */
-        .main {
-            display: flex;
-            flex: 1;
-            overflow: hidden;
-        }
+        /* ========= Layout ========= */
+        .main { display: flex; flex: 1; overflow: hidden; }
 
-        /* ---- Sidebar ---- */
+        /* ========= Sidebar ========= */
         .sidebar {
-            width: 280px;
-            flex-shrink: 0;
-            background: #ffffff;
+            width: 270px; flex-shrink: 0;
+            background: #fff;
             border-right: 1px solid #e5e7eb;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
+            display: flex; flex-direction: column; overflow: hidden;
         }
-
-        .sidebar-header {
-            padding: 12px 14px;
-            font-size: 12px;
-            font-weight: 600;
-            color: #9ca3af;
-            text-transform: uppercase;
-            letter-spacing: .05em;
+        .sidebar-hdr {
+            padding: 10px 14px;
+            font-size: 11px; font-weight: 600; color: #9ca3af;
+            text-transform: uppercase; letter-spacing: .06em;
             border-bottom: 1px solid #f3f4f6;
             flex-shrink: 0;
         }
-
-        .file-list {
-            flex: 1;
-            overflow-y: auto;
-        }
-
+        .file-list { flex: 1; overflow-y: auto; }
         .file-list::-webkit-scrollbar { width: 4px; }
         .file-list::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
 
         .file-item {
-            padding: 12px 14px;
-            cursor: pointer;
+            padding: 11px 14px; cursor: pointer;
             border-bottom: 1px solid #f3f4f6;
-            transition: background .15s;
+            border-left: 3px solid transparent;
+            transition: background .13s;
         }
-
         .file-item:hover { background: #f9fafb; }
-        .file-item.active { background: #f0fdf4; border-left: 3px solid #10a37f; }
+        .file-item.active { background: #f0fdf4; border-left-color: #10a37f; }
+        .file-item-name { font-size: 12px; color: #374151; word-break: break-all; line-height: 1.4; }
+        .file-item-meta { margin-top: 3px; font-size: 11px; color: #9ca3af; }
 
-        .file-item-name {
-            font-size: 12px;
-            color: #374151;
-            word-break: break-all;
-            line-height: 1.4;
-        }
+        .sidebar-tip { padding: 20px 14px; font-size: 13px; color: #9ca3af; text-align: center; }
 
-        .file-item-meta {
-            margin-top: 4px;
-            font-size: 11px;
-            color: #9ca3af;
-        }
-
-        .sidebar-empty {
-            padding: 24px 14px;
-            font-size: 13px;
-            color: #9ca3af;
-            text-align: center;
-        }
-
-        /* ---- Chat panel ---- */
-        .chat-panel {
-            flex: 1;
-            overflow-y: auto;
-            padding: 28px 20px;
-            background: #f7f7f8;
-        }
-
+        /* ========= Chat panel ========= */
+        .chat-panel { flex: 1; overflow-y: auto; padding: 24px 28px; background: #f7f7f8; }
         .chat-panel::-webkit-scrollbar { width: 6px; }
         .chat-panel::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 3px; }
 
-        /* empty state */
         .empty-state {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            color: #9ca3af;
-            gap: 12px;
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; height: 100%; color: #9ca3af; gap: 12px;
         }
-
-        .empty-state svg { width: 56px; height: 56px; opacity: .25; stroke: #9ca3af; }
+        .empty-state svg { width: 52px; height: 52px; opacity: .22; stroke: #9ca3af; }
         .empty-state p { font-size: 15px; }
 
-        /* metadata */
+        /* ========= Metadata bar ========= */
         .metadata {
-            background: #ffffff;
-            border-radius: 10px;
-            padding: 16px 18px;
-            margin: 0 auto 24px;
-            max-width: 1100px;
-            font-size: 13px;
-            color: #6b7280;
+            background: #fff; border-radius: 10px;
+            padding: 14px 18px; margin-bottom: 22px;
+            font-size: 13px; color: #6b7280;
             border: 1px solid #e5e7eb;
         }
+        .metadata-title { font-weight: 600; margin-bottom: 8px; color: #1a202c; font-size: 14px; }
+        .metadata-item { display: flex; gap: 8px; padding: 3px 0; }
+        .metadata-item strong { color: #374151; min-width: 100px; }
 
-        .metadata-title { font-weight: 600; margin-bottom: 10px; color: #1a202c; font-size: 14px; }
-
-        .metadata-item { padding: 4px 0; display: flex; gap: 8px; }
-        .metadata-item strong { color: #374151; min-width: 110px; }
-
-        /* messages */
-        .message-wrapper {
+        /* ========= Message row ========= */
+        .msg-row {
             display: flex;
-            margin-bottom: 20px;
-            max-width: 1100px;
-            margin-left: auto;
-            margin-right: auto;
+            margin-bottom: 18px;
+            gap: 10px;
+        }
+        /* user: left; assistant: right */
+        .msg-row.user     { justify-content: flex-start; }
+        .msg-row.assistant{ justify-content: flex-end; }
+
+        .msg-row.user     .msg-bubble-col { align-items: flex-start; }
+        .msg-row.assistant .msg-bubble-col { align-items: flex-end; }
+
+        .msg-bubble-col {
+            display: flex; flex-direction: column; gap: 6px;
+            max-width: 70%;
         }
 
-        .message-wrapper.user { justify-content: flex-start; }
-        .message-wrapper.assistant { justify-content: flex-end; }
-
-        .message { display: flex; gap: 10px; max-width: 72%; }
-        .message.user { flex-direction: row; }
-        .message.assistant { flex-direction: row-reverse; }
-
+        /* avatar */
         .avatar {
-            width: 32px; height: 32px;
-            border-radius: 50%;
+            width: 30px; height: 30px; border-radius: 50%;
             display: flex; align-items: center; justify-content: center;
-            font-size: 14px; flex-shrink: 0;
+            font-size: 14px; flex-shrink: 0; margin-top: 2px;
         }
+        .avatar.user      { background: linear-gradient(135deg,#667eea,#764ba2); }
+        .avatar.assistant { background: linear-gradient(135deg,#10a37f,#0d8c6e); }
 
-        .avatar.user { background: linear-gradient(135deg,#667eea,#764ba2); color: white; }
-        .avatar.assistant { background: linear-gradient(135deg,#10a37f,#0d8c6e); color: white; }
-
-        .message-content {
-            padding: 14px 18px;
-            border-radius: 14px;
-            line-height: 1.65;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            font-size: 14px;
-        }
-
-        .message.user .message-content {
-            background: #ffffff;
-            color: #1a202c;
-            border: 1px solid #e5e7eb;
-            box-shadow: 0 1px 2px rgba(0,0,0,.04);
-        }
-
-        .message.assistant .message-content {
-            background: #f0fdf4;
-            color: #1a202c;
-            border: 1px solid #d1fae5;
-        }
-
-        .error-box {
-            background: #fee2e2;
-            color: #991b1b;
-            padding: 14px 18px;
-            margin: 0 auto 20px;
+        /* ========= Block cards ========= */
+        .block {
             border-radius: 10px;
-            max-width: 1100px;
-            border: 1px solid #fecaca;
+            overflow: hidden;
             font-size: 14px;
+            line-height: 1.65;
+            word-break: break-word;
         }
 
-        /* loading spinner */
-        .spinner {
+        /* — text block — */
+        .block.text {
+            background: #dbeafe;          /* light blue */
+            border: 1px solid #bfdbfe;
+            padding: 12px 16px;
+            white-space: pre-wrap;
+        }
+
+        /* — tool_use block — */
+        .block.tool-use {
+            background: #fff7ed;          /* light orange */
+            border: 1px solid #fed7aa;
+        }
+
+        /* — tool_result block — */
+        .block.tool-result {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+        }
+        .block.tool-result.is-error {
+            background: #fff1f2;
+            border-color: #fecdd3;
+        }
+
+        /* block header badge */
+        .block-hdr {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 12px;
+            font-size: 11px; font-weight: 600;
+            border-bottom: 1px solid rgba(0,0,0,.07);
+            color: #92400e;
+            background: rgba(0,0,0,.03);
+        }
+        .block-hdr .badge {
             display: inline-block;
-            width: 16px; height: 16px;
-            border: 2px solid #d1d5db;
-            border-top-color: #10a37f;
-            border-radius: 50%;
-            animation: spin .6s linear infinite;
-            vertical-align: middle;
-            margin-right: 6px;
+            padding: 1px 7px;
+            border-radius: 999px;
+            font-size: 10px; font-weight: 700;
+            letter-spacing: .03em;
+        }
+        .badge-tool-use    { background: #fb923c; color: #fff; }
+        .badge-tool-result { background: #f97316; color: #fff; }
+        .badge-error       { background: #f43f5e; color: #fff; }
+
+        .block-hdr .tool-name  { color: #78350f; font-weight: 700; }
+        .block-hdr .tool-id    { color: #b45309; font-size: 10px; font-family: monospace; }
+
+        /* block body */
+        .block-body { padding: 10px 14px; }
+
+        /* command pre */
+        .cmd-pre {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            border-radius: 7px;
+            padding: 10px 14px;
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-size: 12.5px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            margin: 4px 0 0;
+            line-height: 1.6;
+        }
+        .cmd-label {
+            font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500;
+        }
+
+        /* tool result content */
+        .result-pre {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 7px;
+            padding: 8px 12px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            color: #374151;
+            margin-top: 4px;
+            line-height: 1.55;
+            max-height: 260px;
+            overflow-y: auto;
+        }
+        .result-pre.is-error { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+
+        /* other input fields */
+        .input-kv { margin-top: 4px; }
+        .input-kv .kv-row { display: flex; gap: 6px; font-size: 12.5px; margin-top: 3px; }
+        .input-kv .kv-key { color: #92400e; font-weight: 600; min-width: 80px; }
+        .input-kv .kv-val { color: #374151; white-space: pre-wrap; word-break: break-all; }
+
+        /* error / loading */
+        .error-box {
+            background: #fee2e2; color: #991b1b;
+            padding: 14px 18px; border-radius: 10px;
+            border: 1px solid #fecaca; font-size: 14px;
+            margin-bottom: 16px;
+        }
+        .spinner {
+            display: inline-block; width: 15px; height: 15px;
+            border: 2px solid #d1d5db; border-top-color: #10a37f;
+            border-radius: 50%; animation: spin .6s linear infinite;
+            vertical-align: middle; margin-right: 5px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
     </style>
@@ -265,30 +255,32 @@
     <div class="header-right">
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="10" min="1" />
-        <button class="refresh-btn" onclick="loadFileList()">刷新列表</button>
-        <!-- 本地文件上传（备用） -->
+        <button class="btn btn-green" onclick="loadFileList()">刷新列表</button>
         <div class="upload-wrapper">
             <input type="file" id="fileInput" accept=".json" />
-            <label for="fileInput" class="upload-label">上传本地文件</label>
+            <label for="fileInput" class="btn btn-indigo">上传本地文件</label>
         </div>
     </div>
 </div>
 
 <div class="main">
+
     <!-- 左侧文件列表 -->
     <div class="sidebar">
-        <div class="sidebar-header" id="sidebarTitle">logs_anthropic</div>
+        <div class="sidebar-hdr" id="sidebarTitle">logs_anthropic</div>
         <div class="file-list" id="fileList">
-            <div class="sidebar-empty">加载中…</div>
+            <div class="sidebar-tip"><span class="spinner"></span>加载中…</div>
         </div>
     </div>
 
-    <!-- 右侧消息区 -->
+    <!-- 右侧对话 -->
     <div class="chat-panel" id="chatPanel">
         <div class="empty-state">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863
+                       9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3
+                       12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
             </svg>
             <p>从左侧选择一个对话文件</p>
         </div>
@@ -296,147 +288,257 @@
 </div>
 
 <script>
-    const fileList   = document.getElementById('fileList');
-    const chatPanel  = document.getElementById('chatPanel');
-    const sidebarTitle = document.getElementById('sidebarTitle');
-    let activeItem   = null;
+// ----------------------------------------------------------------
+// Sidebar: file list
+// ----------------------------------------------------------------
+const fileListEl   = document.getElementById('fileList');
+const chatPanel    = document.getElementById('chatPanel');
+const sidebarTitle = document.getElementById('sidebarTitle');
+let activeItem = null;
 
-    // ---- 加载文件列表 ----
-    async function loadFileList() {
-        const min = parseInt(document.getElementById('minMessages').value) || 10;
-        fileList.innerHTML = '<div class="sidebar-empty"><span class="spinner"></span>加载中…</div>';
-        sidebarTitle.textContent = `logs_anthropic（>${min} 条消息）`;
-
-        try {
-            const res = await fetch(`/logs/anthropic/list?min_messages=${min}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const files = await res.json();
-
-            if (!files.length) {
-                fileList.innerHTML = '<div class="sidebar-empty">没有满足条件的文件</div>';
-                return;
-            }
-
-            fileList.innerHTML = '';
-            files.forEach(item => {
-                const el = document.createElement('div');
-                el.className = 'file-item';
-
-                // 从文件名提取时间戳显示（去掉 -req.json）
-                const ts = item.filename.replace('-req.json', '').replace(/_/g, ' ');
-                el.innerHTML = `
-                    <div class="file-item-name">${ts}</div>
-                    <div class="file-item-meta">${item.message_count} 条消息 · ${item.model || '未知模型'}</div>
-                `;
-                el.addEventListener('click', () => selectFile(item.filename, el));
-                fileList.appendChild(el);
-            });
-        } catch (e) {
-            fileList.innerHTML = `<div class="sidebar-empty">加载失败：${e.message}</div>`;
+async function loadFileList() {
+    const min = parseInt(document.getElementById('minMessages').value) || 10;
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
+    sidebarTitle.textContent = `logs_anthropic (>${min} 条)`;
+    try {
+        const res = await fetch(`/logs/anthropic/list?min_messages=${min}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const files = await res.json();
+        if (!files.length) {
+            fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的文件</div>';
+            return;
         }
-    }
-
-    // ---- 选择文件 ----
-    async function selectFile(filename, el) {
-        if (activeItem) activeItem.classList.remove('active');
-        el.classList.add('active');
-        activeItem = el;
-
-        chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
-
-        try {
-            const res = await fetch(`/logs/anthropic/file?filename=${encodeURIComponent(filename)}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            renderMessages(data, filename);
-        } catch (e) {
-            showError(`加载失败：${e.message}`);
-        }
-    }
-
-    // ---- 本地上传（备用） ----
-    document.getElementById('fileInput').addEventListener('change', function(e) {
-        const file = e.target.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = ev => {
-            try {
-                renderMessages(JSON.parse(ev.target.result), file.name);
-                if (activeItem) activeItem.classList.remove('active');
-                activeItem = null;
-            } catch (err) {
-                showError('JSON 解析失败：' + err.message);
-            }
-        };
-        reader.onerror = () => showError('文件读取失败');
-        reader.readAsText(file);
-    });
-
-    // ---- 渲染消息 ----
-    function renderMessages(data, filename) {
-        chatPanel.innerHTML = '';
-
-        let messages = data.messages ?? (Array.isArray(data) ? data : null);
-        if (!messages) { showError('未找到 messages 字段'); return; }
-        if (!messages.length) { showError('messages 为空'); return; }
-
-        // 元数据
-        if (data.model || data.temperature !== undefined || data.max_tokens) {
-            const meta = document.createElement('div');
-            meta.className = 'metadata';
-            meta.innerHTML = `
-                <div class="metadata-title">📋 请求信息</div>
-                ${data.model ? `<div class="metadata-item"><strong>模型</strong>${data.model}</div>` : ''}
-                ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong>${data.temperature}</div>` : ''}
-                ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong>${data.max_tokens}</div>` : ''}
-                <div class="metadata-item"><strong>消息数</strong>${messages.length} 条</div>
-                <div class="metadata-item"><strong>文件</strong>${filename}</div>
+        fileListEl.innerHTML = '';
+        files.forEach(item => {
+            const el = document.createElement('div');
+            el.className = 'file-item';
+            const ts = item.filename.replace('-req.json', '').replace(/_/g, ' ');
+            el.innerHTML = `
+                <div class="file-item-name">${ts}</div>
+                <div class="file-item-meta">${item.message_count} 条 · ${item.model || '未知模型'}</div>
             `;
-            chatPanel.appendChild(meta);
-        }
-
-        messages.forEach(msg => {
-            const role = msg.role || 'unknown';
-
-            const wrapper = document.createElement('div');
-            wrapper.className = `message-wrapper ${role}`;
-
-            const msgDiv = document.createElement('div');
-            msgDiv.className = `message ${role}`;
-
-            const avatar = document.createElement('div');
-            avatar.className = `avatar ${role}`;
-            avatar.textContent = role === 'user' ? '👤' : role === 'assistant' ? '🤖' : '⚙️';
-
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            contentDiv.textContent = extractText(msg.content);
-
-            msgDiv.appendChild(avatar);
-            msgDiv.appendChild(contentDiv);
-            wrapper.appendChild(msgDiv);
-            chatPanel.appendChild(wrapper);
+            el.addEventListener('click', () => selectFile(item.filename, el));
+            fileListEl.appendChild(el);
         });
+    } catch(e) {
+        fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
+    }
+}
+
+async function selectFile(filename, el) {
+    if (activeItem) activeItem.classList.remove('active');
+    el.classList.add('active');
+    activeItem = el;
+    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+    try {
+        const res = await fetch(`/logs/anthropic/file?filename=${encodeURIComponent(filename)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderMessages(await res.json(), filename);
+    } catch(e) {
+        showError(`加载失败：${e.message}`);
+    }
+}
+
+// 本地上传备用
+document.getElementById('fileInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+        try {
+            renderMessages(JSON.parse(ev.target.result), file.name);
+            if (activeItem) { activeItem.classList.remove('active'); activeItem = null; }
+        } catch(err) { showError('JSON 解析失败：' + err.message); }
+    };
+    reader.onerror = () => showError('文件读取失败');
+    reader.readAsText(file);
+});
+
+// ----------------------------------------------------------------
+// Render
+// ----------------------------------------------------------------
+function renderMessages(data, filename) {
+    chatPanel.innerHTML = '';
+    const messages = data.messages ?? (Array.isArray(data) ? data : null);
+    if (!messages) { showError('未找到 messages 字段'); return; }
+    if (!messages.length) { showError('messages 为空'); return; }
+
+    // Metadata bar
+    if (data.model || data.temperature !== undefined || data.max_tokens) {
+        const meta = document.createElement('div');
+        meta.className = 'metadata';
+        meta.innerHTML = `
+            <div class="metadata-title">📋 请求信息</div>
+            ${data.model ? `<div class="metadata-item"><strong>模型</strong><span>${data.model}</span></div>` : ''}
+            ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${data.temperature}</span></div>` : ''}
+            ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${data.max_tokens}</span></div>` : ''}
+            <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
+            <div class="metadata-item"><strong>文件</strong><span>${filename}</span></div>
+        `;
+        chatPanel.appendChild(meta);
     }
 
-    function extractText(content) {
-        if (typeof content === 'string') return content;
-        if (Array.isArray(content)) {
-            return content.map(item => {
-                if (item.type === 'text') return item.text;
-                if (item.type === 'image' || item.type === 'image_url') return '[图片]';
-                return JSON.stringify(item);
-            }).join('\n');
+    messages.forEach(msg => {
+        const role = msg.role || 'unknown';
+        const content = Array.isArray(msg.content)
+            ? msg.content
+            : [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
+
+        const row = document.createElement('div');
+        row.className = `msg-row ${role}`;
+
+        const avatar = document.createElement('div');
+        avatar.className = `avatar ${role}`;
+        avatar.textContent = role === 'user' ? '👤' : role === 'assistant' ? '🤖' : '⚙️';
+
+        const col = document.createElement('div');
+        col.className = 'msg-bubble-col';
+
+        content.forEach(block => col.appendChild(renderBlock(block)));
+
+        if (role === 'user') {
+            row.appendChild(avatar);
+            row.appendChild(col);
+        } else {
+            row.appendChild(col);
+            row.appendChild(avatar);
         }
-        return JSON.stringify(content, null, 2);
+        chatPanel.appendChild(row);
+    });
+}
+
+// ----------------------------------------------------------------
+// Block renderers
+// ----------------------------------------------------------------
+function renderBlock(block) {
+    switch (block.type) {
+        case 'text':       return renderTextBlock(block);
+        case 'tool_use':   return renderToolUseBlock(block);
+        case 'tool_result':return renderToolResultBlock(block);
+        default:           return renderFallbackBlock(block);
+    }
+}
+
+function renderTextBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block text';
+    el.textContent = block.text || '';
+    return el;
+}
+
+function renderToolUseBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block tool-use';
+
+    // header
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge badge-tool-use">tool_use</span>
+        <span class="tool-name">${esc(block.name || '')}</span>
+        <span class="tool-id">${esc(block.id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    // body
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    const input = block.input || {};
+
+    if (input.command !== undefined) {
+        // command: show as dark code block
+        const lbl = document.createElement('div');
+        lbl.className = 'cmd-label';
+        lbl.textContent = '$ command';
+        const pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = input.command;
+        body.appendChild(lbl);
+        body.appendChild(pre);
+
+        // other keys besides command
+        const others = Object.entries(input).filter(([k]) => k !== 'command');
+        if (others.length) body.appendChild(renderKV(others));
+    } else if (Object.keys(input).length) {
+        body.appendChild(renderKV(Object.entries(input)));
+    } else {
+        body.textContent = '(no input)';
     }
 
-    function showError(msg) {
-        chatPanel.innerHTML = `<div class="error-box"><strong>错误：</strong>${msg}</div>`;
-    }
+    el.appendChild(body);
+    return el;
+}
 
-    // ---- 初始化 ----
-    loadFileList();
+function renderToolResultBlock(block) {
+    const isError = block.is_error;
+    const el = document.createElement('div');
+    el.className = `block tool-result${isError ? ' is-error' : ''}`;
+
+    // header
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge ${isError ? 'badge-error' : 'badge-tool-result'}">${isError ? 'error' : 'tool_result'}</span>
+        <span class="tool-id">${esc(block.tool_use_id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    // body
+    const body = document.createElement('div');
+    body.className = 'block-body';
+
+    const rawContent = block.content;
+    const text = typeof rawContent === 'string'
+        ? rawContent
+        : JSON.stringify(rawContent, null, 2);
+
+    const pre = document.createElement('pre');
+    pre.className = `result-pre${isError ? ' is-error' : ''}`;
+    pre.textContent = text || '(no output)';
+    body.appendChild(pre);
+    el.appendChild(body);
+    return el;
+}
+
+function renderFallbackBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block text';
+    el.textContent = JSON.stringify(block, null, 2);
+    return el;
+}
+
+// ----------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------
+function renderKV(entries) {
+    const wrap = document.createElement('div');
+    wrap.className = 'input-kv';
+    entries.forEach(([k, v]) => {
+        const row = document.createElement('div');
+        row.className = 'kv-row';
+        const keyEl = document.createElement('span');
+        keyEl.className = 'kv-key';
+        keyEl.textContent = k + ':';
+        const valEl = document.createElement('span');
+        valEl.className = 'kv-val';
+        valEl.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+        row.appendChild(keyEl);
+        row.appendChild(valEl);
+        wrap.appendChild(row);
+    });
+    return wrap;
+}
+
+function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showError(msg) {
+    chatPanel.innerHTML = `<div class="error-box"><strong>错误：</strong>${msg}</div>`;
+}
+
+// init
+loadFileList();
 </script>
 </body>
 </html>
