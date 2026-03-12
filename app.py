@@ -962,6 +962,42 @@ def logs_anthropic_file(filename: str):
     return JSONResponse(data)
 
 
+@app.get("/logs/openai/list")
+def logs_openai_list(min_messages: int = 10):
+    """列出 logs_openai 目录下满足条件的 req.json 文件（含 messages 字段且消息数 > min_messages）"""
+    result = []
+    pattern = os.path.join(LOGS_OPENAI, "*-req.json")
+    for path in sorted(glob.glob(pattern), reverse=True):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            messages = data.get("messages")
+            if not isinstance(messages, list) or len(messages) <= min_messages:
+                continue
+            filename = os.path.basename(path)
+            result.append({
+                "filename": filename,
+                "message_count": len(messages),
+                "model": data.get("model", ""),
+            })
+        except Exception:
+            continue
+    return JSONResponse(result)
+
+
+@app.get("/logs/openai/file")
+def logs_openai_file(filename: str):
+    """返回 logs_openai 目录下指定文件的内容（仅允许 -req.json 文件）"""
+    if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+    path = os.path.join(LOGS_OPENAI, filename)
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return JSONResponse(data)
+
+
 if __name__ == "__main__":
     import uvicorn
     import argparse

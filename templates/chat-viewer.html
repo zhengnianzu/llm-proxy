@@ -47,6 +47,10 @@
         .btn-indigo:hover { background: #4f46e5; }
         .upload-wrapper { position: relative; }
         .upload-wrapper input[type="file"] { position: absolute; opacity: 0; width: 0; height: 0; }
+        .folder-select {
+            padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+            font-size: 13px; background: #fff; cursor: pointer; color: #374151;
+        }
 
         /* ========= Layout ========= */
         .main { display: flex; flex: 1; overflow: hidden; }
@@ -140,6 +144,20 @@
             line-height: 1.65;
             word-break: break-word;
         }
+
+        /* — tool_calls block (OpenAI) — */
+        .block.tool-calls {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+        }
+
+        /* — tool role block (OpenAI) — */
+        .block.tool-role {
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
+        }
+        .block-hdr.tool-role-hdr { color: #166534; }
+        .badge-tool-role { background: #22c55e; color: #fff; }
 
         /* — text block — */
         .block.text {
@@ -253,6 +271,11 @@
 <div class="header">
     <h1>💬 Chat Viewer</h1>
     <div class="header-right">
+        <span class="min-msg-label">文件夹</span>
+        <select class="folder-select" id="folderSelect" onchange="loadFileList()">
+            <option value="anthropic">logs_anthropic</option>
+            <option value="openai">logs_openai</option>
+        </select>
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="10" min="1" />
         <button class="btn btn-green" onclick="loadFileList()">刷新列表</button>
@@ -296,12 +319,17 @@ const chatPanel    = document.getElementById('chatPanel');
 const sidebarTitle = document.getElementById('sidebarTitle');
 let activeItem = null;
 
+function currentFolder() {
+    return document.getElementById('folderSelect').value; // 'anthropic' | 'openai'
+}
+
 async function loadFileList() {
     const min = parseInt(document.getElementById('minMessages').value) || 10;
+    const folder = currentFolder();
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
-    sidebarTitle.textContent = `logs_anthropic (>${min} 条)`;
+    sidebarTitle.textContent = `logs_${folder} (>${min} 条)`;
     try {
-        const res = await fetch(`/logs/anthropic/list?min_messages=${min}`);
+        const res = await fetch(`/logs/${folder}/list?min_messages=${min}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const files = await res.json();
         if (!files.length) {
@@ -331,7 +359,8 @@ async function selectFile(filename, el) {
     activeItem = el;
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
-        const res = await fetch(`/logs/anthropic/file?filename=${encodeURIComponent(filename)}`);
+        const folder = currentFolder();
+        const res = await fetch(`/logs/${folder}/file?filename=${encodeURIComponent(filename)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         renderMessages(await res.json(), filename);
     } catch(e) {
@@ -380,23 +409,42 @@ function renderMessages(data, filename) {
 
     messages.forEach(msg => {
         const role = msg.role || 'unknown';
-        const content = Array.isArray(msg.content)
-            ? msg.content
-            : [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
+
+        // 将消息内容统一为 block 数组
+        let blocks = [];
+
+        if (role === 'tool') {
+            // OpenAI tool result message
+            blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
+        } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+            // OpenAI assistant with tool_calls (content may be null or string)
+            if (msg.content) {
+                blocks.push({ type: 'text', text: msg.content });
+            }
+            msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
+        } else if (Array.isArray(msg.content)) {
+            // Anthropic-style content array
+            blocks = msg.content;
+        } else {
+            // Plain string content (OpenAI / simple)
+            blocks = [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
+        }
+
+        const displayRole = role === 'tool' ? 'user' : role;
 
         const row = document.createElement('div');
-        row.className = `msg-row ${role}`;
+        row.className = `msg-row ${displayRole}`;
 
         const avatar = document.createElement('div');
-        avatar.className = `avatar ${role}`;
-        avatar.textContent = role === 'user' ? '👤' : role === 'assistant' ? '🤖' : '⚙️';
+        avatar.className = `avatar ${displayRole}`;
+        avatar.textContent = displayRole === 'user' ? '👤' : displayRole === 'assistant' ? '🤖' : '⚙️';
 
         const col = document.createElement('div');
         col.className = 'msg-bubble-col';
 
-        content.forEach(block => col.appendChild(renderBlock(block)));
+        blocks.forEach(block => col.appendChild(renderBlock(block)));
 
-        if (role === 'user') {
+        if (displayRole === 'user') {
             row.appendChild(avatar);
             row.appendChild(col);
         } else {
@@ -412,11 +460,92 @@ function renderMessages(data, filename) {
 // ----------------------------------------------------------------
 function renderBlock(block) {
     switch (block.type) {
-        case 'text':       return renderTextBlock(block);
-        case 'tool_use':   return renderToolUseBlock(block);
-        case 'tool_result':return renderToolResultBlock(block);
-        default:           return renderFallbackBlock(block);
+        case 'text':            return renderTextBlock(block);
+        case 'tool_use':        return renderToolUseBlock(block);
+        case 'tool_result':     return renderToolResultBlock(block);
+        case '_oai_tool_call':  return renderOaiToolCallBlock(block);
+        case '_oai_tool_result':return renderOaiToolResultBlock(block);
+        default:                return renderFallbackBlock(block);
     }
+}
+
+// OpenAI: assistant tool_call block
+function renderOaiToolCallBlock(block) {
+    const tc = block.tool_call || {};
+    const fn = tc.function || {};
+    const el = document.createElement('div');
+    el.className = 'block tool-use';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge badge-tool-use">tool_call</span>
+        <span class="tool-name">${esc(fn.name || '')}</span>
+        <span class="tool-id">${esc(tc.id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+
+    let args = fn.arguments || '';
+    if (typeof args === 'string') {
+        try { args = JSON.stringify(JSON.parse(args), null, 2); } catch(e) { /* keep raw */ }
+    } else {
+        args = JSON.stringify(args, null, 2);
+    }
+
+    // if args contain a "command" key, render nicely
+    let parsed = null;
+    try { parsed = JSON.parse(fn.arguments); } catch(e) {}
+
+    if (parsed && parsed.command !== undefined) {
+        const lbl = document.createElement('div');
+        lbl.className = 'cmd-label';
+        lbl.textContent = '$ command';
+        const pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = parsed.command;
+        body.appendChild(lbl);
+        body.appendChild(pre);
+        const others = Object.entries(parsed).filter(([k]) => k !== 'command');
+        if (others.length) body.appendChild(renderKV(others));
+    } else if (parsed && typeof parsed === 'object') {
+        body.appendChild(renderKV(Object.entries(parsed)));
+    } else {
+        const pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = args;
+        body.appendChild(pre);
+    }
+
+    el.appendChild(body);
+    return el;
+}
+
+// OpenAI: tool role result block
+function renderOaiToolResultBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block tool-role';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr tool-role-hdr';
+    hdr.innerHTML = `
+        <span class="badge badge-tool-role">tool_result</span>
+        <span class="tool-id">${esc(block.tool_call_id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    const pre = document.createElement('pre');
+    pre.className = 'result-pre';
+    pre.textContent = typeof block.content === 'string'
+        ? block.content
+        : JSON.stringify(block.content, null, 2);
+    body.appendChild(pre);
+    el.appendChild(body);
+    return el;
 }
 
 function renderTextBlock(block) {
