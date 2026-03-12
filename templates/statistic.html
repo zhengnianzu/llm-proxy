@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>token数统计</title>
+    <!-- Bootstrap 5 样式 -->
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <script src="/static/js/vue.min.js"></script>
+    <style>
+        .sortable { cursor: pointer; user-select: none; }
+        .sortable:hover { background-color: #e2e6ea; }
+        .arrow { font-size: 0.8rem; margin-left: 4px; }
+        .summary-section { background: #f8f9fa; border-radius: 10px; padding: 20px; margin-bottom: 25px; }
+        .summary-card { border-left: 4px solid; transition: 0.2s; }
+        .summary-card.success { border-left-color: #28a745; background: #f0fff4; }
+        .summary-card.error { border-left-color: #dc3545; background: #fff5f5; }
+        .filter-row { background: #e9ecef; padding: 20px; border-radius: 10px; margin-bottom: 25px; }
+        .badge-success { background-color: #28a745; color: white; }
+        .badge-error { background-color: #dc3545; color: white; }
+    </style>
+</head>
+<body>
+    <div id="app" class="container mt-4">
+        <h2 class="mb-4">📈 token用量统计</h2>
+
+        <!-- 筛选区域: 起始日期、模型、状态 -->
+        <div class="filter-row">
+            <div class="row g-3 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label">开始日期</label>
+                    <input type="date" class="form-control" v-model="startDate" placeholder="开始日期">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">结束日期</label>
+                    <input type="date" class="form-control" v-model="endDate" placeholder="结束日期">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">模型(多个用,拼接)</label>
+                    <input type="text" class="form-control" v-model="model" placeholder="例如: model1,model2">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">状态</label>
+                    <select class="form-select" v-model="statusFilter">
+                        <option value="">全部</option>
+                        <option value="success">成功</option>
+                        <option value="error">失败</option>
+                    </select>
+                </div>
+                <div class="col-md-2 d-flex gap-2">
+                    <button class="btn btn-primary flex-grow-1" @click="fetchData" :disabled="loading">
+                        {{ loading ? '查询中...' : '筛选' }}
+                    </button>
+                    <button class="btn btn-outline-secondary" @click="resetFilter" :disabled="loading">重置</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 汇总区域 (按状态分别展示) -->
+        <div class="summary-section" v-if="summaryList.length > 0">
+            <h5 class="mb-3">📊 按状态汇总</h5>
+            <div class="row g-3">
+                <div v-for="(stat, idx) in summaryList" :key="idx" class="col-md-6">
+                    <div class="card summary-card" :class="stat.status">
+                        <div class="card-body">
+                            <h6 class="card-title">
+                                <span class="badge" :class="stat.status === 'success' ? 'badge-success' : 'badge-error'">
+                                    {{ stat.status === 'success' ? '成功' : '失败' }}
+                                </span>
+                            </h6>
+                            <div class="row mt-2">
+                                <div class="col-4 text-center">
+                                    <small class="text-muted">记录数</small>
+                                    <p class="fw-bold fs-5">{{ stat.count }}</p>
+                                </div>
+                                <div class="col-4 text-center">
+                                    <small class="text-muted">输入Token</small>
+                                    <p class="fw-bold">{{ stat.total_input }}</p>
+                                </div>
+                                <div class="col-4 text-center">
+                                    <small class="text-muted">输出Token</small>
+                                    <p class="fw-bold">{{ stat.total_output }}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 可选：总计卡片（合并两个状态） -->
+                <div class="col-md-12 mt-2" v-if="summaryList.length === 2">
+                    <div class="card bg-light">
+                        <div class="card-body">
+                            <h6 class="card-title">📌 总计 (成功+失败)</h6>
+                            <div class="row">
+                                <div class="col-4 text-center">
+                                    <small>总记录数</small>
+                                    <p class="fw-bold">{{ totalCount }}</p>
+                                </div>
+                                <div class="col-4 text-center">
+                                    <small>总输入Token</small>
+                                    <p class="fw-bold">{{ totalInput }}</p>
+                                </div>
+                                <div class="col-4 text-center">
+                                    <small>总输出Token</small>
+                                    <p class="fw-bold">{{ totalOutput }}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div v-else class="alert alert-info py-2" role="alert">暂无汇总数据</div>
+
+        <!-- 数据表格 (展示详细记录) -->
+        <div class="table-responsive mt-4">
+            <table class="table table-striped table-hover align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th @click="sortBy('model')" class="sortable">
+                            模型
+                            <span v-if="sortField === 'model'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
+                        </th>
+                        <th @click="sortBy('date_start')" class="sortable">
+                            开始日期
+                            <span v-if="sortField === 'date_start'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
+                        </th>
+                        <th @click="sortBy('date_end')" class="sortable">
+                            结束日期
+                            <span v-if="sortField === 'date_end'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
+                        </th>
+                        <th @click="sortBy('status')" class="sortable">
+                            状态
+                            <span v-if="sortField === 'status'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
+                        </th>
+                        <th @click="sortBy('count')" class="sortable text-end">
+                            请求次数
+                            <span v-if="sortField === 'count'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
+                        </th>
+                        <th @click="sortBy('input_token_num')" class="sortable text-end">
+                            输入Token
+                            <span v-if="sortField === 'input_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
+                        </th>
+                        <th @click="sortBy('output_token_num')" class="sortable text-end">
+                            输出Token
+                            <span v-if="sortField === 'output_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
+                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-if="items.length === 0">
+                        <td colspan="7" class="text-center text-muted py-4">暂无符合条件的详细记录</td>
+                    </tr>
+                    <tr v-for="(item, index) in items" :key="index">
+                        <td>{{ item.model }}</td>
+                        <td>{{ item.date_start }}</td>
+                        <td>{{ item.date_end }}</td>
+                        <td>
+                            <span class="badge" :class="item.status === 'success' ? 'badge-success' : 'badge-error'">
+                                {{ item.status === 'success' ? '成功' : '失败' }}
+                            </span>
+                        </td>
+                        <td class="text-end">{{ item.count }}</td>
+                        <td class="text-end">{{ item.input_token_num }}</td>
+                        <td class="text-end">{{ item.output_token_num }}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 加载指示器 -->
+        <div v-if="loading" class="text-center text-muted py-2">
+            <span>数据加载中...</span>
+        </div>
+    </div>
+
+    <script>
+        new Vue({
+            el: '#app',
+            data: {
+                // 筛选条件
+                model: '',
+                startDate: '',
+                endDate: '',
+                statusFilter: '',  // '' 表示全部, 'success' 或 'error'
+                // 数据
+                items: [],           // 详细记录列表 (对应 data)
+                summaryList: [],      // 汇总数组 (对应 summary)
+                // 排序
+                sortField: 'date_start',
+                sortAsc: true,
+                // UI
+                loading: false
+            },
+            computed: {
+                // 计算总计（当summaryList有两个元素时使用）
+                totalCount() {
+                    return this.summaryList.reduce((acc, cur) => acc + (cur.count || 0), 0);
+                },
+                totalInput() {
+                    return this.summaryList.reduce((acc, cur) => acc + (cur.total_input || 0), 0);
+                },
+                totalOutput() {
+                    return this.summaryList.reduce((acc, cur) => acc + (cur.total_output || 0), 0);
+                }
+            },
+            methods: {
+                fetchData() {
+                    this.loading = true;
+                    const params = new URLSearchParams();
+                    if (this.model) params.append('model', this.model);
+                    if (this.startDate) params.append('date_start', this.startDate);
+                    if (this.endDate) params.append('date_end', this.endDate);
+                    // 状态筛选：仅当选择具体状态（非空）时传递，全部则不传参数（由后端处理）
+                    if (this.statusFilter) params.append('status', this.statusFilter);
+
+                    const url = `/statistic?${params.toString()}`;
+
+                    fetch(url)
+                        .then(response => {
+                            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                            return response.json();
+                        })
+                        .then(data => {
+                            // 预期 data 格式: { data: [...], summary: [...] }
+                            this.items = data.data || [];
+                            this.summaryList = data.summary || [];
+                            // 应用当前排序
+                            this.applySort();
+                        })
+                        .catch(err => {
+                            console.error('获取数据失败:', err);
+                            alert('加载失败，请检查后端服务');
+                        })
+                        .finally(() => {
+                            this.loading = false;
+                        });
+                },
+
+                resetFilter() {
+                    this.model = '';
+                    this.startDate = '';
+                    this.endDate = '';
+                    this.statusFilter = '';
+                    this.fetchData();
+                },
+
+                // 排序逻辑（支持新字段）
+                applySort() {
+                    if (!this.sortField) return;
+                    const field = this.sortField;
+                    const asc = this.sortAsc;
+
+                    const sorted = [...this.items].sort((a, b) => {
+                        let valA = a[field];
+                        let valB = b[field];
+
+                        // 数值字段比较
+                        if (['count', 'input_token_num', 'output_token_num'].includes(field)) {
+                            return asc ? valA - valB : valB - valA;
+                        } else {
+                            // 字符串字段（model, date_start, date_end, status）
+                            if (valA < valB) return asc ? -1 : 1;
+                            if (valA > valB) return asc ? 1 : -1;
+                            return 0;
+                        }
+                    });
+                    this.items = sorted;
+                },
+
+                sortBy(field) {
+                    if (this.sortField === field) {
+                        this.sortAsc = !this.sortAsc;
+                    } else {
+                        this.sortField = field;
+                        this.sortAsc = true;
+                    }
+                    this.applySort();
+                }
+            },
+            created() {
+                this.fetchData();
+            }
+        });
+    </script>
+
+    <!-- 后端接口预期返回格式 (基于您提供的示例)：
+    {
+        "data": [
+            {"model": "test1", "date_start": "2025-03-01", "date_end": "2025-03-31", "status": "success", "count": 1000, "input_token_num": 1200, "output_token_num": 450},
+            ...
+        ],
+        "summary": [
+            {"count": 1000, "status": "success", "total_input": 3000, "total_output": 1200},
+            {"count": 10, "status": "error", "total_input": 120, "total_output": 0}
+        ]
+    }
+    -->
+</body>
+</html>
