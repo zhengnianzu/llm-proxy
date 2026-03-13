@@ -273,7 +273,8 @@
     <div class="header-right">
         <span class="min-msg-label">文件夹</span>
         <select class="folder-select" id="folderSelect" onchange="loadFileList()">
-            <option value="anthropic">logs_anthropic</option>
+            <option value="anthropic_agg">logs_anthropic（聚合）</option>
+            <option value="anthropic">logs_anthropic（单文件）</option>
             <option value="openai">logs_openai</option>
         </select>
         <span class="min-msg-label">最少消息数</span>
@@ -318,48 +319,113 @@ const fileListEl   = document.getElementById('fileList');
 const chatPanel    = document.getElementById('chatPanel');
 const sidebarTitle = document.getElementById('sidebarTitle');
 let activeItem = null;
+let aggChains = [];   // cache for aggregate mode
 
 function currentFolder() {
-    return document.getElementById('folderSelect').value; // 'anthropic' | 'openai'
+    return document.getElementById('folderSelect').value;
 }
 
 async function loadFileList() {
-    const min = parseInt(document.getElementById('minMessages').value) || 10;
+    const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
-    sidebarTitle.textContent = `logs_${folder} (>${min} 条)`;
-    try {
-        const res = await fetch(`/logs/${folder}/list?min_messages=${min}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const files = await res.json();
-        if (!files.length) {
-            fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的文件</div>';
-            return;
+    activeItem = null;
+
+    if (folder === 'anthropic_agg') {
+        // ---- 聚合模式 ----
+        sidebarTitle.textContent = `logs_anthropic 聚合 (≥${min} 条)`;
+        try {
+            const res = await fetch(`/logs/anthropic/aggregate?min_messages=${min}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            aggChains = await res.json();
+            if (!aggChains.length) {
+                fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的对话</div>';
+                return;
+            }
+            fileListEl.innerHTML = '';
+            aggChains.forEach((chain, idx) => {
+                const el = document.createElement('div');
+                el.className = 'file-item';
+                const q1 = chain.messages?.[0];
+                let rawText = '';
+                if (q1) {
+                    const c = q1.content;
+                    if (typeof c === 'string') rawText = c;
+                    else if (Array.isArray(c)) {
+                        const tb = c.find(b => b.type === 'text');
+                        rawText = tb?.text || '';
+                    }
+                }
+
+                // 提取时间戳和实际任务内容
+                // Q1 格式: "Sender...\n\n[Wed 2026-03-11 20:28 GMT+8] 实际任务..."
+                // 或:      "[Fri 2026-03-13 06:42 GMT+8] [Subagent Context] ..."
+                let timestamp = '';
+                let taskText = rawText;
+                const tsMatch = rawText.match(/\[([^\]]+GMT[^\]]*)\]\s*/);
+                if (tsMatch) {
+                    timestamp = tsMatch[1];
+                    taskText = rawText.slice(tsMatch.index + tsMatch[0].length)
+                        .replace(/^\[Subagent Context\]\s*/i, '')
+                        .trim();
+                }
+                const preview = taskText.slice(0, 80) || rawText.slice(0, 80);
+
+                el.innerHTML = `
+                    <div class="file-item-name">${esc(preview || '(空)')}</div>
+                    <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${chain.model || '?'}</div>
+                    <div class="file-item-meta" style="font-size:10px;color:#b5bec8">${esc(timestamp || chain.first_time)}</div>
+                `;
+                el.addEventListener('click', () => selectAggChain(idx, el));
+                fileListEl.appendChild(el);
+            });
+        } catch(e) {
+            fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
         }
-        fileListEl.innerHTML = '';
-        files.forEach(item => {
-            const el = document.createElement('div');
-            el.className = 'file-item';
-            const ts = item.filename.replace('-req.json', '').replace(/_/g, ' ');
-            el.innerHTML = `
-                <div class="file-item-name">${ts}</div>
-                <div class="file-item-meta">${item.message_count} 条 · ${item.model || '未知模型'}</div>
-            `;
-            el.addEventListener('click', () => selectFile(item.filename, el));
-            fileListEl.appendChild(el);
-        });
-    } catch(e) {
-        fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
+    } else {
+        // ---- 单文件模式 ----
+        const apiFolder = folder; // 'anthropic' | 'openai'
+        sidebarTitle.textContent = `logs_${apiFolder} (≥${min} 条)`;
+        try {
+            const res = await fetch(`/logs/${apiFolder}/list?min_messages=${min}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const files = await res.json();
+            if (!files.length) {
+                fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的文件</div>';
+                return;
+            }
+            fileListEl.innerHTML = '';
+            files.forEach(item => {
+                const el = document.createElement('div');
+                el.className = 'file-item';
+                const ts = item.filename.replace('-req.json', '').replace(/_/g, ' ');
+                el.innerHTML = `
+                    <div class="file-item-name">${ts}</div>
+                    <div class="file-item-meta">${item.message_count} 条 · ${item.model || '未知模型'}</div>
+                `;
+                el.addEventListener('click', () => selectFile(item.filename, el, apiFolder));
+                fileListEl.appendChild(el);
+            });
+        } catch(e) {
+            fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
+        }
     }
 }
 
-async function selectFile(filename, el) {
+function selectAggChain(idx, el) {
+    if (activeItem) activeItem.classList.remove('active');
+    el.classList.add('active');
+    activeItem = el;
+    const chain = aggChains[idx];
+    renderMessages(chain, `聚合链 #${chain.chain_id}  (${chain.file_count} 个文件)`);
+}
+
+async function selectFile(filename, el, folder) {
     if (activeItem) activeItem.classList.remove('active');
     el.classList.add('active');
     activeItem = el;
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
-        const folder = currentFolder();
         const res = await fetch(`/logs/${folder}/file?filename=${encodeURIComponent(filename)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         renderMessages(await res.json(), filename);
@@ -393,11 +459,16 @@ function renderMessages(data, filename) {
     if (!messages.length) { showError('messages 为空'); return; }
 
     // Metadata bar
-    if (data.model || data.temperature !== undefined || data.max_tokens) {
+    const isChain = data.chain_id !== undefined;
+    const showMeta = isChain || data.model || data.temperature !== undefined || data.max_tokens;
+    if (showMeta) {
         const meta = document.createElement('div');
         meta.className = 'metadata';
         meta.innerHTML = `
-            <div class="metadata-title">📋 请求信息</div>
+            <div class="metadata-title">${isChain ? '🔗 聚合对话链' : '📋 请求信息'}</div>
+            ${isChain ? `<div class="metadata-item"><strong>链 ID</strong><span>#${data.chain_id}</span></div>` : ''}
+            ${isChain ? `<div class="metadata-item"><strong>时间范围</strong><span>${data.first_time} → ${data.last_time}</span></div>` : ''}
+            ${isChain ? `<div class="metadata-item"><strong>文件数</strong><span>${data.file_count} 个 req 文件</span></div>` : ''}
             ${data.model ? `<div class="metadata-item"><strong>模型</strong><span>${data.model}</span></div>` : ''}
             ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${data.temperature}</span></div>` : ''}
             ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${data.max_tokens}</span></div>` : ''}

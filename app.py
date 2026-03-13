@@ -985,6 +985,158 @@ def logs_openai_list(min_messages: int = 10):
     return JSONResponse(result)
 
 
+@app.get("/logs/anthropic/aggregate")
+def logs_anthropic_aggregate(min_messages: int = 1):
+    """
+    扫描 logs_anthropic 目录下所有 req+res 文件对，
+    按时间戳排序后聚合成独立的对话链（每条链以第一条 user 消息为 key）。
+    返回格式: [{ chain_id, first_time, last_time, file_count, messages: [...] }, ...]
+    每条 message 附加 _source_file 和 _is_assistant_response 字段。
+    """
+    import re as _re
+
+    def extract_res_content(res_path: str):
+        """从 res.json 提取 assistant 回复的 content 列表"""
+        if not os.path.isfile(res_path):
+            return None
+        try:
+            with open(res_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            # 非流式: {"json": {"content": [...], "role": "assistant", ...}}
+            if isinstance(d, dict) and "json" in d:
+                j = d["json"]
+                if isinstance(j, dict) and j.get("role") == "assistant":
+                    return j.get("content")
+            # 流式: 列表 chunks，找最后一个有 message.content 的
+            if isinstance(d, list):
+                for chunk in reversed(d):
+                    msg = chunk.get("message", {})
+                    if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content") is not None:
+                        return msg["content"]
+        except Exception:
+            pass
+        return None
+
+    def msg_fingerprint(msg):
+        """消息指纹：role + content 前200字符，用于去重比较"""
+        role = msg.get("role", "")
+        c = msg.get("content", "")
+        if isinstance(c, list):
+            parts = []
+            for b in c:
+                if isinstance(b, dict):
+                    parts.append(b.get("text") or b.get("id") or str(b)[:80])
+            c = "|".join(parts)
+        return f"{role}::{str(c)[:200]}"
+
+    # 收集所有 req 文件
+    req_files = sorted(glob.glob(os.path.join(LOGS_ANTHROPIC, "*-req.json")))
+
+    # 按时间戳提取文件名前缀
+    ts_pat = _re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+)-req\.json$")
+
+    entries = []
+    for path in req_files:
+        m = ts_pat.search(os.path.basename(path))
+        if not m:
+            continue
+        ts_str = m.group(1)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        msgs = data.get("messages")
+        if not isinstance(msgs, list) or len(msgs) < min_messages:
+            continue
+        res_path = path.replace("-req.json", "-res.json")
+        entries.append({
+            "ts": ts_str,
+            "path": path,
+            "res_path": res_path,
+            "messages": msgs,
+            "model": data.get("model", ""),
+        })
+
+    if not entries:
+        return JSONResponse([])
+
+    # --- 聚合逻辑 ---
+    # Q1 完整内容作为 key（Claude Code 每次会话的第一条 user 消息含时间戳+任务，天然唯一）。
+    # 同一 Q1 key 的所有文件属于同一条链，取消息数最多的文件作为完整轨迹。
+
+    def get_q1_full(msgs):
+        """提取第一条 user 消息的完整文本作为会话 key"""
+        if not msgs:
+            return ""
+        m = msgs[0]
+        c = m.get("content", "")
+        if isinstance(c, list):
+            parts = []
+            for b in c:
+                if isinstance(b, dict):
+                    parts.append(b.get("text") or b.get("id") or str(b)[:200])
+            c = "|".join(parts)
+        return str(c)  # 完整内容，不截断
+
+    from collections import OrderedDict
+    chains_map = OrderedDict()  # q1_key -> { chain_id, entries, messages, model }
+
+    for entry in entries:
+        msgs = entry["messages"]
+        if not msgs:
+            continue
+        q1_key = get_q1_full(msgs)
+        if q1_key not in chains_map:
+            chains_map[q1_key] = {
+                "chain_id": len(chains_map),
+                "q1_key": q1_key,
+                "messages": msgs,
+                "entries": [entry],
+                "model": entry["model"],
+            }
+        else:
+            chain = chains_map[q1_key]
+            if len(msgs) > len(chain["messages"]):
+                chain["messages"] = msgs
+            chain["entries"].append(entry)
+
+    chains = list(chains_map.values())
+
+    # 构建返回结构
+    result = []
+    for chain in chains:
+        first_ts = chain["entries"][0]["ts"]
+        last_ts = chain["entries"][-1]["ts"]
+        # 取最长消息列表所在 entry 的 res.json
+        best_entry = max(chain["entries"], key=lambda e: len(e["messages"]))
+        res_content = extract_res_content(best_entry["res_path"])
+
+        # 构建完整 messages（history + assistant 回复）
+        full_messages = list(chain["messages"])
+        if res_content is not None:
+            full_messages.append({
+                "role": "assistant",
+                "content": res_content,
+                "_from_res": True,
+                "_source_file": os.path.basename(best_entry["res_path"]),
+            })
+
+        result.append({
+            "chain_id": chain["chain_id"],
+            "first_time": first_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
+            "last_time": last_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
+            "file_count": len(chain["entries"]),
+            "message_count": len(full_messages),
+            "model": chain["model"],
+            "messages": full_messages,
+        })
+
+    # 按 first_time 倒序
+    result.sort(key=lambda x: x["first_time"], reverse=True)
+    return JSONResponse(result)
+
+
 @app.get("/logs/openai/file")
 def logs_openai_file(filename: str):
     """返回 logs_openai 目录下指定文件的内容（仅允许 -req.json 文件）"""
