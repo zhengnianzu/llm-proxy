@@ -275,7 +275,8 @@
         <select class="folder-select" id="folderSelect" onchange="loadFileList()">
             <option value="anthropic_agg">logs_anthropic（聚合）</option>
             <option value="anthropic">logs_anthropic（单文件）</option>
-            <option value="openai">logs_openai</option>
+            <option value="openai_agg">logs_openai（聚合）</option>
+            <option value="openai">logs_openai（单文件）</option>
         </select>
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="10" min="1" />
@@ -331,11 +332,12 @@ async function loadFileList() {
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     activeItem = null;
 
-    if (folder === 'anthropic_agg') {
+    if (folder === 'anthropic_agg' || folder === 'openai_agg') {
         // ---- 聚合模式 ----
-        sidebarTitle.textContent = `logs_anthropic 聚合 (≥${min} 条)`;
+        const apiFolder = folder === 'anthropic_agg' ? 'anthropic' : 'openai';
+        sidebarTitle.textContent = `logs_${apiFolder} 聚合 (≥${min} 条)`;
         try {
-            const res = await fetch(`/logs/anthropic/aggregate?min_messages=${min}`);
+            const res = await fetch(`/logs/${apiFolder}/aggregate?min_messages=${min}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             aggChains = await res.json();
             if (!aggChains.length) {
@@ -346,8 +348,10 @@ async function loadFileList() {
             aggChains.forEach((chain, idx) => {
                 const el = document.createElement('div');
                 el.className = 'file-item';
-                const q1 = chain.messages?.[0];
+
+                // 提取 Q1 预览
                 let rawText = '';
+                const q1 = chain.messages?.[0];
                 if (q1) {
                     const c = q1.content;
                     if (typeof c === 'string') rawText = c;
@@ -357,11 +361,19 @@ async function loadFileList() {
                     }
                 }
 
-                // 提取时间戳和实际任务内容
-                // Q1 格式: "Sender...\n\n[Wed 2026-03-11 20:28 GMT+8] 实际任务..."
-                // 或:      "[Fri 2026-03-13 06:42 GMT+8] [Subagent Context] ..."
+                // OpenAI: 从 chain_key 提取（去掉 oq: / u: 前缀）
                 let timestamp = '';
                 let taskText = rawText;
+                if (chain.chain_key) {
+                    const keyText = chain.chain_key.replace(/^(oq:|u:)/, '');
+                    if (keyText.startsWith('oq:') || keyText.startsWith('u:')) {
+                        taskText = keyText.slice(3);
+                    } else {
+                        taskText = keyText;
+                    }
+                }
+
+                // Anthropic: 从 rawText 提取时间戳
                 const tsMatch = rawText.match(/\[([^\]]+GMT[^\]]*)\]\s*/);
                 if (tsMatch) {
                     timestamp = tsMatch[1];

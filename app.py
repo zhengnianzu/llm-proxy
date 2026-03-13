@@ -1137,6 +1137,123 @@ def logs_anthropic_aggregate(min_messages: int = 1):
     return JSONResponse(result)
 
 
+@app.get("/logs/openai/aggregate")
+def logs_openai_aggregate(min_messages: int = 1):
+    """
+    扫描 logs_openai 目录下所有 req 文件，按 Origin_query（system 消息中）或首条 user 消息聚合。
+    返回格式与 /logs/anthropic/aggregate 相同。
+    """
+    import re as _re
+    from collections import OrderedDict
+
+    ts_pat = _re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+)-req\.json$")
+
+    def get_oai_chain_key(msgs):
+        """用 system 消息里的 Origin_query 作为链 key，没有则用第一条 user 消息完整内容"""
+        for m in msgs:
+            if m.get("role") == "system":
+                c = str(m.get("content", ""))
+                match = _re.search(r"# Origin_query\s*\n+(.*?)(\n---|\Z)", c, _re.DOTALL)
+                if match:
+                    return "oq:" + match.group(1).strip()
+        for m in msgs:
+            if m.get("role") == "user":
+                c = m.get("content", "")
+                if isinstance(c, list):
+                    c = "|".join(b.get("text", "") for b in c if isinstance(b, dict))
+                return "u:" + str(c)
+        return str(msgs[0].get("content", ""))
+
+    def extract_oai_res_content(res_path):
+        """从 OpenAI res.json 提取 assistant 消息（含 tool_calls）"""
+        if not os.path.isfile(res_path):
+            return None
+        try:
+            with open(res_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            msg = d.get("json", {}).get("choices", [{}])[0].get("message")
+            if msg and msg.get("role") == "assistant":
+                return msg
+        except Exception:
+            pass
+        return None
+
+    req_files = sorted(glob.glob(os.path.join(LOGS_OPENAI, "*-req.json")))
+    entries = []
+    for path in req_files:
+        m = ts_pat.search(os.path.basename(path))
+        if not m:
+            continue
+        ts_str = m.group(1)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        msgs = data.get("messages")
+        if not isinstance(msgs, list) or len(msgs) < min_messages:
+            continue
+        res_path = path.replace("-req.json", "-res.json")
+        entries.append({
+            "ts": ts_str,
+            "path": path,
+            "res_path": res_path,
+            "messages": msgs,
+            "model": data.get("model", ""),
+        })
+
+    if not entries:
+        return JSONResponse([])
+
+    chains_map = OrderedDict()
+    for entry in entries:
+        msgs = entry["messages"]
+        key = get_oai_chain_key(msgs)
+        if key not in chains_map:
+            chains_map[key] = {
+                "chain_id": len(chains_map),
+                "chain_key": key,
+                "messages": msgs,
+                "entries": [entry],
+                "model": entry["model"],
+            }
+        else:
+            chain = chains_map[key]
+            if len(msgs) > len(chain["messages"]):
+                chain["messages"] = msgs
+            chain["entries"].append(entry)
+
+    result = []
+    for chain in chains_map.values():
+        first_ts = chain["entries"][0]["ts"]
+        last_ts = chain["entries"][-1]["ts"]
+        # 取消息最多的 entry 对应的 res.json
+        best_entry = max(chain["entries"], key=lambda e: len(e["messages"]))
+        res_msg = extract_oai_res_content(best_entry["res_path"])
+
+        full_messages = list(chain["messages"])
+        if res_msg is not None:
+            full_messages.append({
+                **res_msg,
+                "_from_res": True,
+                "_source_file": os.path.basename(best_entry["res_path"]),
+            })
+
+        result.append({
+            "chain_id": chain["chain_id"],
+            "first_time": first_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
+            "last_time": last_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
+            "file_count": len(chain["entries"]),
+            "message_count": len(full_messages),
+            "model": chain["model"],
+            "messages": full_messages,
+            "chain_key": chain["chain_key"],
+        })
+
+    result.sort(key=lambda x: x["first_time"], reverse=True)
+    return JSONResponse(result)
+
+
 @app.get("/logs/openai/file")
 def logs_openai_file(filename: str):
     """返回 logs_openai 目录下指定文件的内容（仅允许 -req.json 文件）"""
