@@ -500,8 +500,10 @@ function renderMessages(data, filename) {
             // OpenAI tool result message
             blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
         } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-            // OpenAI assistant with tool_calls (content may be null or string)
-            if (msg.content) {
+            // OpenAI assistant with tool_calls (content may be null, string, or block array)
+            if (Array.isArray(msg.content)) {
+                blocks.push(...msg.content);
+            } else if (msg.content) {
                 blocks.push({ type: 'text', text: msg.content });
             }
             msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
