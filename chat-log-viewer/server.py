@@ -10,7 +10,8 @@ trajectory for each unique first-user-message).
 
 import argparse
 import json
-import os
+import logging
+import re
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -20,6 +21,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+logger = logging.getLogger("chat-log-viewer")
 
 # ---------------------------------------------------------------------------
 # CLI args (parsed before app creation so we can validate early)
@@ -45,6 +48,9 @@ app = FastAPI(title="Chat Log Viewer")
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# In-memory cache: populated at startup and on /api/refresh
+_cache: List[Dict] = []
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,7 +66,14 @@ def extract_messages(data: Any) -> Optional[List[dict]]:
 
 
 def get_first_user_text(messages: List[dict]) -> str:
-    """Return the full text of the first user message."""
+    """Return the cleaned text of the first user message.
+
+    Strips leading system-injected tag blocks such as:
+      [Mon Mar 17 2025 10:30:00 GMT+0800 (China Standard Time)]
+      [Subagent Context]
+      ... etc.
+    Matches the stripping logic used in chat-viewer.html.
+    """
     for msg in messages:
         if msg.get("role") != "user":
             continue
@@ -75,10 +88,16 @@ def get_first_user_text(messages: List[dict]) -> str:
             text = "\n".join(p for p in parts if p)
         else:
             text = str(c)
-        # strip timestamp / subagent prefix that Claude Code injects
-        import re
-        text = re.sub(r"^\[[^\]]+GMT[^\]]*\]\s*", "", text)
-        text = re.sub(r"^\[Subagent Context\]\s*", "", text, flags=re.IGNORECASE)
+
+        # Repeatedly strip any leading [tag] blocks (with surrounding whitespace)
+        # until none remain.  Handles patterns like:
+        #   "[...GMT...]  [Subagent Context] real query"
+        while True:
+            stripped = re.sub(r"^\s*\[[^\]]*\]\s*", "", text)
+            if stripped == text:
+                break
+            text = stripped
+
         return text.strip()
     return ""
 
@@ -137,9 +156,17 @@ def index():
 
 @app.get("/api/list")
 def api_list():
-    """Return deduplicated file list."""
-    items = scan_directory()
-    return JSONResponse(items)
+    """Return deduplicated file list from cache."""
+    return JSONResponse(_cache)
+
+
+@app.get("/api/refresh")
+def api_refresh():
+    """Re-scan directory and update cache."""
+    global _cache
+    _cache = scan_directory()
+    logger.info(f"Refreshed: {len(_cache)} conversations")
+    return JSONResponse({"count": len(_cache)})
 
 
 @app.get("/api/file")
@@ -169,5 +196,7 @@ def api_file(rel_path: str = Query(..., description="Relative path from root dir
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print(f"[chat-log-viewer] Scanning: {ROOT_DIR}")
+    _cache = scan_directory()
+    print(f"[chat-log-viewer] Loaded {len(_cache)} conversations")
     print(f"[chat-log-viewer] Listening on http://{args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port)

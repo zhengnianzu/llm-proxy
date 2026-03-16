@@ -157,12 +157,32 @@
         }
         .reasoning-summary:hover { background: rgba(124,58,237,.06); }
         .reasoning-chevron { font-size: 10px; transition: transform .15s; }
+        .reasoning-chevron.collapsed { transform: rotate(-90deg); }
         .reasoning-body {
             padding: 10px 14px; font-size: 13px; color: #4c1d95;
             white-space: pre-wrap; border-top: 1px solid #e9d5ff;
             max-height: 380px; overflow-y: auto; background: #fff;
         }
         .reasoning-body.collapsed { display: none; }
+
+        /* — system prompt — */
+        .block.system-prompt { background: #f8fafc; border: 1px solid #cbd5e1; }
+        .system-summary {
+            display: flex; align-items: center; gap: 8px;
+            padding: 7px 12px; cursor: pointer; user-select: none;
+            font-size: 12px; color: #475569; font-weight: 600;
+            background: #f1f5f9;
+        }
+        .system-summary:hover { background: #e2e8f0; }
+        .system-chevron { font-size: 10px; transition: transform .15s; }
+        .system-chevron.collapsed { transform: rotate(-90deg); }
+        .system-body {
+            padding: 10px 14px; font-size: 13px; color: #334155;
+            white-space: pre-wrap; border-top: 1px solid #cbd5e1;
+            max-height: 300px; overflow-y: auto; background: #fff;
+        }
+        .system-body.collapsed { display: none; }
+        .system-char-count { font-size: 11px; color: #94a3b8; font-weight: 400; }
 
         /* — tool_use — */
         .block.tool-use { background: #fff7ed; border: 1px solid #fed7aa; }
@@ -236,7 +256,7 @@
 <div class="header">
     <h1>💬 Chat Log Viewer</h1>
     <div class="header-right">
-        <button class="btn btn-green" onclick="loadList()">🔄 刷新</button>
+        <button class="btn btn-green" onclick="refreshList()">🔄 刷新</button>
         <span class="stats-chip" id="statsChip" style="display:none"></span>
     </div>
 </div>
@@ -292,6 +312,17 @@ async function loadList() {
         renderSidebar(allItems);
     } catch(e) {
         fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${esc(e.message)}</div>`;
+    }
+}
+
+async function refreshList() {
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>重新扫描中…</div>';
+    activeEl = null;
+    try {
+        await fetch('/api/refresh');
+        await loadList();
+    } catch(e) {
+        fileListEl.innerHTML = `<div class="sidebar-tip">刷新失败：${esc(e.message)}</div>`;
     }
 }
 
@@ -387,6 +418,13 @@ function renderMessages(data, relPath, label) {
 
     messages.forEach(msg => {
         const role = msg.role || 'unknown';
+
+        // system prompt: render as standalone collapsible, not a chat bubble
+        if (role === 'system') {
+            chatPanel.appendChild(renderSystemPrompt(msg.content));
+            return;
+        }
+
         let blocks = [];
 
         if (role === 'tool') {
@@ -463,7 +501,7 @@ function renderReasoningBlock(text) {
     const summary = document.createElement('div');
     summary.className = 'reasoning-summary';
     const chevron = document.createElement('span');
-    chevron.className = 'reasoning-chevron';
+    chevron.className = 'reasoning-chevron';  // 默认展开，无 collapsed
     chevron.textContent = '▼';
     const lbl = document.createElement('span');
     lbl.textContent = '🧠 思考过程';
@@ -473,12 +511,46 @@ function renderReasoningBlock(text) {
     summary.append(chevron, lbl, cnt);
 
     const body = document.createElement('div');
-    body.className = 'reasoning-body collapsed';
+    body.className = 'reasoning-body';  // 默认展开
     body.textContent = text;
 
     summary.addEventListener('click', () => {
         const c = body.classList.toggle('collapsed');
-        chevron.style.transform = c ? 'rotate(-90deg)' : '';
+        chevron.classList.toggle('collapsed', c);
+    });
+
+    el.append(summary, body);
+    return el;
+}
+
+function renderSystemPrompt(content) {
+    const text = typeof content === 'string'
+        ? content
+        : JSON.stringify(content, null, 2);
+
+    const el = document.createElement('div');
+    el.className = 'block system-prompt';
+    el.style.marginBottom = '16px';
+
+    const summary = document.createElement('div');
+    summary.className = 'system-summary';
+    const chevron = document.createElement('span');
+    chevron.className = 'system-chevron collapsed';  // 默认折叠
+    chevron.textContent = '▼';
+    const lbl = document.createElement('span');
+    lbl.textContent = '⚙️ System Prompt';
+    const cnt = document.createElement('span');
+    cnt.className = 'system-char-count';
+    cnt.textContent = `(${text.length} 字符)`;
+    summary.append(chevron, lbl, cnt);
+
+    const body = document.createElement('div');
+    body.className = 'system-body collapsed';  // 默认折叠
+    body.textContent = text;
+
+    summary.addEventListener('click', () => {
+        const c = body.classList.toggle('collapsed');
+        chevron.classList.toggle('collapsed', c);
     });
 
     el.append(summary, body);
