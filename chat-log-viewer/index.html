@@ -582,7 +582,12 @@ function renderMessages(data, filename) {
             blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
         } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
             // OpenAI assistant with tool_calls
-            if (msg.content) blocks.push({ type: 'text', text: msg.content });
+            // content 可能是 string，也可能是 Anthropic 风格的 block 数组
+            if (Array.isArray(msg.content)) {
+                blocks.push(...msg.content);
+            } else if (msg.content) {
+                blocks.push({ type: 'text', text: msg.content });
+            }
             msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
         } else if (Array.isArray(msg.content)) {
             blocks = msg.content;
