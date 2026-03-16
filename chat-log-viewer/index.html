@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Log Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f7f7f8;
+            color: #2d3748;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ========= Header ========= */
+        .header {
+            background: #fff;
+            padding: 10px 18px;
+            border-bottom: 1px solid #e5e7eb;
+            box-shadow: 0 1px 3px rgba(0,0,0,.05);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+            gap: 12px;
+        }
+        .header h1 { font-size: 16px; font-weight: 600; color: #1a202c; white-space: nowrap; }
+        .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .label { font-size: 13px; color: #6b7280; white-space: nowrap; }
+        .min-msg-input {
+            width: 60px; padding: 5px 8px;
+            border: 1px solid #d1d5db; border-radius: 6px;
+            font-size: 13px; text-align: center;
+        }
+        .btn {
+            padding: 7px 14px; border: none; border-radius: 7px;
+            cursor: pointer; font-size: 13px; font-weight: 500;
+            transition: background .18s; white-space: nowrap;
+        }
+        .btn-green  { background: #10a37f; color: #fff; }
+        .btn-green:hover { background: #0d8c6e; }
+        .btn-blue   { background: #3b82f6; color: #fff; }
+        .btn-blue:hover { background: #2563eb; }
+
+        .folder-path {
+            font-size: 12px; color: #6b7280; max-width: 280px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+
+        /* ========= Layout ========= */
+        .main { display: flex; flex: 1; overflow: hidden; }
+
+        /* ========= Sidebar ========= */
+        .sidebar {
+            width: 280px; flex-shrink: 0;
+            background: #fff;
+            border-right: 1px solid #e5e7eb;
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        .sidebar-toolbar {
+            padding: 8px 12px;
+            border-bottom: 1px solid #f3f4f6;
+            display: flex; align-items: center; gap: 6px;
+            flex-shrink: 0;
+        }
+        .search-input {
+            flex: 1; padding: 5px 9px;
+            border: 1px solid #d1d5db; border-radius: 6px;
+            font-size: 12px; outline: none;
+        }
+        .search-input:focus { border-color: #10a37f; }
+        .sidebar-hdr {
+            padding: 8px 14px;
+            font-size: 11px; font-weight: 600; color: #9ca3af;
+            text-transform: uppercase; letter-spacing: .06em;
+            border-bottom: 1px solid #f3f4f6;
+            flex-shrink: 0;
+        }
+        .file-list { flex: 1; overflow-y: auto; }
+        .file-list::-webkit-scrollbar { width: 4px; }
+        .file-list::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+
+        /* folder group */
+        .folder-group {}
+        .folder-group-hdr {
+            padding: 6px 12px 4px;
+            font-size: 10px; font-weight: 700; color: #9ca3af;
+            text-transform: uppercase; letter-spacing: .05em;
+            background: #f9fafb;
+            border-bottom: 1px solid #f3f4f6;
+            display: flex; align-items: center; gap: 4px;
+            cursor: pointer; user-select: none;
+        }
+        .folder-group-hdr:hover { background: #f3f4f6; }
+        .folder-group-hdr .chevron { font-size: 8px; transition: transform .15s; }
+        .folder-group-hdr.collapsed .chevron { transform: rotate(-90deg); }
+        .folder-group-body {}
+        .folder-group-body.hidden { display: none; }
+
+        .file-item {
+            padding: 9px 14px; cursor: pointer;
+            border-bottom: 1px solid #f3f4f6;
+            border-left: 3px solid transparent;
+            transition: background .13s;
+        }
+        .file-item:hover { background: #f9fafb; }
+        .file-item.active { background: #f0fdf4; border-left-color: #10a37f; }
+        .file-item-name { font-size: 12px; color: #374151; word-break: break-all; line-height: 1.4; }
+        .file-item-meta { margin-top: 2px; font-size: 11px; color: #9ca3af; }
+        .file-item-preview { margin-top: 2px; font-size: 11px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .sidebar-tip { padding: 20px 14px; font-size: 13px; color: #9ca3af; text-align: center; }
+
+        /* ========= Chat panel ========= */
+        .chat-panel { flex: 1; overflow-y: auto; padding: 24px 28px; background: #f7f7f8; }
+        .chat-panel::-webkit-scrollbar { width: 6px; }
+        .chat-panel::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 3px; }
+
+        .empty-state {
+            display: flex; flex-direction: column; align-items: center;
+            justify-content: center; height: 100%; color: #9ca3af; gap: 12px;
+        }
+        .empty-state svg { width: 52px; height: 52px; opacity: .22; stroke: #9ca3af; }
+        .empty-state p { font-size: 15px; }
+
+        /* ========= Metadata bar ========= */
+        .metadata {
+            background: #fff; border-radius: 10px;
+            padding: 14px 18px; margin-bottom: 22px;
+            font-size: 13px; color: #6b7280;
+            border: 1px solid #e5e7eb;
+        }
+        .metadata-title { font-weight: 600; margin-bottom: 8px; color: #1a202c; font-size: 14px; }
+        .metadata-item { display: flex; gap: 8px; padding: 2px 0; }
+        .metadata-item strong { color: #374151; min-width: 100px; }
+
+        /* ========= Message row ========= */
+        .msg-row { display: flex; margin-bottom: 18px; gap: 10px; }
+        .msg-row.user     { justify-content: flex-start; }
+        .msg-row.assistant{ justify-content: flex-end; }
+        .msg-row.user     .msg-bubble-col { align-items: flex-start; }
+        .msg-row.assistant .msg-bubble-col { align-items: flex-end; }
+
+        .msg-bubble-col { display: flex; flex-direction: column; gap: 6px; max-width: 72%; }
+
+        .avatar {
+            width: 30px; height: 30px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 14px; flex-shrink: 0; margin-top: 2px;
+        }
+        .avatar.user      { background: linear-gradient(135deg,#667eea,#764ba2); }
+        .avatar.assistant { background: linear-gradient(135deg,#10a37f,#0d8c6e); }
+
+        /* ========= Block cards ========= */
+        .block {
+            border-radius: 10px; overflow: hidden;
+            font-size: 14px; line-height: 1.65; word-break: break-word;
+        }
+
+        /* — text block — */
+        .block.text {
+            background: #dbeafe;
+            border: 1px solid #bfdbfe;
+            padding: 12px 16px;
+            white-space: pre-wrap;
+        }
+        .msg-row.assistant .block.text {
+            background: #dcfce7;
+            border-color: #bbf7d0;
+        }
+
+        /* — reasoning block — */
+        .block.reasoning {
+            background: #faf5ff;
+            border: 1px solid #e9d5ff;
+        }
+        .reasoning-summary {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 14px; cursor: pointer;
+            user-select: none; font-size: 13px;
+            color: #7c3aed; font-weight: 500;
+            background: rgba(0,0,0,.02);
+        }
+        .reasoning-summary:hover { background: rgba(124,58,237,.06); }
+        .reasoning-chevron { font-size: 10px; transition: transform .15s; }
+        .reasoning-body {
+            padding: 10px 14px;
+            font-size: 13px; color: #4c1d95;
+            white-space: pre-wrap;
+            border-top: 1px solid #e9d5ff;
+            max-height: 380px; overflow-y: auto;
+            background: #fff;
+        }
+        .reasoning-body.collapsed { display: none; }
+
+        /* — tool_use block — */
+        .block.tool-use {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+        }
+
+        /* — tool_result block — */
+        .block.tool-result {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+        }
+        .block.tool-result.is-error {
+            background: #fff1f2;
+            border-color: #fecdd3;
+        }
+
+        /* — OpenAI tool role — */
+        .block.tool-role {
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
+        }
+
+        /* block header */
+        .block-hdr {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 12px;
+            font-size: 11px; font-weight: 600;
+            border-bottom: 1px solid rgba(0,0,0,.07);
+            color: #92400e; background: rgba(0,0,0,.03);
+        }
+        .block-hdr.tool-role-hdr { color: #166534; }
+        .block-hdr .badge {
+            display: inline-block; padding: 1px 7px;
+            border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .03em;
+        }
+        .badge-tool-use    { background: #fb923c; color: #fff; }
+        .badge-tool-result { background: #f97316; color: #fff; }
+        .badge-tool-role   { background: #22c55e; color: #fff; }
+        .badge-error       { background: #f43f5e; color: #fff; }
+        .block-hdr .tool-name { color: #78350f; font-weight: 700; }
+        .block-hdr .tool-id   { color: #b45309; font-size: 10px; font-family: monospace; }
+
+        .block-body { padding: 10px 14px; }
+
+        .cmd-pre {
+            background: #1e1e2e; color: #cdd6f4;
+            border-radius: 7px; padding: 10px 14px;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            font-size: 12.5px; white-space: pre-wrap; word-break: break-all;
+            margin: 4px 0 0; line-height: 1.6;
+        }
+        .cmd-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500; }
+        .result-pre {
+            background: #fff; border: 1px solid #e5e7eb; border-radius: 7px;
+            padding: 8px 12px; font-family: 'SFMono-Regular', Consolas, monospace;
+            font-size: 12px; white-space: pre-wrap; word-break: break-all;
+            color: #374151; margin-top: 4px; line-height: 1.55;
+            max-height: 260px; overflow-y: auto;
+        }
+        .result-pre.is-error { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+
+        .input-kv { margin-top: 4px; }
+        .input-kv .kv-row { display: flex; gap: 6px; font-size: 12.5px; margin-top: 3px; }
+        .input-kv .kv-key { color: #92400e; font-weight: 600; min-width: 80px; }
+        .input-kv .kv-val { color: #374151; white-space: pre-wrap; word-break: break-all; }
+
+        .error-box {
+            background: #fee2e2; color: #991b1b;
+            padding: 14px 18px; border-radius: 10px;
+            border: 1px solid #fecaca; font-size: 14px; margin-bottom: 16px;
+        }
+        .spinner {
+            display: inline-block; width: 15px; height: 15px;
+            border: 2px solid #d1d5db; border-top-color: #10a37f;
+            border-radius: 50%; animation: spin .6s linear infinite;
+            vertical-align: middle; margin-right: 5px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* progress */
+        .progress-bar-wrap {
+            height: 3px; background: #e5e7eb; flex-shrink: 0; overflow: hidden;
+        }
+        .progress-bar { height: 100%; background: #10a37f; width: 0%; transition: width .2s; }
+
+        /* stats chip */
+        .stats-chip {
+            font-size: 11px; color: #6b7280; padding: 3px 8px;
+            background: #f3f4f6; border-radius: 999px; white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>💬 Chat Log Viewer</h1>
+    <div class="header-right">
+        <button class="btn btn-blue" id="openFolderBtn">📂 打开文件夹</button>
+        <span class="folder-path" id="folderPath">未选择文件夹</span>
+        <span class="label">最少消息数</span>
+        <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
+        <button class="btn btn-green" id="rescanBtn" disabled>🔄 重新扫描</button>
+        <span class="stats-chip" id="statsChip" style="display:none"></span>
+    </div>
+</div>
+
+<div class="progress-bar-wrap"><div class="progress-bar" id="progressBar"></div></div>
+
+<div class="main">
+    <div class="sidebar">
+        <div class="sidebar-toolbar">
+            <input class="search-input" type="text" id="searchInput" placeholder="搜索文件名或预览…" />
+        </div>
+        <div class="sidebar-hdr" id="sidebarHdr">选择文件夹后自动扫描</div>
+        <div class="file-list" id="fileList">
+            <div class="sidebar-tip">
+                点击左上角「打开文件夹」选择包含 JSON 轨迹数据的目录
+            </div>
+        </div>
+    </div>
+
+    <div class="chat-panel" id="chatPanel">
+        <div class="empty-state">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863
+                       9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3
+                       12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+            </svg>
+            <p>从左侧选择一个对话文件</p>
+        </div>
+    </div>
+</div>
+
+<script>
+// ----------------------------------------------------------------
+// State
+// ----------------------------------------------------------------
+let allFiles = [];      // { path, name, dirPath, handle, msgCount, model, preview }
+let filteredFiles = []; // after search + min filter
+let activeItem = null;
+let rootDirHandle = null;
+
+const fileListEl   = document.getElementById('fileList');
+const chatPanel    = document.getElementById('chatPanel');
+const sidebarHdr   = document.getElementById('sidebarHdr');
+const statsChip    = document.getElementById('statsChip');
+const progressBar  = document.getElementById('progressBar');
+const searchInput  = document.getElementById('searchInput');
+const rescanBtn    = document.getElementById('rescanBtn');
+
+// ----------------------------------------------------------------
+// Open folder
+// ----------------------------------------------------------------
+document.getElementById('openFolderBtn').addEventListener('click', async () => {
+    if (!window.showDirectoryPicker) {
+        alert('您的浏览器不支持 File System Access API。\n请使用 Chrome / Edge 最新版。');
+        return;
+    }
+    try {
+        rootDirHandle = await window.showDirectoryPicker({ mode: 'read' });
+        document.getElementById('folderPath').textContent = rootDirHandle.name;
+        rescanBtn.disabled = false;
+        await scanFolder();
+    } catch (e) {
+        if (e.name !== 'AbortError') alert('打开文件夹失败：' + e.message);
+    }
+});
+
+rescanBtn.addEventListener('click', () => {
+    if (rootDirHandle) scanFolder();
+});
+
+// ----------------------------------------------------------------
+// Recursive scan
+// ----------------------------------------------------------------
+async function scanFolder() {
+    allFiles = [];
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>扫描中…</div>';
+    progressBar.style.width = '0%';
+
+    // collect all json file handles first
+    const handles = [];
+    await collectHandles(rootDirHandle, '', handles);
+
+    const total = handles.length;
+    let done = 0;
+
+    for (const { handle, relPath, dirPath } of handles) {
+        try {
+            const file = await handle.getFile();
+            const text = await file.text();
+            const data = JSON.parse(text);
+            const messages = extractMessages(data);
+            if (messages !== null) {
+                const model = extractModel(data);
+                const preview = extractPreview(messages);
+                allFiles.push({
+                    path: relPath,
+                    name: handle.name,
+                    dirPath,
+                    handle,
+                    msgCount: messages.length,
+                    model,
+                    preview,
+                    data,
+                });
+            }
+        } catch (e) {
+            // skip non-JSON or parse errors
+        }
+        done++;
+        progressBar.style.width = Math.round(done / total * 100) + '%';
+    }
+
+    progressBar.style.width = '100%';
+    setTimeout(() => { progressBar.style.width = '0%'; }, 600);
+
+    applyFilter();
+}
+
+async function collectHandles(dirHandle, prefix, out) {
+    for await (const [name, handle] of dirHandle.entries()) {
+        const rel = prefix ? `${prefix}/${name}` : name;
+        if (handle.kind === 'file' && name.endsWith('.json')) {
+            const dir = prefix || '/';
+            out.push({ handle, relPath: rel, dirPath: dir });
+        } else if (handle.kind === 'directory') {
+            await collectHandles(handle, rel, out);
+        }
+    }
+}
+
+function extractMessages(data) {
+    if (data && Array.isArray(data.messages)) return data.messages;
+    if (Array.isArray(data)) {
+        // if it's an array of messages itself
+        if (data.length && data[0] && data[0].role) return data;
+    }
+    return null;
+}
+
+function extractModel(data) {
+    return data.model || data.request?.model || null;
+}
+
+function extractPreview(messages) {
+    const first = messages[0];
+    if (!first) return '';
+    const c = first.content;
+    let raw = '';
+    if (typeof c === 'string') raw = c;
+    else if (Array.isArray(c)) {
+        const tb = c.find(b => b.type === 'text');
+        raw = tb?.text || '';
+    }
+    // strip timestamp prefix like [Mon Jan 01 ...]
+    raw = raw.replace(/^\[[^\]]+GMT[^\]]*\]\s*/, '')
+             .replace(/^\[Subagent Context\]\s*/i, '')
+             .trim();
+    return raw.slice(0, 90);
+}
+
+// ----------------------------------------------------------------
+// Filter + render sidebar
+// ----------------------------------------------------------------
+searchInput.addEventListener('input', applyFilter);
+document.getElementById('minMessages').addEventListener('input', applyFilter);
+
+function applyFilter() {
+    const min = parseInt(document.getElementById('minMessages').value) || 1;
+    const q = searchInput.value.trim().toLowerCase();
+
+    filteredFiles = allFiles.filter(f => {
+        if (f.msgCount < min) return false;
+        if (q && !f.path.toLowerCase().includes(q) && !f.preview.toLowerCase().includes(q)) return false;
+        return true;
+    });
+
+    renderSidebar();
+}
+
+function renderSidebar() {
+    const total = allFiles.length;
+    const shown = filteredFiles.length;
+
+    sidebarHdr.textContent = rootDirHandle ? rootDirHandle.name : '文件列表';
+    statsChip.style.display = 'inline';
+    statsChip.textContent = `${shown} / ${total} 个文件`;
+
+    if (!filteredFiles.length) {
+        fileListEl.innerHTML = `<div class="sidebar-tip">${total === 0 ? '未找到含 messages 的 JSON 文件' : '无匹配文件'}</div>`;
+        return;
+    }
+
+    // group by dirPath
+    const groups = {};
+    filteredFiles.forEach(f => {
+        const g = f.dirPath;
+        if (!groups[g]) groups[g] = [];
+        groups[g].push(f);
+    });
+
+    fileListEl.innerHTML = '';
+
+    Object.entries(groups).sort(([a],[b]) => a.localeCompare(b)).forEach(([dir, files]) => {
+        const group = document.createElement('div');
+        group.className = 'folder-group';
+
+        const hdr = document.createElement('div');
+        hdr.className = 'folder-group-hdr';
+        hdr.innerHTML = `<span class="chevron">▼</span> 📁 ${esc(dir)} <span style="color:#b5bec8;font-weight:400">(${files.length})</span>`;
+        hdr.addEventListener('click', () => {
+            hdr.classList.toggle('collapsed');
+            body.classList.toggle('hidden');
+        });
+        group.appendChild(hdr);
+
+        const body = document.createElement('div');
+        body.className = 'folder-group-body';
+
+        files.forEach(f => {
+            const el = document.createElement('div');
+            el.className = 'file-item';
+            el.innerHTML = `
+                <div class="file-item-name">${esc(f.name)}</div>
+                <div class="file-item-meta">${f.msgCount} 条${f.model ? ' · ' + esc(f.model) : ''}</div>
+                ${f.preview ? `<div class="file-item-preview">${esc(f.preview)}</div>` : ''}
+            `;
+            el.addEventListener('click', () => selectFile(f, el));
+            body.appendChild(el);
+        });
+
+        group.appendChild(body);
+        fileListEl.appendChild(group);
+    });
+}
+
+// ----------------------------------------------------------------
+// Select & render file
+// ----------------------------------------------------------------
+async function selectFile(f, el) {
+    if (activeItem) activeItem.classList.remove('active');
+    el.classList.add('active');
+    activeItem = el;
+
+    renderMessages(f.data, f.path);
+}
+
+// ----------------------------------------------------------------
+// Render messages
+// ----------------------------------------------------------------
+function renderMessages(data, filename) {
+    chatPanel.innerHTML = '';
+    const messages = extractMessages(data);
+    if (!messages) { showError('未找到 messages 字段'); return; }
+    if (!messages.length) { showError('messages 为空'); return; }
+
+    // Metadata bar
+    const meta = document.createElement('div');
+    meta.className = 'metadata';
+    const model = extractModel(data);
+    const temp  = data.temperature ?? data.request?.temperature;
+    const maxTok = data.max_tokens ?? data.request?.max_tokens;
+    meta.innerHTML = `
+        <div class="metadata-title">📋 对话信息</div>
+        ${model ? `<div class="metadata-item"><strong>模型</strong><span>${esc(model)}</span></div>` : ''}
+        ${temp !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${temp}</span></div>` : ''}
+        ${maxTok ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${maxTok}</span></div>` : ''}
+        <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
+        <div class="metadata-item"><strong>文件路径</strong><span style="font-size:12px;font-family:monospace">${esc(filename)}</span></div>
+    `;
+    chatPanel.appendChild(meta);
+
+    messages.forEach(msg => {
+        const role = msg.role || 'unknown';
+
+        // Normalise content to blocks array
+        let blocks = [];
+
+        if (role === 'tool') {
+            // OpenAI tool result message
+            blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
+        } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+            // OpenAI assistant with tool_calls
+            if (msg.content) blocks.push({ type: 'text', text: msg.content });
+            msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
+        } else if (Array.isArray(msg.content)) {
+            blocks = msg.content;
+        } else {
+            blocks = [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
+        }
+
+        // Inject top-level reasoning_content as a reasoning block (OpenAI o-series style)
+        if (msg.reasoning_content) {
+            blocks = [{ type: 'thinking', thinking: msg.reasoning_content }, ...blocks];
+        }
+
+        const displayRole = role === 'tool' ? 'user' : role;
+
+        const row = document.createElement('div');
+        row.className = `msg-row ${displayRole}`;
+
+        const avatar = document.createElement('div');
+        avatar.className = `avatar ${displayRole}`;
+        avatar.textContent = displayRole === 'user' ? '👤' : displayRole === 'assistant' ? '🤖' : '⚙️';
+
+        const col = document.createElement('div');
+        col.className = 'msg-bubble-col';
+
+        blocks.forEach(block => {
+            const el = renderBlock(block);
+            if (el) col.appendChild(el);
+        });
+
+        if (displayRole === 'user') {
+            row.appendChild(avatar);
+            row.appendChild(col);
+        } else {
+            row.appendChild(col);
+            row.appendChild(avatar);
+        }
+        chatPanel.appendChild(row);
+    });
+}
+
+// ----------------------------------------------------------------
+// Block renderers
+// ----------------------------------------------------------------
+function renderBlock(block) {
+    switch (block.type) {
+        case 'text':             return renderTextBlock(block);
+        case 'thinking':         return renderReasoningBlock(block.thinking || block.text || '');
+        case 'tool_use':         return renderToolUseBlock(block);
+        case 'tool_result':      return renderToolResultBlock(block);
+        case '_oai_tool_call':   return renderOaiToolCallBlock(block);
+        case '_oai_tool_result': return renderOaiToolResultBlock(block);
+        default:                 return renderFallbackBlock(block);
+    }
+}
+
+function renderTextBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block text';
+    el.textContent = block.text || '';
+    return el;
+}
+
+function renderReasoningBlock(text) {
+    if (!text) return null;
+    const el = document.createElement('div');
+    el.className = 'block reasoning';
+
+    const summary = document.createElement('div');
+    summary.className = 'reasoning-summary';
+
+    const chevronEl = document.createElement('span');
+    chevronEl.className = 'reasoning-chevron';
+    chevronEl.textContent = '▼';
+    summary.appendChild(chevronEl);
+
+    const labelEl = document.createElement('span');
+    labelEl.textContent = '🧠 思考过程';
+    summary.appendChild(labelEl);
+
+    const charCount = document.createElement('span');
+    charCount.style.cssText = 'font-size:11px;color:#a78bfa;font-weight:400';
+    charCount.textContent = `(${text.length} 字符)`;
+    summary.appendChild(charCount);
+
+    const body = document.createElement('div');
+    body.className = 'reasoning-body collapsed';
+    body.textContent = text;
+
+    summary.addEventListener('click', () => {
+        const collapsed = body.classList.toggle('collapsed');
+        chevronEl.style.transform = collapsed ? 'rotate(-90deg)' : '';
+    });
+
+    el.appendChild(summary);
+    el.appendChild(body);
+    return el;
+}
+
+function renderToolUseBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block tool-use';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge badge-tool-use">tool_use</span>
+        <span class="tool-name">${esc(block.name || '')}</span>
+        <span class="tool-id">${esc(block.id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    const input = block.input || {};
+
+    if (input.command !== undefined) {
+        const lbl = document.createElement('div');
+        lbl.className = 'cmd-label';
+        lbl.textContent = '$ command';
+        const pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = input.command;
+        body.appendChild(lbl);
+        body.appendChild(pre);
+        const others = Object.entries(input).filter(([k]) => k !== 'command');
+        if (others.length) body.appendChild(renderKV(others));
+    } else if (Object.keys(input).length) {
+        body.appendChild(renderKV(Object.entries(input)));
+    } else {
+        body.textContent = '(no input)';
+    }
+    el.appendChild(body);
+    return el;
+}
+
+function renderToolResultBlock(block) {
+    const isError = block.is_error;
+    const el = document.createElement('div');
+    el.className = `block tool-result${isError ? ' is-error' : ''}`;
+
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge ${isError ? 'badge-error' : 'badge-tool-result'}">${isError ? 'error' : 'tool_result'}</span>
+        <span class="tool-id">${esc(block.tool_use_id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    const rawContent = block.content;
+    const text = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent, null, 2);
+    const pre = document.createElement('pre');
+    pre.className = `result-pre${isError ? ' is-error' : ''}`;
+    pre.textContent = text || '(no output)';
+    body.appendChild(pre);
+    el.appendChild(body);
+    return el;
+}
+
+function renderOaiToolCallBlock(block) {
+    const tc = block.tool_call || {};
+    const fn = tc.function || {};
+    const el = document.createElement('div');
+    el.className = 'block tool-use';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge badge-tool-use">tool_call</span>
+        <span class="tool-name">${esc(fn.name || '')}</span>
+        <span class="tool-id">${esc(tc.id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+
+    let parsed = null;
+    try { parsed = JSON.parse(fn.arguments); } catch(e) {}
+
+    if (parsed && parsed.command !== undefined) {
+        const lbl = document.createElement('div');
+        lbl.className = 'cmd-label';
+        lbl.textContent = '$ command';
+        const pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = parsed.command;
+        body.appendChild(lbl);
+        body.appendChild(pre);
+        const others = Object.entries(parsed).filter(([k]) => k !== 'command');
+        if (others.length) body.appendChild(renderKV(others));
+    } else if (parsed && typeof parsed === 'object') {
+        body.appendChild(renderKV(Object.entries(parsed)));
+    } else {
+        let args = fn.arguments || '';
+        try { args = JSON.stringify(JSON.parse(args), null, 2); } catch(e) {}
+        const pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = args;
+        body.appendChild(pre);
+    }
+    el.appendChild(body);
+    return el;
+}
+
+function renderOaiToolResultBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block tool-role';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr tool-role-hdr';
+    hdr.innerHTML = `
+        <span class="badge badge-tool-role">tool_result</span>
+        <span class="tool-id">${esc(block.tool_call_id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    const pre = document.createElement('pre');
+    pre.className = 'result-pre';
+    pre.textContent = typeof block.content === 'string'
+        ? block.content
+        : JSON.stringify(block.content, null, 2);
+    body.appendChild(pre);
+    el.appendChild(body);
+    return el;
+}
+
+function renderFallbackBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block text';
+    el.textContent = JSON.stringify(block, null, 2);
+    return el;
+}
+
+// ----------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------
+function renderKV(entries) {
+    const wrap = document.createElement('div');
+    wrap.className = 'input-kv';
+    entries.forEach(([k, v]) => {
+        const row = document.createElement('div');
+        row.className = 'kv-row';
+        const keyEl = document.createElement('span');
+        keyEl.className = 'kv-key';
+        keyEl.textContent = k + ':';
+        const valEl = document.createElement('span');
+        valEl.className = 'kv-val';
+        valEl.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+        row.appendChild(keyEl);
+        row.appendChild(valEl);
+        wrap.appendChild(row);
+    });
+    return wrap;
+}
+
+function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showError(msg) {
+    chatPanel.innerHTML = `<div class="error-box"><strong>错误：</strong>${esc(msg)}</div>`;
+}
+</script>
+</body>
+</html>
