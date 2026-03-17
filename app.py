@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, AsyncIterator
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from print_stats_summary import statistic_tokens
+from auth import validate_api_key
 
 load_dotenv(override=True)
 
@@ -245,6 +246,7 @@ def _should_skip_session_logging(body: Dict[str, Any]) -> bool:
 @app.post("/v1/messages")
 async def anthropic_messages(req: Request):
     """anthropic透传"""
+    await validate_api_key(req)
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -550,6 +552,7 @@ async def openai_chat_completions(req: Request):
       - non-stream: upstream JSON pass-through
       - stream: upstream OpenAI SSE pass-through
     """
+    await validate_api_key(req)
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
