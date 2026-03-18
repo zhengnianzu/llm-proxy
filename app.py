@@ -338,7 +338,7 @@ async def anthropic_messages(req: Request):
                         logging.warning(f"Attempt {attempt} upstream error (anthropic non-stream): {e}")
 
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(1 * (2 ** min(attempt, 4)))
+                        await asyncio.sleep(0.5 )
                         x_auth_token = await get_x_auth_token(req)
                         upstream_headers = build_upstream_headers(x_auth_token, model)
         except Exception as e:
@@ -401,7 +401,7 @@ async def anthropic_messages(req: Request):
                                 logging.warning(
                                     f"{attempt} retryable response (anthropic stream): {r.status_code} {last_retry_err_text}")
                                 if attempt < MAX_RETRIES - 1:
-                                    await asyncio.sleep(1 * (2 ** min(attempt, 4)))
+                                    await asyncio.sleep(0.5 )
                                     retry_token = await get_x_auth_token(req)
                                     retry_headers = build_upstream_headers(retry_token, model)
                                 continue
@@ -646,7 +646,7 @@ async def openai_chat_completions(req: Request):
                         logging.warning(f"Attempt {attempt} upstream error (openai non-stream): {e}")
 
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(1 * (2 ** min(attempt, 4)))
+                    await asyncio.sleep(0.5 )
                     x_auth_token = await get_x_auth_token(req)
                     upstream_headers = build_upstream_headers(x_auth_token, model)
         except Exception as e:
@@ -711,7 +711,7 @@ async def openai_chat_completions(req: Request):
                                 # 关闭连接，准备重试（进行下一次for循环）
                                 if attempt < MAX_RETRIES - 1:
                                     # 指数退避
-                                    await asyncio.sleep(1 * (2 ** min(attempt, 4)))
+                                    await asyncio.sleep(0.5 )
                                     # 重新获取 token（可能已更新）
                                     retry_token = await get_x_auth_token(req)
                                     retry_headers = build_upstream_headers(retry_token, model)
