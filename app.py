@@ -316,42 +316,45 @@ async def anthropic_messages(req: Request):
     _dump_json(req_path, body)
     # ---- non-stream ----
     if not stream:
-        async with httpx.AsyncClient(
-                verify=verify,
-                timeout=httpx.Timeout(500.0),
-                trust_env=TRUST_ENV,
-        ) as client:
-            # 限流状态码重试逻辑：最多重试5次（与 /v1/messages 保持一致，详见 RATE_LIMIT_STATUS_CODES）
-            max_retries = MAX_RETRIES
-            r = None
-            last_retry_response = None
+        r = None
+        last_exception = None
+        success = False
+        try:
+            async with httpx.AsyncClient(
+                    verify=verify,
+                    timeout=httpx.Timeout(500.0),
+                    trust_env=TRUST_ENV,
+            ) as client:
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        r = await client.post(upstream_url, headers=upstream_headers, json=body)
+                        last_exception = None
+                        if not is_rate_limit_status(r.status_code):
+                            success = True
+                            break
+                        logging.warning(f"Attempt {attempt} rate limit (anthropic non-stream): {r.status_code} {r.text}")
+                    except Exception as e:
+                        last_exception = e
+                        logging.warning(f"Attempt {attempt} upstream error (anthropic non-stream): {e}")
 
-            for attempt in range(max_retries):
-                r = await client.post(upstream_url, headers=upstream_headers, json=body)
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(1 * (2 ** min(attempt, 4)))
+                        x_auth_token = await get_x_auth_token(req)
+                        upstream_headers = build_upstream_headers(x_auth_token, model)
+        except Exception as e:
+            last_exception = e
+            logging.error(f"Failed to create httpx client (anthropic non-stream): {e}")
 
-                if not is_rate_limit_status(r.status_code):
-                    # 不是限流错误，直接使用这个响应
-                    break
+        if not success:
+            error_msg = str(last_exception) if last_exception else (f"HTTP {r.status_code}" if r else "unknown")
+            logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
+            _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+            return JSONResponse(
+                status_code=502,
+                content={"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}},
+            )
 
-                # 是限流错误，保存响应用于最后返回
-                last_retry_response = r
-                logging.warning(f"{attempt} retryable response (chat/completions non-stream): {r.status_code} {r.text}")
-                # 如果不是最后一次重试，等待后继续
-                if attempt < max_retries - 1:
-                    # 指数退避：1s, 2s, 4s, 8s
-                    await asyncio.sleep(1 * (2 ** attempt))
-                    # 重新获取 token（可能已更新）
-                    x_auth_token = await get_x_auth_token(req)
-                    upstream_headers = build_upstream_headers(x_auth_token, model)
-
-            # 如果所有重试都是限流错误，使用最后一次的响应
-            if is_rate_limit_status(r.status_code) and last_retry_response is not None:
-                r = last_retry_response
-
-        # 记录上下游响应（非流式）
         _dump_json(res_path, _resp_to_obj(r))
-
-        # ✅ 上游错误透传（状态码+body 原样返回）
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -369,10 +372,9 @@ async def anthropic_messages(req: Request):
                     timeout=httpx.Timeout(500.0),
                     trust_env=TRUST_ENV,
             ) as client:
-                # Rate limit retry logic: max 5 retries (same as /v1/messages streaming)
-                max_retries = MAX_RETRIES
                 last_retry_err_text = None
                 last_retry_status = None
+                last_exception = None
                 retry_headers = upstream_headers
                 retry_token = x_auth_token
                 connection_established = False
@@ -381,131 +383,134 @@ async def anthropic_messages(req: Request):
                 has_valid_content = False
                 content_buffer = ""
 
-                for attempt in range(max_retries):
-                    async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
-                        meta = {
-                            "type": "anthropic_passthrough_sse_meta",
-                            "status_code": r.status_code,
-                            "headers": dict(r.headers),
-                        }
-                        up_chunks.append(meta)
-
-                        if is_rate_limit_status(r.status_code):
-                            # Rate limit error, save error and close connection
-                            err = await r.aread()
-                            last_retry_err_text = err.decode("utf-8", errors="replace")
-                            last_retry_status = r.status_code
-                            up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                            logging.warning(
-                                f"{attempt} retryable response (anthropic stream): {r.status_code} {last_retry_err_text}")
-                            # Close connection and prepare for retry
-                            if attempt < max_retries - 1:
-                                # Exponential backoff
-                                await asyncio.sleep(1 * (2 ** attempt))
-                                # Refresh token (might be updated)
-                                retry_token = await get_x_auth_token(req)
-                                retry_headers = build_upstream_headers(retry_token, model)
-                            continue
-
-                        # Not a rate limit error, continue processing
-                        connection_established = True
-
-                        # Handle other errors (non-406)
-                        if r.status_code >= 400:
-                            err = await r.aread()
-                            err_text = err.decode("utf-8", errors="replace")
-                            up_chunks.append({"type": "error_body", "body": err_text})
-                            # Return Anthropic-formatted error response
-                            error_data = {
-                                "type": "error",
-                                "error": {
-                                    "type": "api_error",
-                                    "message": err_text,
-                                    "status_code": r.status_code
-                                }
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
+                            meta = {
+                                "type": "anthropic_passthrough_sse_meta",
+                                "status_code": r.status_code,
+                                "headers": dict(r.headers),
                             }
+                            up_chunks.append(meta)
 
-                            yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode(
-                                "utf-8")
-                            yield stop_msg
-                            return
-
-                        # Normal case, read stream data
-                        res = r.aiter_lines()
-                        async for line in res:
-                            if not line:
+                            if is_rate_limit_status(r.status_code):
+                                err = await r.aread()
+                                last_retry_err_text = err.decode("utf-8", errors="replace")
+                                last_retry_status = r.status_code
+                                up_chunks.append({"type": "error_body", "body": last_retry_err_text})
+                                logging.warning(
+                                    f"{attempt} retryable response (anthropic stream): {r.status_code} {last_retry_err_text}")
+                                if attempt < MAX_RETRIES - 1:
+                                    await asyncio.sleep(1 * (2 ** min(attempt, 4)))
+                                    retry_token = await get_x_auth_token(req)
+                                    retry_headers = build_upstream_headers(retry_token, model)
                                 continue
 
-                            # Add to chunks log
-                            # up_chunks.append(line)
+                            # Not a rate limit error, continue processing
+                            connection_established = True
 
-                            # Check if it's an SSE event line
-                            if line.startswith("event:"):
-                                event_type = line[6:].strip()  # Remove "event:" prefix
+                            # Handle other errors (non-406)
+                            if r.status_code >= 400:
+                                err = await r.aread()
+                                err_text = err.decode("utf-8", errors="replace")
+                                up_chunks.append({"type": "error_body", "body": err_text})
+                                # Return Anthropic-formatted error response
+                                error_data = {
+                                    "type": "error",
+                                    "error": {
+                                        "type": "api_error",
+                                        "message": err_text,
+                                        "status_code": r.status_code
+                                    }
+                                }
 
-                                # Wait for the corresponding data line
-                                data_line = await res.__anext__()
+                                yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode(
+                                    "utf-8")
+                                yield stop_msg
+                                return
 
-                                if not data_line.startswith("data:"):
+                            # Normal case, read stream data
+                            res = r.aiter_lines()
+                            async for line in res:
+                                if not line:
                                     continue
 
-                                data_part = data_line[5:].strip()  # Remove "data:" prefix
-                                up_chunks.append(json.loads(data_part))
-                                # Handle different event types
-                                if event_type == "ping":
-                                    # Just forward pings
-                                    yield f"event: ping\ndata: {data_part}\n\n".encode("utf-8")
-                                    continue
+                                # Add to chunks log
+                                # up_chunks.append(line)
 
-                                if event_type == "message_stop":
-                                    # Forward message_stop event
-                                    yield stop_msg
-                                    return
+                                # Check if it's an SSE event line
+                                if line.startswith("event:"):
+                                    event_type = line[6:].strip()  # Remove "event:" prefix
 
-                                try:
-                                    chunk_data = json.loads(data_part)
+                                    # Wait for the corresponding data line
+                                    data_line = await res.__anext__()
 
-                                    # Handle content block deltas
-                                    if event_type == "content_block_delta":
-                                        if "delta" in chunk_data and "text" in chunk_data["delta"]:
-                                            text = chunk_data["delta"]["text"]
-                                            if text:
+                                    if not data_line.startswith("data:"):
+                                        continue
+
+                                    data_part = data_line[5:].strip()  # Remove "data:" prefix
+                                    up_chunks.append(json.loads(data_part))
+                                    # Handle different event types
+                                    if event_type == "ping":
+                                        # Just forward pings
+                                        yield f"event: ping\ndata: {data_part}\n\n".encode("utf-8")
+                                        continue
+
+                                    if event_type == "message_stop":
+                                        # Forward message_stop event
+                                        yield stop_msg
+                                        return
+
+                                    try:
+                                        chunk_data = json.loads(data_part)
+
+                                        # Handle content block deltas
+                                        if event_type == "content_block_delta":
+                                            if "delta" in chunk_data and "text" in chunk_data["delta"]:
+                                                text = chunk_data["delta"]["text"]
+                                                if text:
+                                                    has_valid_content = True
+                                                    content_buffer += text
+
+                                            # Forward the event
+                                            yield f"event: content_block_delta\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
+                                                "utf-8")
+
+                                        # Handle message delta events
+                                        elif event_type == "message_delta":
+                                            if "delta" in chunk_data and "stop_reason" in chunk_data["delta"]:
                                                 has_valid_content = True
-                                                content_buffer += text
 
-                                        # Forward the event
-                                        yield f"event: content_block_delta\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
-                                            "utf-8")
+                                            # Forward the event
+                                            yield f"event: message_delta\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
+                                                "utf-8")
 
-                                    # Handle message delta events
-                                    elif event_type == "message_delta":
-                                        if "delta" in chunk_data and "stop_reason" in chunk_data["delta"]:
-                                            has_valid_content = True
+                                        # Handle content block start events
+                                        elif event_type == "content_block_start":
+                                            if "content_block" in chunk_data and chunk_data["content_block"].get("text"):
+                                                has_valid_content = True
 
-                                        # Forward the event
-                                        yield f"event: message_delta\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
-                                            "utf-8")
+                                            # Forward the event
+                                            yield f"event: content_block_start\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
+                                                "utf-8")
 
-                                    # Handle content block start events
-                                    elif event_type == "content_block_start":
-                                        if "content_block" in chunk_data and chunk_data["content_block"].get("text"):
-                                            has_valid_content = True
+                                        # Handle other events
+                                        else:
+                                            yield f"event: {event_type}\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
+                                                "utf-8")
 
-                                        # Forward the event
-                                        yield f"event: content_block_start\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
-                                            "utf-8")
+                                    except json.JSONDecodeError:
+                                        # If not valid JSON, forward as-is
+                                        yield f"event: {event_type}\ndata: {data_part}\n\n".encode("utf-8")
+                                else:
+                                    # For non-event lines, just forward
+                                    yield line.encode("utf-8") + b"\n"
 
-                                    # Handle other events
-                                    else:
-                                        yield f"event: {event_type}\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
-                                            "utf-8")
-
-                                except json.JSONDecodeError:
-                                    # If not valid JSON, forward as-is
-                                    yield f"event: {event_type}\ndata: {data_part}\n\n".encode("utf-8")
-                            else:
-                                # For non-event lines, just forward
-                                yield line.encode("utf-8") + b"\n"
+                    except Exception as e:
+                        if connection_established:
+                            break
+                        last_exception = e
+                        logging.warning(f"Attempt {attempt} upstream error (anthropic stream): {e}")
 
                     # If connection was established and streaming completed, don't retry
                     if connection_established:
@@ -522,21 +527,18 @@ async def anthropic_messages(req: Request):
                             yield stop_msg
                         break
 
-                    # If not last retry and connection failed (406/429), wait and continue
-                    if not connection_established and attempt < max_retries - 1:
-                        # Exponential backoff
-                        await asyncio.sleep(1 * (2 ** attempt))
-                        # Refresh token
-                        retry_token = await get_x_auth_token(req)
-                        retry_headers = build_upstream_headers(retry_token, model)
-
-                # If all retries were rate limit errors, return last error
-                if not connection_established and last_retry_status is not None and is_rate_limit_status(
-                        last_retry_status):
-                    if last_retry_err_text is not None:
-                        yield last_retry_err_text.encode("utf-8", errors="replace")
+                # 多次失败
+                if not connection_established:
+                    error_msg = str(last_exception) if last_exception else (f"HTTP {last_retry_status}" if last_retry_status else "unknown")
+                    err_event = {"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}}
+                    logging.error(f"All retries exhausted (anthropic stream): {error_msg}")
+                    yield f"event: error\ndata: {json.dumps(err_event, ensure_ascii=False)}\n\n".encode("utf-8")
                     yield stop_msg
-                    return
+        except Exception as e:
+            logging.error(f"Failed to create httpx client (anthropic stream): {e}")
+            err_event = {"type": "error", "error": {"type": "connection_error", "message": str(e)}}
+            yield f"event: error\ndata: {json.dumps(err_event, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield stop_msg
         finally:
             # Always log the chunks
             _dump_json(res_path, {"type": "anthropic_passthrough_sse_capture", "chunks": up_chunks})
@@ -622,42 +624,45 @@ async def openai_chat_completions(req: Request):
 
     # ---- non-stream ----
     if not stream:
-        async with httpx.AsyncClient(
-                verify=verify,
-                timeout=httpx.Timeout(500.0),
-                trust_env=TRUST_ENV,
-        ) as client:
-            # 限流状态码重试逻辑：最多重试5次（与 /v1/messages 保持一致，详见 RATE_LIMIT_STATUS_CODES）
-            max_retries = MAX_RETRIES
-            r = None
-            last_retry_response = None
+        r = None
+        last_exception = None
+        success = False
+        try:
+            async with httpx.AsyncClient(
+                    verify=verify,
+                    timeout=httpx.Timeout(500.0),
+                    trust_env=TRUST_ENV,
+            ) as client:
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        r = await client.post(upstream_url, headers=upstream_headers, json=body)
+                        last_exception = None
+                        if not is_rate_limit_status(r.status_code):
+                            success = True
+                            break
+                        logging.warning(f"Attempt {attempt} rate limit (openai non-stream): {r.status_code} {r.text}")
+                    except Exception as e:
+                        last_exception = e
+                        logging.warning(f"Attempt {attempt} upstream error (openai non-stream): {e}")
 
-            for attempt in range(max_retries):
-                r = await client.post(upstream_url, headers=upstream_headers, json=body)
-
-                if not is_rate_limit_status(r.status_code):
-                    # 不是限流错误，直接使用这个响应
-                    break
-
-                # 是限流错误，保存响应用于最后返回
-                last_retry_response = r
-                logging.warning(f"{attempt} retryable response (chat/completions non-stream): {r.status_code} {r.text}")
-                # 如果不是最后一次重试，等待后继续
-                if attempt < max_retries - 1:
-                    # 指数退避：1s, 2s, 4s, 8s
-                    await asyncio.sleep(1 * (2 ** attempt))
-                    # 重新获取 token（可能已更新）
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(1 * (2 ** min(attempt, 4)))
                     x_auth_token = await get_x_auth_token(req)
                     upstream_headers = build_upstream_headers(x_auth_token, model)
+        except Exception as e:
+            last_exception = e
+            logging.error(f"Failed to create httpx client (openai non-stream): {e}")
 
-            # 如果所有重试都是限流错误，使用最后一次的响应
-            if is_rate_limit_status(r.status_code) and last_retry_response is not None:
-                r = last_retry_response
+        if not success:
+            error_msg = str(last_exception) if last_exception else (f"HTTP {r.status_code}" if r else "unknown")
+            logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
+            _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+            return JSONResponse(
+                status_code=502,
+                content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
+            )
 
-        # 记录上下游响应（非流式）
         _dump_json(res_path, _resp_to_obj(r))
-
-        # ✅ 上游错误透传（状态码+body 原样返回）
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -674,9 +679,9 @@ async def openai_chat_completions(req: Request):
                     trust_env=TRUST_ENV,
             ) as client:
                 # 限流状态码重试逻辑：最多重试5次（与 /v1/messages 流式保持一致，详见 RATE_LIMIT_STATUS_CODES）
-                max_retries = MAX_RETRIES
                 last_retry_err_text = None
                 last_retry_status = None
+                last_exception = None
                 retry_headers = upstream_headers
                 retry_token = x_auth_token
                 connection_established = False
@@ -685,185 +690,192 @@ async def openai_chat_completions(req: Request):
                 has_valid_content = False
                 content_buffer = ""
 
-                for attempt in range(max_retries):
-                    async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
-                        meta = {
-                            "type": "openai_passthrough_sse_meta",
-                            "status_code": r.status_code,
-                            "headers": dict(r.headers),
-                        }
-                        up_chunks.append(meta)
-
-                        if is_rate_limit_status(r.status_code):
-                            # 是限流错误，保存错误信息并关闭连接
-                            err = await r.aread()
-                            last_retry_err_text = err.decode("utf-8", errors="replace")
-                            last_retry_status = r.status_code
-                            up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                            logging.warning(
-                                f"{attempt} retryable response (chat/completions stream): {r.status_code} {last_retry_err_text}")
-                            # 关闭连接，准备重试（进行下一次for循环）
-                            if attempt < max_retries - 1:
-                                # 指数退避
-                                await asyncio.sleep(1 * (2 ** attempt))
-                                # 重新获取 token（可能已更新）
-                                retry_token = await get_x_auth_token(req)
-                                retry_headers = build_upstream_headers(retry_token, model)
-                            continue
-
-                        # 不是限流错误，继续在这个连接上处理
-                        connection_established = True
-
-                        # 处理其他错误（非406）
-                        if r.status_code >= 400:
-                            err = await r.aread()
-                            err_text = err.decode("utf-8", errors="replace")
-                            up_chunks.append({"type": "error_body", "body": err_text})
-                            # 返回符合OpenAI格式的错误响应
-                            error_data = {
-                                "id": "chatcmpl-error",
-                                "object": "chat.completion.chunk",
-                                "created": int(time.time()),
-                                "model": body.get("model", "unknown"),
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": "error"
-                                }]
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
+                            meta = {
+                                "type": "openai_passthrough_sse_meta",
+                                "status_code": r.status_code,
+                                "headers": dict(r.headers),
                             }
+                            up_chunks.append(meta)
 
-                            # 如果是JSON格式的错误响应，尝试解析并包含详细信息
-                            try:
-                                error_json = json.loads(err_text)
-                                if isinstance(error_json, dict):
-                                    error_data["error"] = error_json
-                            except:
-                                # 如果不是有效的JSON，直接作为消息返回
-                                error_data["error"] = {
-                                    "message": err_text,
-                                    "type": "upstream_error",
-                                    "code": r.status_code
-                                }
-
-                            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
-                            yield b"data: [DONE]\n\n"
-                            return
-
-                        # 正常情况，读取流数据
-                        async for line in r.aiter_lines():
-                            if not line:
+                            if is_rate_limit_status(r.status_code):
+                                # 是限流错误，保存错误信息并关闭连接
+                                err = await r.aread()
+                                last_retry_err_text = err.decode("utf-8", errors="replace")
+                                last_retry_status = r.status_code
+                                up_chunks.append({"type": "error_body", "body": last_retry_err_text})
+                                logging.warning(
+                                    f"{attempt} retryable response (chat/completions stream): {r.status_code} {last_retry_err_text}")
+                                # 关闭连接，准备重试（进行下一次for循环）
+                                if attempt < MAX_RETRIES - 1:
+                                    # 指数退避
+                                    await asyncio.sleep(1 * (2 ** min(attempt, 4)))
+                                    # 重新获取 token（可能已更新）
+                                    retry_token = await get_x_auth_token(req)
+                                    retry_headers = build_upstream_headers(retry_token, model)
                                 continue
 
-                            # 添加到 chunks 日志中
-                            # up_chunks.append(line)
+                            # 不是限流错误，继续在这个连接上处理
+                            connection_established = True
 
-                            # 检查是否是 SSE 数据行
-                            if line.startswith("data:"):
-                                data_part = line[5:].strip()  # 移除 "data:" 前缀
-                                # 检查是否是结束标记
-                                if data_part == "[DONE]":
-                                    # 只有当我们收到了有效内容时才发送 DONE 标记
-                                    if has_valid_content:
-                                        yield b"data: [DONE]\n\n"
-                                    break
+                            # 处理其他错误（非406）
+                            if r.status_code >= 400:
+                                err = await r.aread()
+                                err_text = err.decode("utf-8", errors="replace")
+                                up_chunks.append({"type": "error_body", "body": err_text})
+                                # 返回符合OpenAI格式的错误响应
+                                error_data = {
+                                    "id": "chatcmpl-error",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": body.get("model", "unknown"),
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "error"
+                                    }]
+                                }
 
-                                # 尝试解析 JSON 数据
+                                # 如果是JSON格式的错误响应，尝试解析并包含详细信息
                                 try:
-                                    chunk_data = json.loads(data_part)
-                                    up_chunks.append(copy.deepcopy(chunk_data))
-                                    # 检查是否有有效的内容
-                                    choices = chunk_data.get("choices", [])
-                                    if choices and len(choices) > 0:
-                                        choice = choices[0]
-                                        delta = choice.get("delta", {})
-                                        content = delta.get("content")
-                                        reasoning_content = delta.get("reasoning_content")
-                                        reasoning = delta.get("reasoning")
-                                        tool_calls = delta.get("tool_calls")
-                                        finish_reason = choice.get("finish_reason")
+                                    error_json = json.loads(err_text)
+                                    if isinstance(error_json, dict):
+                                        error_data["error"] = error_json
+                                except:
+                                    # 如果不是有效的JSON，直接作为消息返回
+                                    error_data["error"] = {
+                                        "message": err_text,
+                                        "type": "upstream_error",
+                                        "code": r.status_code
+                                    }
 
-                                        # 检查是否有任何有效内容（content 或 reasoning_content 或 tool_calls）
-                                        # 分别处理每个字段，避免使用 elif 导致某些字段被忽略
-                                        if content is not None and content != "":
-                                            has_valid_content = True
-                                            content_buffer += content
-                                        elif content is not None and content == "" and len(content_buffer) > 0:
-                                            # 空字符串但前面有内容，也认为是有效的
-                                            has_valid_content = True
-                                        if reasoning_content is not None and reasoning_content != "":
-                                            has_valid_content = True
-                                            content_buffer += reasoning_content
-                                        if reasoning is not None and reasoning != "":
-                                            has_valid_content = True
-                                            content_buffer += reasoning
-                                        if tool_calls is not None and len(tool_calls) > 0:
-                                            has_valid_content = True
+                                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
+                                yield b"data: [DONE]\n\n"
+                                return
 
-                                        # 如果有 finish_reason，也标记为有效
-                                        if finish_reason is not None:
-                                            has_valid_content = True
+                            # 正常情况，读取流数据
+                            async for line in r.aiter_lines():
+                                if not line:
+                                    continue
 
-                                    # 适配CodeaAgent代码：只在有finish_reason时保留usage
-                                    # 移除中间chunk的usage信息，避免被CodeAgent代码误判
-                                    if "usage" in chunk_data:
-                                        choices = chunk_data.get("choices", [])
-                                        has_finish_reason = False
-                                        if choices and len(choices) > 0:
-                                            finish_reason = choices[0].get("finish_reason")
-                                            if finish_reason is not None:
-                                                has_finish_reason = True
+                                # 添加到 chunks 日志中
+                                # up_chunks.append(line)
 
-                                        # 如果没有finish_reason，移除usage字段
-                                        if not has_finish_reason:
-                                            chunk_data.pop("usage", None)
-
-                                    # 检查是否有工具调用完成
-                                    should_emit_tool_calls = False
-                                    if finish_reason == "tool_calls" and choices:
-                                        # 检查是否有任何tool_calls（哪怕空数组）
-                                        tool_calls_flat = []
-                                        for choice in choices:
-                                            if isinstance(choice, dict):
-                                                delta = choice.get("delta", {})
-                                                tcs = delta.get("tool_calls", [])
-                                                if isinstance(tcs, list):
-                                                    tool_calls_flat.extend(tcs)
-
-                                        # 如果有tool_calls（哪怕是空数组）且之前已经有tool_calls记录，则触发返回
-                                        if tool_calls_flat or has_valid_content:
-                                            should_emit_tool_calls = True
-
-                                    # 传递处理后的数据行
-                                    yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode("utf-8")
-
-                                    # 如果检测到tool_calls完成，立即发送[i/]D[/i]标记并结束流
-                                    if should_emit_tool_calls:
-                                        # 确保所有tool calls都已经输出
+                                # 检查是否是 SSE 数据行
+                                if line.startswith("data:"):
+                                    data_part = line[5:].strip()  # 移除 "data:" 前缀
+                                    # 检查是否是结束标记
+                                    if data_part == "[DONE]":
+                                        # 只有当我们收到了有效内容时才发送 DONE 标记
                                         if has_valid_content:
-                                            # 发送最终的有效内容块以触发tool calls处理
-                                            final_chunk = {
-                                                "id": "chatcmpl-final",
-                                                "object": "chat.completion.chunk",
-                                                "created": chunk_data.get("created", int(time.time())),
-                                                "model": chunk_data.get("model", body.get("model", "unknown")),
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": {"content": ""},
-                                                    "finish_reason": "tool_calls"
-                                                }]
-                                            }
-                                            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n".encode(
-                                                "utf-8")
+                                            yield b"data: [DONE]\n\n"
+                                        break
 
-                                        # 立即发送DONE标记以结束流
-                                        yield b"data: [DONE]\n\n"
-                                        return
-                                except json.JSONDecodeError:
-                                    # 如果不是有效的 JSON，直接传递
-                                    yield line.encode("utf-8") + b"\n\n"
-                            else:
-                                # 对于非数据行，直接传递
-                                yield line.encode("utf-8") + b"\n"
+                                    # 尝试解析 JSON 数据
+                                    try:
+                                        chunk_data = json.loads(data_part)
+                                        up_chunks.append(copy.deepcopy(chunk_data))
+                                        # 检查是否有有效的内容
+                                        choices = chunk_data.get("choices", [])
+                                        if choices and len(choices) > 0:
+                                            choice = choices[0]
+                                            delta = choice.get("delta", {})
+                                            content = delta.get("content")
+                                            reasoning_content = delta.get("reasoning_content")
+                                            reasoning = delta.get("reasoning")
+                                            tool_calls = delta.get("tool_calls")
+                                            finish_reason = choice.get("finish_reason")
+
+                                            # 检查是否有任何有效内容（content 或 reasoning_content 或 tool_calls）
+                                            # 分别处理每个字段，避免使用 elif 导致某些字段被忽略
+                                            if content is not None and content != "":
+                                                has_valid_content = True
+                                                content_buffer += content
+                                            elif content is not None and content == "" and len(content_buffer) > 0:
+                                                # 空字符串但前面有内容，也认为是有效的
+                                                has_valid_content = True
+                                            if reasoning_content is not None and reasoning_content != "":
+                                                has_valid_content = True
+                                                content_buffer += reasoning_content
+                                            if reasoning is not None and reasoning != "":
+                                                has_valid_content = True
+                                                content_buffer += reasoning
+                                            if tool_calls is not None and len(tool_calls) > 0:
+                                                has_valid_content = True
+
+                                            # 如果有 finish_reason，也标记为有效
+                                            if finish_reason is not None:
+                                                has_valid_content = True
+
+                                        # 适配CodeaAgent代码：只在有finish_reason时保留usage
+                                        # 移除中间chunk的usage信息，避免被CodeAgent代码误判
+                                        if "usage" in chunk_data:
+                                            choices = chunk_data.get("choices", [])
+                                            has_finish_reason = False
+                                            if choices and len(choices) > 0:
+                                                finish_reason = choices[0].get("finish_reason")
+                                                if finish_reason is not None:
+                                                    has_finish_reason = True
+
+                                            # 如果没有finish_reason，移除usage字段
+                                            if not has_finish_reason:
+                                                chunk_data.pop("usage", None)
+
+                                        # 检查是否有工具调用完成
+                                        should_emit_tool_calls = False
+                                        if finish_reason == "tool_calls" and choices:
+                                            # 检查是否有任何tool_calls（哪怕空数组）
+                                            tool_calls_flat = []
+                                            for choice in choices:
+                                                if isinstance(choice, dict):
+                                                    delta = choice.get("delta", {})
+                                                    tcs = delta.get("tool_calls", [])
+                                                    if isinstance(tcs, list):
+                                                        tool_calls_flat.extend(tcs)
+
+                                            # 如果有tool_calls（哪怕是空数组）且之前已经有tool_calls记录，则触发返回
+                                            if tool_calls_flat or has_valid_content:
+                                                should_emit_tool_calls = True
+
+                                        # 传递处理后的数据行
+                                        yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+                                        # 如果检测到tool_calls完成，立即发送[i/]D[/i]标记并结束流
+                                        if should_emit_tool_calls:
+                                            # 确保所有tool calls都已经输出
+                                            if has_valid_content:
+                                                # 发送最终的有效内容块以触发tool calls处理
+                                                final_chunk = {
+                                                    "id": "chatcmpl-final",
+                                                    "object": "chat.completion.chunk",
+                                                    "created": chunk_data.get("created", int(time.time())),
+                                                    "model": chunk_data.get("model", body.get("model", "unknown")),
+                                                    "choices": [{
+                                                        "index": 0,
+                                                        "delta": {"content": ""},
+                                                        "finish_reason": "tool_calls"
+                                                    }]
+                                                }
+                                                yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n".encode(
+                                                    "utf-8")
+
+                                            # 立即发送DONE标记以结束流
+                                            yield b"data: [DONE]\n\n"
+                                            return
+                                    except json.JSONDecodeError:
+                                        # 如果不是有效的 JSON，直接传递
+                                        yield line.encode("utf-8") + b"\n\n"
+                                else:
+                                    # 对于非数据行，直接传递
+                                    yield line.encode("utf-8") + b"\n"
+
+                    except Exception as e:
+                        if connection_established:
+                            break
+                        last_exception = e
+                        logging.warning(f"Attempt {attempt} upstream error (openai stream): {e}")
 
                     # 如果已经成功建立连接且完成流式传输，则不再重试
                     if connection_established:
@@ -886,23 +898,18 @@ async def openai_chat_completions(req: Request):
                         yield b"data: [DONE]\n\n"
                         break
 
-                    # 如果不是最后一次重试且连接失败（406/429），等待后继续
-                    if not connection_established and attempt < max_retries - 1:
-                        # 指数退避
-                        await asyncio.sleep(1 * (2 ** attempt))
-                        # 重新获取 token（可能已更新）
-                        retry_token = await get_x_auth_token(req)
-                        retry_headers = build_upstream_headers(retry_token, model)
-
-                # 如果所有重试都是限流错误，返回最后一次错误
-                if not connection_established and last_retry_status is not None and is_rate_limit_status(
-                        last_retry_status):
-                    # 直接把错误原样吐回（客户端一般也能看到）
-                    if last_retry_err_text is not None:
-                        yield last_retry_err_text.encode("utf-8", errors="replace")
-                    # 确保发送 DONE 标记
+                # 多次失败
+                if not connection_established:
+                    error_msg = str(last_exception) if last_exception else (f"HTTP {last_retry_status}" if last_retry_status else "unknown")
+                    error_data = {"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}}
+                    logging.error(f"All retries exhausted (openai stream): {error_msg}")
+                    yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
                     yield b"data: [DONE]\n\n"
-                    return
+        except Exception as e:
+            logging.error(f"Failed to create httpx client (openai stream): {e}")
+            error_data = {"error": {"message": str(e), "type": "connection_error"}}
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
         finally:
             # 无论正常/异常/客户端断开，尽最大努力落盘
             _dump_json(res_path, {"type": "openai_passthrough_sse_capture", "chunks": up_chunks})
