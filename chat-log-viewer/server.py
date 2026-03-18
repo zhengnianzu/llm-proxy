@@ -89,14 +89,19 @@ def get_first_user_text(messages: List[dict]) -> str:
         else:
             text = str(c)
 
-        # Repeatedly strip any leading [tag] blocks (with surrounding whitespace)
-        # until none remain.  Handles patterns like:
-        #   "[...GMT...]  [Subagent Context] real query"
+        # Repeatedly strip leading noise until stable:
+        #   - [tag] blocks: "[Wed 2026-03-11 15:20 GMT+8]", "[Subagent Context]", etc.
+        #   - Sender metadata prefix + JSON block
         while True:
-            stripped = re.sub(r"^\s*\[[^\]]*\]\s*", "", text)
-            if stripped == text:
+            prev = text
+            # strip leading [tag] blocks
+            text = re.sub(r"^\s*\[[^\]]*\]\s*", "", text)
+            # strip "Sender (...): ```json {...} ```" prefix
+            text = re.sub(r"^Sender\s*(?:\([^)]*\))?:\s*```json\s*\{[\s\S]*?\}\s*```\s*", "", text, flags=re.IGNORECASE)
+            # strip bare "Sender: ..." line (fallback)
+            text = re.sub(r"^Sender\s*(?:\([^)]*\))?:[^\n]*\n?", "", text, flags=re.IGNORECASE)
+            if text == prev:
                 break
-            text = stripped
 
         return text.strip()
     return ""
@@ -138,7 +143,7 @@ def scan_directory() -> List[Dict]:
         if key not in best or len(messages) > best[key]["msg_count"]:
             best[key] = entry
 
-    result = sorted(best.values(), key=lambda x: x["label_short"])
+    result = sorted(best.values(), key=lambda x: x["rel_path"], reverse=True)
     # assign stable numeric ids after sort
     for i, item in enumerate(result):
         item["id"] = i
