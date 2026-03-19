@@ -468,7 +468,24 @@ async def anthropic_messages(req: Request):
                                         continue
 
                                     if event_type == "message_stop":
-                                        # Forward message_stop event
+                                        # Ensure message_start was sent before message_stop
+                                        if not message_start_sent:
+                                            logging.warning("Upstream sent message_stop without message_start, synthesizing message_start first")
+                                            start_data = {
+                                                "type": "message_start",
+                                                "message": {
+                                                    "id": "msg_synthetic",
+                                                    "type": "message",
+                                                    "role": "assistant",
+                                                    "content": [],
+                                                    "model": body.get("model", "unknown"),
+                                                    "stop_reason": None,
+                                                    "stop_sequence": None,
+                                                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                                                },
+                                            }
+                                            yield f"event: message_start\ndata: {json.dumps(start_data, ensure_ascii=False)}\n\n".encode("utf-8")
+                                            message_start_sent = True
                                         yield stop_msg
                                         return
 
