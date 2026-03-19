@@ -378,6 +378,7 @@ async def anthropic_messages(req: Request):
                 retry_headers = upstream_headers
                 retry_token = x_auth_token
                 connection_established = False
+                message_start_sent = False
 
                 # For tracking streaming response data
                 has_valid_content = False
@@ -426,7 +427,8 @@ async def anthropic_messages(req: Request):
 
                                 yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode(
                                     "utf-8")
-                                yield stop_msg
+                                if message_start_sent:
+                                    yield stop_msg
                                 return
 
                             # Normal case, read stream data
@@ -494,8 +496,10 @@ async def anthropic_messages(req: Request):
                                             yield f"event: content_block_start\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
                                                 "utf-8")
 
-                                        # Handle other events
+                                        # Handle other events (including message_start, content_block_stop, etc.)
                                         else:
+                                            if event_type == "message_start":
+                                                message_start_sent = True
                                             yield f"event: {event_type}\ndata: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode(
                                                 "utf-8")
 
@@ -514,16 +518,29 @@ async def anthropic_messages(req: Request):
 
                     # If connection was established and streaming completed, don't retry
                     if connection_established:
-                        # If we never got valid content, send an empty message to prevent client hanging
+                        # If we never got valid content, synthesize the minimal valid Anthropic SSE sequence
                         if not has_valid_content:
-                            empty_chunk = {
-                                "type": "message",
-                                "content": [],
-                                "stop_reason": None,
-                                "model": body.get("model", "unknown")
+                            if not message_start_sent:
+                                start_data = {
+                                    "type": "message_start",
+                                    "message": {
+                                        "id": "msg_synthetic",
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [],
+                                        "model": body.get("model", "unknown"),
+                                        "stop_reason": None,
+                                        "stop_sequence": None,
+                                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                                    },
+                                }
+                                yield f"event: message_start\ndata: {json.dumps(start_data, ensure_ascii=False)}\n\n".encode("utf-8")
+                            delta_data = {
+                                "type": "message_delta",
+                                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                                "usage": {"output_tokens": 0},
                             }
-                            yield f"event: message\ndata: {json.dumps(empty_chunk, ensure_ascii=False)}\n\n".encode(
-                                "utf-8")
+                            yield f"event: message_delta\ndata: {json.dumps(delta_data, ensure_ascii=False)}\n\n".encode("utf-8")
                             yield stop_msg
                         break
 
@@ -533,12 +550,14 @@ async def anthropic_messages(req: Request):
                     err_event = {"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}}
                     logging.error(f"All retries exhausted (anthropic stream): {error_msg}")
                     yield f"event: error\ndata: {json.dumps(err_event, ensure_ascii=False)}\n\n".encode("utf-8")
-                    yield stop_msg
+                    if message_start_sent:
+                        yield stop_msg
         except Exception as e:
             logging.error(f"Failed to create httpx client (anthropic stream): {e}")
             err_event = {"type": "error", "error": {"type": "connection_error", "message": str(e)}}
             yield f"event: error\ndata: {json.dumps(err_event, ensure_ascii=False)}\n\n".encode("utf-8")
-            yield stop_msg
+            if message_start_sent:
+                yield stop_msg
         finally:
             # Always log the chunks
             _dump_json(res_path, {"type": "anthropic_passthrough_sse_capture", "chunks": up_chunks})
