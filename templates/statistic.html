@@ -7,6 +7,8 @@
     <!-- Bootstrap 5 样式 -->
     <link href="/static/css/bootstrap.min.css" rel="stylesheet">
     <script src="/static/js/vue.min.js"></script>
+    <!-- Chart.js CDN (无本地依赖) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         .sortable { cursor: pointer; user-select: none; }
         .sortable:hover { background-color: #e2e6ea; }
@@ -18,11 +20,41 @@
         .filter-row { background: #e9ecef; padding: 20px; border-radius: 10px; margin-bottom: 25px; }
         .badge-success { background-color: #28a745; color: white; }
         .badge-error { background-color: #dc3545; color: white; }
+        .realtime-section { background: #fff; border: 1px solid #dee2e6; border-radius: 10px; padding: 20px; margin-bottom: 25px; }
+        .metric-badge { font-size: 1.1rem; font-weight: bold; padding: 6px 14px; border-radius: 20px; }
+        .chart-wrap { position: relative; height: 180px; }
     </style>
 </head>
 <body>
     <div id="app" class="container mt-4">
         <h2 class="mb-4">📈 token用量统计</h2>
+
+        <!-- ===== 实时监控区域 ===== -->
+        <div class="realtime-section">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">⚡ 实时监控（最近120分钟）</h5>
+                <div class="d-flex align-items-center gap-3">
+                    <span class="badge bg-primary metric-badge">RPM: {{ latestRpm }}</span>
+                    <span class="badge bg-success metric-badge">TPM输入: {{ latestTpmIn }}</span>
+                    <span class="badge bg-info text-dark metric-badge">TPM输出: {{ latestTpmOut }}</span>
+                    <span class="badge bg-danger metric-badge">错误/分: {{ latestErrors }}</span>
+                    <span class="text-muted small">自动刷新 {{ refreshInterval }}s</span>
+                    <button class="btn btn-sm btn-outline-secondary" @click="toggleAutoRefresh">
+                        {{ autoRefresh ? '⏸ 暂停' : '▶ 继续' }}
+                    </button>
+                </div>
+            </div>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="chart-wrap"><canvas id="chartRpm"></canvas></div>
+                    <div class="text-center text-muted small mt-1">RPM（每分钟请求数）</div>
+                </div>
+                <div class="col-md-6">
+                    <div class="chart-wrap"><canvas id="chartTpm"></canvas></div>
+                    <div class="text-center text-muted small mt-1">TPM（每分钟Token数）</div>
+                </div>
+            </div>
+        </div>
 
         <!-- 筛选区域: 起始日期、模型、状态 -->
         <div class="filter-row">
@@ -85,7 +117,6 @@
                         </div>
                     </div>
                 </div>
-                <!-- 可选：总计卡片（合并两个状态） -->
                 <div class="col-md-12 mt-2" v-if="summaryList.length === 2">
                     <div class="card bg-light">
                         <div class="card-body">
@@ -111,39 +142,18 @@
         </div>
         <div v-else class="alert alert-info py-2" role="alert">暂无汇总数据</div>
 
-        <!-- 数据表格 (展示详细记录) -->
+        <!-- 数据表格 -->
         <div class="table-responsive mt-4">
             <table class="table table-striped table-hover align-middle">
                 <thead class="table-light">
                     <tr>
-                        <th @click="sortBy('model')" class="sortable">
-                            模型
-                            <span v-if="sortField === 'model'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
-                        </th>
-                        <th @click="sortBy('date_start')" class="sortable">
-                            开始日期
-                            <span v-if="sortField === 'date_start'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
-                        </th>
-                        <th @click="sortBy('date_end')" class="sortable">
-                            结束日期
-                            <span v-if="sortField === 'date_end'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
-                        </th>
-                        <th @click="sortBy('status')" class="sortable">
-                            状态
-                            <span v-if="sortField === 'status'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
-                        </th>
-                        <th @click="sortBy('count')" class="sortable text-end">
-                            请求次数
-                            <span v-if="sortField === 'count'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
-                        </th>
-                        <th @click="sortBy('input_token_num')" class="sortable text-end">
-                            输入Token
-                            <span v-if="sortField === 'input_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
-                        </th>
-                        <th @click="sortBy('output_token_num')" class="sortable text-end">
-                            输出Token
-                            <span v-if="sortField === 'output_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span>
-                        </th>
+                        <th @click="sortBy('model')" class="sortable">模型<span v-if="sortField === 'model'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                        <th @click="sortBy('date_start')" class="sortable">开始日期<span v-if="sortField === 'date_start'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                        <th @click="sortBy('date_end')" class="sortable">结束日期<span v-if="sortField === 'date_end'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                        <th @click="sortBy('status')" class="sortable">状态<span v-if="sortField === 'status'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                        <th @click="sortBy('count')" class="sortable text-end">请求次数<span v-if="sortField === 'count'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                        <th @click="sortBy('input_token_num')" class="sortable text-end">输入Token<span v-if="sortField === 'input_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                        <th @click="sortBy('output_token_num')" class="sortable text-end">输出Token<span v-if="sortField === 'output_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -154,11 +164,7 @@
                         <td>{{ item.model }}</td>
                         <td>{{ item.date_start }}</td>
                         <td>{{ item.date_end }}</td>
-                        <td>
-                            <span class="badge" :class="item.status === 'success' ? 'badge-success' : 'badge-error'">
-                                {{ item.status === 'success' ? '成功' : '失败' }}
-                            </span>
-                        </td>
+                        <td><span class="badge" :class="item.status === 'success' ? 'badge-success' : 'badge-error'">{{ item.status === 'success' ? '成功' : '失败' }}</span></td>
                         <td class="text-end">{{ item.count }}</td>
                         <td class="text-end">{{ item.input_token_num }}</td>
                         <td class="text-end">{{ item.output_token_num }}</td>
@@ -167,133 +173,154 @@
             </table>
         </div>
 
-        <!-- 加载指示器 -->
-        <div v-if="loading" class="text-center text-muted py-2">
-            <span>数据加载中...</span>
-        </div>
+        <div v-if="loading" class="text-center text-muted py-2"><span>数据加载中...</span></div>
     </div>
 
     <script>
-        new Vue({
-            el: '#app',
-            data: {
-                // 筛选条件
-                model: '',
-                startDate: '',
-                endDate: '',
-                statusFilter: '',  // '' 表示全部, 'success' 或 'error'
-                // 数据
-                items: [],           // 详细记录列表 (对应 data)
-                summaryList: [],      // 汇总数组 (对应 summary)
-                // 排序
-                sortField: 'date_start',
-                sortAsc: true,
-                // UI
-                loading: false
+    const app = new Vue({
+        el: '#app',
+        data: {
+            // 历史统计
+            model: '',
+            startDate: '',
+            endDate: '',
+            statusFilter: '',
+            items: [],
+            summaryList: [],
+            sortField: 'date_start',
+            sortAsc: true,
+            loading: false,
+            // 实时监控
+            latestRpm: 0,
+            latestTpmIn: 0,
+            latestTpmOut: 0,
+            latestErrors: 0,
+            autoRefresh: true,
+            refreshInterval: 15,
+            _refreshTimer: null,
+            _chartRpm: null,
+            _chartTpm: null,
+        },
+        computed: {
+            totalCount() { return this.summaryList.reduce((a, c) => a + (c.count || 0), 0); },
+            totalInput() { return this.summaryList.reduce((a, c) => a + (c.total_input || 0), 0); },
+            totalOutput() { return this.summaryList.reduce((a, c) => a + (c.total_output || 0), 0); },
+        },
+        methods: {
+            // ---- 历史统计 ----
+            fetchData() {
+                this.loading = true;
+                const params = new URLSearchParams();
+                if (this.model) params.append('model', this.model);
+                if (this.startDate) params.append('date_start', this.startDate);
+                if (this.endDate) params.append('date_end', this.endDate);
+                if (this.statusFilter) params.append('status', this.statusFilter);
+                fetch(`/statistic?${params.toString()}`)
+                    .then(r => r.json())
+                    .then(data => { this.items = data.data || []; this.summaryList = data.summary || []; this.applySort(); })
+                    .catch(err => alert('加载失败：' + err))
+                    .finally(() => { this.loading = false; });
             },
-            computed: {
-                // 计算总计（当summaryList有两个元素时使用）
-                totalCount() {
-                    return this.summaryList.reduce((acc, cur) => acc + (cur.count || 0), 0);
-                },
-                totalInput() {
-                    return this.summaryList.reduce((acc, cur) => acc + (cur.total_input || 0), 0);
-                },
-                totalOutput() {
-                    return this.summaryList.reduce((acc, cur) => acc + (cur.total_output || 0), 0);
-                }
-            },
-            methods: {
-                fetchData() {
-                    this.loading = true;
-                    const params = new URLSearchParams();
-                    if (this.model) params.append('model', this.model);
-                    if (this.startDate) params.append('date_start', this.startDate);
-                    if (this.endDate) params.append('date_end', this.endDate);
-                    // 状态筛选：仅当选择具体状态（非空）时传递，全部则不传参数（由后端处理）
-                    if (this.statusFilter) params.append('status', this.statusFilter);
-
-                    const url = `/statistic?${params.toString()}`;
-
-                    fetch(url)
-                        .then(response => {
-                            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                            return response.json();
-                        })
-                        .then(data => {
-                            // 预期 data 格式: { data: [...], summary: [...] }
-                            this.items = data.data || [];
-                            this.summaryList = data.summary || [];
-                            // 应用当前排序
-                            this.applySort();
-                        })
-                        .catch(err => {
-                            console.error('获取数据失败:', err);
-                            alert('加载失败，请检查后端服务');
-                        })
-                        .finally(() => {
-                            this.loading = false;
-                        });
-                },
-
-                resetFilter() {
-                    this.model = '';
-                    this.startDate = '';
-                    this.endDate = '';
-                    this.statusFilter = '';
-                    this.fetchData();
-                },
-
-                // 排序逻辑（支持新字段）
-                applySort() {
-                    if (!this.sortField) return;
-                    const field = this.sortField;
-                    const asc = this.sortAsc;
-
-                    const sorted = [...this.items].sort((a, b) => {
-                        let valA = a[field];
-                        let valB = b[field];
-
-                        // 数值字段比较
-                        if (['count', 'input_token_num', 'output_token_num'].includes(field)) {
-                            return asc ? valA - valB : valB - valA;
-                        } else {
-                            // 字符串字段（model, date_start, date_end, status）
-                            if (valA < valB) return asc ? -1 : 1;
-                            if (valA > valB) return asc ? 1 : -1;
-                            return 0;
-                        }
-                    });
-                    this.items = sorted;
-                },
-
-                sortBy(field) {
-                    if (this.sortField === field) {
-                        this.sortAsc = !this.sortAsc;
-                    } else {
-                        this.sortField = field;
-                        this.sortAsc = true;
-                    }
-                    this.applySort();
-                }
-            },
-            created() {
+            resetFilter() {
+                this.model = ''; this.startDate = ''; this.endDate = ''; this.statusFilter = '';
                 this.fetchData();
-            }
-        });
-    </script>
+            },
+            applySort() {
+                if (!this.sortField) return;
+                const f = this.sortField, asc = this.sortAsc;
+                this.items = [...this.items].sort((a, b) => {
+                    let va = a[f], vb = b[f];
+                    if (['count', 'input_token_num', 'output_token_num'].includes(f)) return asc ? va - vb : vb - va;
+                    if (va < vb) return asc ? -1 : 1;
+                    if (va > vb) return asc ? 1 : -1;
+                    return 0;
+                });
+            },
+            sortBy(field) {
+                if (this.sortField === field) this.sortAsc = !this.sortAsc;
+                else { this.sortField = field; this.sortAsc = true; }
+                this.applySort();
+            },
+            // ---- 实时监控 ----
+            initCharts() {
+                const commonOpts = {
+                    responsive: true, maintainAspectRatio: false, animation: false,
+                    plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } } },
+                    scales: {
+                        x: { ticks: { maxTicksLimit: 10, font: { size: 10 }, maxRotation: 0 } },
+                        y: { beginAtZero: true, ticks: { font: { size: 10 } } }
+                    }
+                };
+                this._chartRpm = new Chart(document.getElementById('chartRpm'), {
+                    type: 'line',
+                    data: { labels: [], datasets: [
+                        { label: 'RPM', data: [], borderColor: '#0d6efd', backgroundColor: 'rgba(13,110,253,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
+                        { label: '错误/分', data: [], borderColor: '#dc3545', backgroundColor: 'rgba(220,53,69,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
+                    ]},
+                    options: commonOpts
+                });
+                this._chartTpm = new Chart(document.getElementById('chartTpm'), {
+                    type: 'line',
+                    data: { labels: [], datasets: [
+                        { label: 'TPM输入', data: [], borderColor: '#198754', backgroundColor: 'rgba(25,135,84,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
+                        { label: 'TPM输出', data: [], borderColor: '#0dcaf0', backgroundColor: 'rgba(13,202,240,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
+                    ]},
+                    options: commonOpts
+                });
+            },
+            fetchRealtime() {
+                fetch('/metrics/realtime')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (!data.length) return;
+                        const labels = data.map(d => d.ts.slice(11)); // HH:MM
+                        const rpm    = data.map(d => d.rpm);
+                        const errors = data.map(d => d.errors);
+                        const tpmIn  = data.map(d => d.tpm_in);
+                        const tpmOut = data.map(d => d.tpm_out);
 
-    <!-- 后端接口预期返回格式 (基于您提供的示例)：
-    {
-        "data": [
-            {"model": "test1", "date_start": "2025-03-01", "date_end": "2025-03-31", "status": "success", "count": 1000, "input_token_num": 1200, "output_token_num": 450},
-            ...
-        ],
-        "summary": [
-            {"count": 1000, "status": "success", "total_input": 3000, "total_output": 1200},
-            {"count": 10, "status": "error", "total_input": 120, "total_output": 0}
-        ]
-    }
-    -->
+                        // 最新一分钟的值
+                        const last = data[data.length - 1];
+                        this.latestRpm    = last.rpm;
+                        this.latestTpmIn  = last.tpm_in;
+                        this.latestTpmOut = last.tpm_out;
+                        this.latestErrors = last.errors;
+
+                        // 更新图表
+                        this._chartRpm.data.labels = labels;
+                        this._chartRpm.data.datasets[0].data = rpm;
+                        this._chartRpm.data.datasets[1].data = errors;
+                        this._chartRpm.update('none');
+
+                        this._chartTpm.data.labels = labels;
+                        this._chartTpm.data.datasets[0].data = tpmIn;
+                        this._chartTpm.data.datasets[1].data = tpmOut;
+                        this._chartTpm.update('none');
+                    })
+                    .catch(() => {});
+            },
+            startAutoRefresh() {
+                this.fetchRealtime();
+                this._refreshTimer = setInterval(() => {
+                    if (this.autoRefresh) this.fetchRealtime();
+                }, this.refreshInterval * 1000);
+            },
+            toggleAutoRefresh() {
+                this.autoRefresh = !this.autoRefresh;
+                if (this.autoRefresh) this.fetchRealtime();
+            },
+        },
+        mounted() {
+            this.$nextTick(() => {
+                this.initCharts();
+                this.startAutoRefresh();
+            });
+            this.fetchData();
+        },
+        beforeDestroy() {
+            clearInterval(this._refreshTimer);
+        }
+    });
+    </script>
 </body>
 </html>

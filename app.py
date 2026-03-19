@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from print_stats_summary import statistic_tokens
 from auth import validate_api_key
+from utils.metrics import record_request, get_metrics_snapshot
+from utils.log_routes import register_log_routes
 
 load_dotenv(override=True)
 
@@ -38,7 +40,6 @@ LOGS_OPENAI = "logs_openai"
 app = FastAPI(title="Anthropic+OpenAI Proxy (FastAPI)")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
 
 # templates = Jinja2Templates(directory="api/templates")
 
@@ -355,6 +356,14 @@ async def anthropic_messages(req: Request):
             )
 
         _dump_json(res_path, _resp_to_obj(r))
+        try:
+            resp_json = r.json()
+            usage = resp_json.get("usage", {})
+            tok_in = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+            tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+            record_request(tok_in, tok_out, success=r.status_code < 400)
+        except Exception:
+            record_request(success=r.status_code < 400)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -561,6 +570,14 @@ async def anthropic_messages(req: Request):
         finally:
             # Always log the chunks
             _dump_json(res_path, {"type": "anthropic_passthrough_sse_capture", "chunks": up_chunks})
+            # 统计 token（从 message_start / message_delta usage 字段提取）
+            _tok_in, _tok_out = 0, 0
+            for _c in up_chunks:
+                if isinstance(_c, dict):
+                    _u = _c.get("message", {}).get("usage") or _c.get("usage") or {}
+                    _tok_in = _tok_in or (_u.get("input_tokens") or 0)
+                    _tok_out = _tok_out or (_u.get("output_tokens") or 0)
+            record_request(_tok_in, _tok_out, success=connection_established)
 
     return StreamingResponse(anthropic_sse_passthrough(), media_type="text/event-stream")
 
@@ -682,6 +699,14 @@ async def openai_chat_completions(req: Request):
             )
 
         _dump_json(res_path, _resp_to_obj(r))
+        try:
+            resp_json = r.json()
+            usage = resp_json.get("usage", {})
+            tok_in = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+            tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+            record_request(tok_in, tok_out, success=r.status_code < 400)
+        except Exception:
+            record_request(success=r.status_code < 400)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -932,6 +957,14 @@ async def openai_chat_completions(req: Request):
         finally:
             # 无论正常/异常/客户端断开，尽最大努力落盘
             _dump_json(res_path, {"type": "openai_passthrough_sse_capture", "chunks": up_chunks})
+            # 统计 token（从 usage chunk 提取）
+            _tok_in, _tok_out = 0, 0
+            for _c in up_chunks:
+                if isinstance(_c, dict):
+                    _u = _c.get("usage") or {}
+                    _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
+                    _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
+            record_request(_tok_in, _tok_out, success=connection_established)
 
     return StreamingResponse(sse_passthrough(), media_type="text/event-stream")
 
@@ -944,10 +977,9 @@ async def index_statistic():
     return FileResponse(path="templates/statistic.html")
 
 
-@app.get("/chat_viewer")
+@app.get("/history")
 async def chat_viewer():
     return FileResponse(path="templates/chat-viewer.html")
-
 
 @app.get("/statistic")
 def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部'):
@@ -955,345 +987,13 @@ def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = 
     return JSONResponse(res)
 
 
-@app.get("/logs/anthropic/list")
-def logs_anthropic_list(min_messages: int = 10):
-    """列出 logs_anthropic 目录下满足条件的 req.json 文件（含 messages 字段且消息数 > min_messages）"""
-    result = []
-    pattern = os.path.join(LOGS_ANTHROPIC, "*-req.json")
-    for path in sorted(glob.glob(pattern), reverse=True):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            messages = data.get("messages")
-            if not isinstance(messages, list) or len(messages) <= min_messages:
-                continue
-            filename = os.path.basename(path)
-            result.append({
-                "filename": filename,
-                "message_count": len(messages),
-                "model": data.get("model", ""),
-            })
-        except Exception:
-            continue
-    return JSONResponse(result)
+@app.get("/metrics/realtime")
+def metrics_realtime():
+    """返回最近 120 分钟的 RPM/TPM 数据"""
+    return JSONResponse(get_metrics_snapshot())
 
 
-@app.get("/logs/anthropic/file")
-def logs_anthropic_file(filename: str):
-    """返回 logs_anthropic 目录下指定文件的内容（仅允许 -req.json 文件）"""
-    if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
-        return JSONResponse({"error": "invalid filename"}, status_code=400)
-    path = os.path.join(LOGS_ANTHROPIC, filename)
-    if not os.path.isfile(path):
-        return JSONResponse({"error": "file not found"}, status_code=404)
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return JSONResponse(data)
-
-
-@app.get("/logs/openai/list")
-def logs_openai_list(min_messages: int = 10):
-    """列出 logs_openai 目录下满足条件的 req.json 文件（含 messages 字段且消息数 > min_messages）"""
-    result = []
-    pattern = os.path.join(LOGS_OPENAI, "*-req.json")
-    for path in sorted(glob.glob(pattern), reverse=True):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            messages = data.get("messages")
-            if not isinstance(messages, list) or len(messages) <= min_messages:
-                continue
-            filename = os.path.basename(path)
-            result.append({
-                "filename": filename,
-                "message_count": len(messages),
-                "model": data.get("model", ""),
-            })
-        except Exception:
-            continue
-    return JSONResponse(result)
-
-
-@app.get("/logs/anthropic/aggregate")
-def logs_anthropic_aggregate(min_messages: int = 1):
-    """
-    扫描 logs_anthropic 目录下所有 req+res 文件对，
-    按时间戳排序后聚合成独立的对话链（每条链以第一条 user 消息为 key）。
-    返回格式: [{ chain_id, first_time, last_time, file_count, messages: [...] }, ...]
-    每条 message 附加 _source_file 和 _is_assistant_response 字段。
-    """
-    import re as _re
-
-    def extract_res_content(res_path: str):
-        """从 res.json 提取 assistant 回复的 content 列表"""
-        if not os.path.isfile(res_path):
-            return None
-        try:
-            with open(res_path, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            # 非流式: {"json": {"content": [...], "role": "assistant", ...}}
-            if isinstance(d, dict) and "json" in d:
-                j = d["json"]
-                if isinstance(j, dict) and j.get("role") == "assistant":
-                    return j.get("content")
-            # 流式: 列表 chunks，找最后一个有 message.content 的
-            if isinstance(d, list):
-                for chunk in reversed(d):
-                    msg = chunk.get("message", {})
-                    if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content") is not None:
-                        return msg["content"]
-        except Exception:
-            pass
-        return None
-
-    def msg_fingerprint(msg):
-        """消息指纹：role + content 前200字符，用于去重比较"""
-        role = msg.get("role", "")
-        c = msg.get("content", "")
-        if isinstance(c, list):
-            parts = []
-            for b in c:
-                if isinstance(b, dict):
-                    parts.append(b.get("text") or b.get("id") or str(b)[:80])
-            c = "|".join(parts)
-        return f"{role}::{str(c)[:200]}"
-
-    # 收集所有 req 文件
-    req_files = sorted(glob.glob(os.path.join(LOGS_ANTHROPIC, "*-req.json")))
-
-    # 按时间戳提取文件名前缀
-    ts_pat = _re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+)-req\.json$")
-
-    entries = []
-    for path in req_files:
-        m = ts_pat.search(os.path.basename(path))
-        if not m:
-            continue
-        ts_str = m.group(1)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            continue
-        msgs = data.get("messages")
-        if not isinstance(msgs, list) or len(msgs) < min_messages:
-            continue
-        res_path = path.replace("-req.json", "-res.json")
-        entries.append({
-            "ts": ts_str,
-            "path": path,
-            "res_path": res_path,
-            "messages": msgs,
-            "model": data.get("model", ""),
-        })
-
-    if not entries:
-        return JSONResponse([])
-
-    # --- 聚合逻辑 ---
-    # Q1 完整内容作为 key（Claude Code 每次会话的第一条 user 消息含时间戳+任务，天然唯一）。
-    # 同一 Q1 key 的所有文件属于同一条链，取消息数最多的文件作为完整轨迹。
-
-    def get_q1_full(msgs):
-        """提取第一条 user 消息的完整文本作为会话 key"""
-        if not msgs:
-            return ""
-        m = msgs[0]
-        c = m.get("content", "")
-        if isinstance(c, list):
-            parts = []
-            for b in c:
-                if isinstance(b, dict):
-                    parts.append(b.get("text") or b.get("id") or str(b)[:200])
-            c = "|".join(parts)
-        return str(c)  # 完整内容，不截断
-
-    from collections import OrderedDict
-    chains_map = OrderedDict()  # q1_key -> { chain_id, entries, messages, model }
-
-    for entry in entries:
-        msgs = entry["messages"]
-        if not msgs:
-            continue
-        q1_key = get_q1_full(msgs)
-        if q1_key not in chains_map:
-            chains_map[q1_key] = {
-                "chain_id": len(chains_map),
-                "q1_key": q1_key,
-                "messages": msgs,
-                "entries": [entry],
-                "model": entry["model"],
-            }
-        else:
-            chain = chains_map[q1_key]
-            if len(msgs) > len(chain["messages"]):
-                chain["messages"] = msgs
-            chain["entries"].append(entry)
-
-    chains = list(chains_map.values())
-
-    # 构建返回结构
-    result = []
-    for chain in chains:
-        first_ts = chain["entries"][0]["ts"]
-        last_ts = chain["entries"][-1]["ts"]
-        # 取最长消息列表所在 entry 的 res.json
-        best_entry = max(chain["entries"], key=lambda e: len(e["messages"]))
-        res_content = extract_res_content(best_entry["res_path"])
-
-        # 构建完整 messages（history + assistant 回复）
-        full_messages = list(chain["messages"])
-        if res_content is not None:
-            full_messages.append({
-                "role": "assistant",
-                "content": res_content,
-                "_from_res": True,
-                "_source_file": os.path.basename(best_entry["res_path"]),
-            })
-
-        result.append({
-            "chain_id": chain["chain_id"],
-            "first_time": first_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
-            "last_time": last_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
-            "file_count": len(chain["entries"]),
-            "message_count": len(full_messages),
-            "model": chain["model"],
-            "messages": full_messages,
-        })
-
-    # 按 first_time 倒序
-    result.sort(key=lambda x: x["first_time"], reverse=True)
-    return JSONResponse(result)
-
-
-@app.get("/logs/openai/aggregate")
-def logs_openai_aggregate(min_messages: int = 1):
-    """
-    扫描 logs_openai 目录下所有 req 文件，按 Origin_query（system 消息中）或首条 user 消息聚合。
-    返回格式与 /logs/anthropic/aggregate 相同。
-    """
-    import re as _re
-    from collections import OrderedDict
-
-    ts_pat = _re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+)-req\.json$")
-
-    def get_oai_chain_key(msgs):
-        """用 system 消息里的 Origin_query 作为链 key，没有则用第一条 user 消息完整内容"""
-        for m in msgs:
-            if m.get("role") == "system":
-                c = str(m.get("content", ""))
-                match = _re.search(r"# Origin_query\s*\n+(.*?)(\n---|\Z)", c, _re.DOTALL)
-                if match:
-                    return "oq:" + match.group(1).strip()
-        for m in msgs:
-            if m.get("role") == "user":
-                c = m.get("content", "")
-                if isinstance(c, list):
-                    c = "|".join(b.get("text", "") for b in c if isinstance(b, dict))
-                return "u:" + str(c)
-        return str(msgs[0].get("content", ""))
-
-    def extract_oai_res_content(res_path):
-        """从 OpenAI res.json 提取 assistant 消息（含 tool_calls）"""
-        if not os.path.isfile(res_path):
-            return None
-        try:
-            with open(res_path, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            msg = d.get("json", {}).get("choices", [{}])[0].get("message")
-            if msg and msg.get("role") == "assistant":
-                return msg
-        except Exception:
-            pass
-        return None
-
-    req_files = sorted(glob.glob(os.path.join(LOGS_OPENAI, "*-req.json")))
-    entries = []
-    for path in req_files:
-        m = ts_pat.search(os.path.basename(path))
-        if not m:
-            continue
-        ts_str = m.group(1)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            continue
-        msgs = data.get("messages")
-        if not isinstance(msgs, list) or len(msgs) < min_messages:
-            continue
-        res_path = path.replace("-req.json", "-res.json")
-        entries.append({
-            "ts": ts_str,
-            "path": path,
-            "res_path": res_path,
-            "messages": msgs,
-            "model": data.get("model", ""),
-        })
-
-    if not entries:
-        return JSONResponse([])
-
-    chains_map = OrderedDict()
-    for entry in entries:
-        msgs = entry["messages"]
-        key = get_oai_chain_key(msgs)
-        if key not in chains_map:
-            chains_map[key] = {
-                "chain_id": len(chains_map),
-                "chain_key": key,
-                "messages": msgs,
-                "entries": [entry],
-                "model": entry["model"],
-            }
-        else:
-            chain = chains_map[key]
-            if len(msgs) > len(chain["messages"]):
-                chain["messages"] = msgs
-            chain["entries"].append(entry)
-
-    result = []
-    for chain in chains_map.values():
-        first_ts = chain["entries"][0]["ts"]
-        last_ts = chain["entries"][-1]["ts"]
-        # 取消息最多的 entry 对应的 res.json
-        best_entry = max(chain["entries"], key=lambda e: len(e["messages"]))
-        res_msg = extract_oai_res_content(best_entry["res_path"])
-
-        full_messages = list(chain["messages"])
-        if res_msg is not None:
-            full_messages.append({
-                **res_msg,
-                "_from_res": True,
-                "_source_file": os.path.basename(best_entry["res_path"]),
-            })
-
-        result.append({
-            "chain_id": chain["chain_id"],
-            "first_time": first_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
-            "last_time": last_ts.replace("_", " ", 1).replace("_", ".").replace("-", ":"),
-            "file_count": len(chain["entries"]),
-            "message_count": len(full_messages),
-            "model": chain["model"],
-            "messages": full_messages,
-            "chain_key": chain["chain_key"],
-        })
-
-    result.sort(key=lambda x: x["first_time"], reverse=True)
-    return JSONResponse(result)
-
-
-@app.get("/logs/openai/file")
-def logs_openai_file(filename: str):
-    """返回 logs_openai 目录下指定文件的内容（仅允许 -req.json 文件）"""
-    if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
-        return JSONResponse({"error": "invalid filename"}, status_code=400)
-    path = os.path.join(LOGS_OPENAI, filename)
-    if not os.path.isfile(path):
-        return JSONResponse({"error": "file not found"}, status_code=404)
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return JSONResponse(data)
+register_log_routes(app)
 
 
 if __name__ == "__main__":
