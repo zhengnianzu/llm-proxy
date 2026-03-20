@@ -14,8 +14,9 @@ import logging
 import re
 import sys
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -48,8 +49,12 @@ app = FastAPI(title="Chat Log Viewer")
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# In-memory cache: populated at startup and on /api/refresh
+# In-memory cache: populated at startup, incrementally updated on /api/refresh
 _cache: List[Dict] = []
+# dedup map: first-user-query key -> cache entry (for incremental merge)
+_best: OrderedDict = OrderedDict()
+# set of abs_path strings already scanned
+_scanned: Set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -107,44 +112,57 @@ def get_first_user_text(messages: List[dict]) -> str:
     return ""
 
 
-def scan_directory() -> List[Dict]:
+def _parse_file(abs_path: Path) -> Optional[Dict]:
+    """Read and parse a single JSON file. Returns entry dict or None."""
+    try:
+        with open(abs_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    messages = extract_messages(data)
+    if not messages:
+        return None
+    label = get_first_user_text(messages)
+    return {
+        "label": label,
+        "label_short": label[:120] if label else "(empty)",
+        "msg_count": len(messages),
+        "model": data.get("model") or data.get("request", {}).get("model") or "",
+        "rel_path": str(abs_path.relative_to(ROOT_DIR)),
+    }
+
+
+def scan_directory(incremental: bool = False) -> List[Dict]:
     """
-    Recursively scan ROOT_DIR for JSON files with a `messages` field.
-    Deduplicate by first-user-query; keep only the longest trajectory per key.
-
-    Returns a list of dicts sorted by label (first user query).
+    Scan ROOT_DIR for JSON files with a `messages` field.
+    If incremental=True, only process files not yet in _scanned.
+    Uses a thread pool for parallel file I/O.
     """
-    # key -> { label, msg_count, model, rel_path, abs_path }
-    best: OrderedDict[str, dict] = OrderedDict()
+    global _best, _scanned
 
-    for abs_path in sorted(ROOT_DIR.rglob("*.json")):
-        try:
-            with open(abs_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            continue
+    # Collect paths to process
+    all_paths = sorted(ROOT_DIR.rglob("*.json"))
+    if incremental:
+        new_paths = [p for p in all_paths if str(p) not in _scanned]
+    else:
+        new_paths = all_paths
 
-        messages = extract_messages(data)
-        if not messages:
-            continue
+    # Mark as scanned before processing (avoids double-scan on concurrent refresh)
+    for p in new_paths:
+        _scanned.add(str(p))
 
-        label = get_first_user_text(messages)
-        key = label  # full text as dedup key
+    # Parallel parse
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_parse_file, p): p for p in new_paths}
+        for future in as_completed(futures):
+            entry = future.result()
+            if entry is None:
+                continue
+            key = entry["label"]
+            if key not in _best or entry["msg_count"] > _best[key]["msg_count"]:
+                _best[key] = entry
 
-        rel_path = str(abs_path.relative_to(ROOT_DIR))
-        entry = {
-            "label": label,
-            "label_short": label[:120] if label else "(empty)",
-            "msg_count": len(messages),
-            "model": data.get("model") or data.get("request", {}).get("model") or "",
-            "rel_path": rel_path,
-        }
-
-        if key not in best or len(messages) > best[key]["msg_count"]:
-            best[key] = entry
-
-    result = sorted(best.values(), key=lambda x: x["rel_path"], reverse=True)
-    # assign stable numeric ids after sort
+    result = sorted(_best.values(), key=lambda x: x["rel_path"], reverse=True)
     for i, item in enumerate(result):
         item["id"] = i
     return result
@@ -167,9 +185,9 @@ def api_list():
 
 @app.get("/api/refresh")
 def api_refresh():
-    """Re-scan directory and update cache."""
+    """Incrementally scan for new files and update cache."""
     global _cache
-    _cache = scan_directory()
+    _cache = scan_directory(incremental=True)
     logger.info(f"Refreshed: {len(_cache)} conversations")
     return JSONResponse({"count": len(_cache)})
 
@@ -201,7 +219,7 @@ def api_file(rel_path: str = Query(..., description="Relative path from root dir
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print(f"[chat-log-viewer] Scanning: {ROOT_DIR}")
-    _cache = scan_directory()
+    _cache = scan_directory(incremental=False)  # full scan on startup
     print(f"[chat-log-viewer] Loaded {len(_cache)} conversations")
     print(f"[chat-log-viewer] Listening on http://{args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port)

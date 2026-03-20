@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 from typing import Literal
 from pydantic import BaseModel
+import pandas as pd
 
 
 def check_date_range(file: Path, date_start: str, date_end: str):
@@ -65,15 +66,18 @@ class SummaryItem(BaseModel):
     total_output: int = 0  # 该状态下的总输出 token 数
 
 
-def find_files(filter_suffix="*-res.json"):
-    for _dir in os.listdir():
-        if os.path.isdir(_dir) and _dir.startswith("logs_"):
-            for file in Path(_dir).rglob(filter_suffix):
-                # print(file)
-                yield file
+def find_files(dirs=None, filter_suffix="*-res.json"):
+    """扫描日志目录。dirs 为 None 时自动扫描当前目录下所有 logs_ 开头的子目录。"""
+    if dirs:
+        search_dirs = [Path(d) for d in dirs if Path(d).is_dir()]
+    else:
+        search_dirs = [Path(d) for d in os.listdir() if os.path.isdir(d) and d.startswith("logs_")]
+    for _dir in search_dirs:
+        for file in _dir.rglob(filter_suffix):
+            yield file
 
 
-def statistic_tokens(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部', **kwargs) -> dict:
+def statistic_tokens(model: str = '', date_start: str = '2000-01-01', date_end: str = '9999-12-31', status: str = '全部', dirs=None, **kwargs) -> dict:
     """
     统计token数
     :param model: 过滤模型，忽略大小写，多个模型用,拼接
@@ -85,7 +89,7 @@ def statistic_tokens(model: str = '', date_start: str = '', date_end: str = '', 
     model_count_data = dict()
     res_data = list()
 
-    for file in find_files():
+    for file in find_files(dirs=dirs):
         # 筛选符合日期的日志文件
         if not check_date_range(file, date_start, date_end):
             continue
@@ -159,50 +163,30 @@ def statistic_tokens(model: str = '', date_start: str = '', date_end: str = '', 
             summary_error.total_output += data['output_token_num']
 
     res = {"data": res_data, "summary": [summary_success.model_dump(), summary_error.model_dump()]}
-    # print(res)
 
-    # fake data
-    # res = {
-    #     "data": [
-    #         {"model": "test1", "date_start": "2025-03-01", "date_end": "2025-03-31", "status": "success", "count": 1000,
-    #          "input_token_num": 1200, "output_token_num": 450},
-    #         # {"model": "test1", "date_start": "2025-03-01", "date_end": "2025-03-31", "status": "error", "count": 10,
-    #         #  "input_token_num": 120, "output_token_num": 0},
-    #         {"model": "test2", "date_start": "2026-03-01", "date_end": "2026-03-09", "status": "success", "count": 800,
-    #          "input_token_num": 1500, "output_token_num": 777},
-    #         # {"model": "test2", "date_start": "2026-03-01", "date_end": "2026-03-09", "status": "error", "count": 8,
-    #         #  "input_token_num": 150, "output_token_num": 0},
-    #     ],
-    #     "summary": [
-    #         {"count": 1800, "status": "success", "total_input": 2700, "total_output": 1227},
-    #         # {"count": 10, "status": "error", "total_input": 120, "total_output": 0},
-    #         # {"count": 1010, "status": "error", "total_input": 3120, "total_output": 1200},
-    #     ]
-    # }
+    rows = []
+    for key, val in model_count_data.items():
+        if val['success'].count > 0:
+            _count = val['success'].count
+            _in = val['success'].input_token_num
+            _out = val['success'].output_token_num
+            rows.append((key, _count, _in, _out, _in + _out))
+
+    df = pd.DataFrame(rows, columns=["模型", "调用次数", "输入Token", "输出Token", "总Token"])
+    df = df.sort_values("总Token", ascending=False).reset_index(drop=True)
 
     print_log = f"""
 ================================================================================
 API 调用统计摘要
 ================================================================================
-
 总调用次数: {summary_success.count}
 总输入 Tokens: {summary_success.total_input}
 总输出 Tokens: {summary_success.total_output}
 总 Tokens: {summary_success.total_input + summary_success.total_output}
 
 按模型统计:
---------------------------------------------------------------------------------
-"""
-    # claude-sonnet-4-20250514: 调用 10 次, 输入 500, 输出 1,200, 总计 1,700 tokens
-    for key, val in model_count_data.items():
-        if val['success'].count > 0:
-            _count = val['success'].count
-            _input_token = val['success'].input_token_num
-            _output_token = val['success'].output_token_num
-            _all_token = _input_token + _output_token
-            print_log += f"""{key}: 调用 {_count} 次, 输入 {_input_token} , 输出 {_output_token}, 总计 {_all_token} tokens"""
-            print_log += '\n'
-    print_log += "--------------------------------------------------------------------------------"
+{df.to_string(index=False)}
+================================================================================"""
 
     print(print_log)
     return res
@@ -211,9 +195,10 @@ API 调用统计摘要
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", "-m", type=str, default="", help="过滤模型，忽略大小写，多个模型用,拼接")
-    parser.add_argument("--date_start", "-s", type=str, default="", help="过滤日期-开启，格式YYYY-MM-DD")
-    parser.add_argument("--date_end", "-e", type=str, default="", help="过滤日期-结束，格式YYYY-MM-DD")
+    parser.add_argument("--date_start", "-s", type=str, default="2000-01-01", help="过滤日期-开启，格式YYYY-MM-DD，默认2000-01-01")
+    parser.add_argument("--date_end", "-e", type=str, default="9999-12-31", help="过滤日期-结束，格式YYYY-MM-DD，默认9999-12-31")
     parser.add_argument("--status", "-t", type=str, default="全部", help="过滤状态: 全部、成功、失败")
+    parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个），不指定则扫描当前目录下 logs_ 开头的目录")
     args = parser.parse_args()
 
     # args.date_start = '2026-03-10'

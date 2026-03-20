@@ -179,6 +179,39 @@ def _resp_to_obj(r):  # httpx.Response -> dict
     return base
 
 
+def _sanitize_messages(messages: Any) -> Any:
+    """
+    清洗 messages 列表，过滤掉空 text content block。
+    Anthropic API 要求 text content blocks 必须非空，否则返回 400。
+    - content 为 list 时：过滤 type==text 且 text 为空/空白的块；
+      若过滤后 list 为空，用单个空格占位块替代，避免整条消息丢失。
+    - content 为字符串时：原样保留（空字符串同理由上游决定，非我们的问题范围）。
+    """
+    if not isinstance(messages, list):
+        return messages
+    cleaned = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            cleaned.append(msg)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            cleaned.append(msg)
+            continue
+        filtered = [
+            b for b in content
+            if not (isinstance(b, dict) and b.get("type") == "text" and not (b.get("text") or "").strip())
+        ]
+        if len(filtered) == len(content):
+            cleaned.append(msg)
+        elif filtered:
+            cleaned.append({**msg, "content": filtered})
+        else:
+            # 所有块都被过滤掉了，用占位符保留消息结构
+            cleaned.append({**msg, "content": [{"type": "text", "text": " "}]})
+    return cleaned
+
+
 def _extract_text_from_blocks(blocks: Any) -> str:
     if blocks is None:
         return ""
@@ -308,6 +341,10 @@ async def anthropic_messages(req: Request):
         body["tools"] = tools
     elif "tools" in body:
         body.pop("tools", None)
+
+    # 清洗空 text content block，避免上游 400 "text content blocks must be non-empty"
+    if "messages" in body:
+        body["messages"] = _sanitize_messages(body["messages"])
 
     # headers = dict(req.headers)
     headers = dict()
