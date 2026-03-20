@@ -198,14 +198,34 @@ def _sanitize_messages(messages: Any) -> Any:
         if not isinstance(content, list):
             cleaned.append(msg)
             continue
-        filtered = [
-            b for b in content
-            if not (isinstance(b, dict) and b.get("type") == "text" and not (b.get("text") or "").strip())
-        ]
-        if len(filtered) == len(content):
+        # thinking/redacted_thinking blocks in assistant messages must remain exactly
+        # as they were in the original response; skip sanitization for such messages.
+        if msg.get("role") == "assistant" and any(
+            isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking")
+            for b in content
+        ):
             cleaned.append(msg)
-        elif filtered:
-            cleaned.append({**msg, "content": filtered})
+            continue
+        def _is_empty_text_block(b: Any) -> bool:
+            return isinstance(b, dict) and b.get("type") == "text" and not (b.get("text") or "").strip()
+
+        def _sanitize_block(b: Any) -> Any:
+            """对 tool_result 块递归清理其嵌套 content 中的空 text 块。"""
+            if not isinstance(b, dict) or b.get("type") != "tool_result":
+                return b
+            nested = b.get("content")
+            if not isinstance(nested, list):
+                return b
+            filtered_nested = [nb for nb in nested if not _is_empty_text_block(nb)]
+            if len(filtered_nested) == len(nested):
+                return b
+            return {**b, "content": filtered_nested if filtered_nested else [{"type": "text", "text": " "}]}
+
+        new_blocks = [_sanitize_block(b) for b in content if not _is_empty_text_block(b)]
+        if len(new_blocks) == len(content) and all(new_blocks[i] is content[i] for i in range(len(content))):
+            cleaned.append(msg)
+        elif new_blocks:
+            cleaned.append({**msg, "content": new_blocks})
         else:
             # 所有块都被过滤掉了，用占位符保留消息结构
             cleaned.append({**msg, "content": [{"type": "text", "text": " "}]})

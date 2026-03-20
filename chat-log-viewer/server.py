@@ -123,10 +123,12 @@ def _parse_file(abs_path: Path) -> Optional[Dict]:
     if not messages:
         return None
     label = get_first_user_text(messages)
+    # 若存在 response 字段（导出格式），将其计为额外一条 assistant 消息
+    extra = 1 if (isinstance(data.get("response"), dict) and data["response"].get("content")) else 0
     return {
         "label": label,
         "label_short": label[:120] if label else "(empty)",
-        "msg_count": len(messages),
+        "msg_count": len(messages) + extra,
         "model": data.get("model") or data.get("request", {}).get("model") or "",
         "rel_path": str(abs_path.relative_to(ROOT_DIR)),
     }
@@ -210,6 +212,17 @@ def api_file(rel_path: str = Query(..., description="Relative path from root dir
             data = json.load(f)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    # 若存在 response 字段（导出格式），将其追加为最后一条 assistant 消息
+    response = data.get("response")
+    if isinstance(response, dict) and response.get("content"):
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            data = dict(data)
+            data["messages"] = messages + [{
+                "role": "assistant",
+                "content": response["content"],
+            }]
 
     return JSONResponse(data)
 
