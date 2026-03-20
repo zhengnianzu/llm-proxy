@@ -112,6 +112,52 @@ def get_first_user_text(messages: List[dict]) -> str:
     return ""
 
 
+def _extract_res_content(res_path: Path) -> Optional[List[dict]]:
+    """从同级 -res.json 中提取 assistant content 列表。
+    支持流式（anthropic_passthrough_sse_capture）和非流式两种格式。
+    """
+    try:
+        with open(res_path, "r", encoding="utf-8") as f:
+            res = json.load(f)
+    except Exception:
+        return None
+
+    if res.get("type") == "anthropic_passthrough_sse_capture":
+        # 流式：从 chunks 重组 content blocks
+        blocks: dict = {}
+        json_buf: dict = {}
+        for chunk in res.get("chunks", []):
+            t = chunk.get("type")
+            if t == "content_block_start":
+                idx = chunk.get("index", 0)
+                cb = dict(chunk.get("content_block", {}))
+                blocks[idx] = cb
+                if cb.get("type") == "tool_use":
+                    json_buf[idx] = ""
+            elif t == "content_block_delta":
+                idx = chunk.get("index", 0)
+                delta = chunk.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    blocks.setdefault(idx, {"type": "text", "text": ""})
+                    blocks[idx]["text"] = blocks[idx].get("text", "") + delta.get("text", "")
+                elif delta.get("type") == "input_json_delta":
+                    json_buf[idx] = json_buf.get(idx, "") + delta.get("partial_json", "")
+            elif t == "content_block_stop":
+                idx = chunk.get("index", 0)
+                if idx in json_buf:
+                    try:
+                        blocks[idx]["input"] = json.loads(json_buf[idx])
+                    except json.JSONDecodeError:
+                        blocks[idx]["input"] = json_buf[idx]
+        if not blocks:
+            return None
+        return [blocks[i] for i in sorted(blocks)]
+    else:
+        # 非流式：直接取 json.content
+        content = (res.get("json") or {}).get("content")
+        return content if isinstance(content, list) else None
+
+
 def _parse_file(abs_path: Path) -> Optional[Dict]:
     """Read and parse a single JSON file. Returns entry dict or None."""
     try:
@@ -123,8 +169,14 @@ def _parse_file(abs_path: Path) -> Optional[Dict]:
     if not messages:
         return None
     label = get_first_user_text(messages)
-    # 若存在 response 字段（导出格式），将其计为额外一条 assistant 消息
-    extra = 1 if (isinstance(data.get("response"), dict) and data["response"].get("content")) else 0
+    # 计算额外的 assistant 消息数（response 字段或同级 -res.json）
+    extra = 0
+    if isinstance(data.get("response"), dict) and data["response"].get("content"):
+        extra = 1
+    elif abs_path.name.endswith("-req.json"):
+        res_path = abs_path.with_name(abs_path.name[:-len("-req.json")] + "-res.json")
+        if res_path.exists():
+            extra = 1
     return {
         "label": label,
         "label_short": label[:120] if label else "(empty)",
@@ -213,15 +265,28 @@ def api_file(rel_path: str = Query(..., description="Relative path from root dir
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # 若存在 response 字段（导出格式），将其追加为最后一条 assistant 消息
-    response = data.get("response")
-    if isinstance(response, dict) and response.get("content"):
-        messages = data.get("messages")
-        if isinstance(messages, list):
+    messages = data.get("messages")
+    if isinstance(messages, list):
+        assistant_content = None
+
+        # 优先取 response 字段（导出格式）
+        response = data.get("response")
+        if isinstance(response, dict) and response.get("content"):
+            assistant_content = response["content"]
+
+        # 其次检查同级 -res.json（原始 logs_anthropic 格式）
+        elif abs_path.name.endswith("-req.json"):
+            res_path = abs_path.with_name(
+                abs_path.name[: -len("-req.json")] + "-res.json"
+            )
+            if res_path.exists():
+                assistant_content = _extract_res_content(res_path)
+
+        if assistant_content:
             data = dict(data)
             data["messages"] = messages + [{
                 "role": "assistant",
-                "content": response["content"],
+                "content": assistant_content,
             }]
 
     return JSONResponse(data)
