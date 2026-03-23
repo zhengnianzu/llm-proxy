@@ -14,6 +14,7 @@ import json
 import re
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -294,6 +295,41 @@ def pct(values: List[float], p: int) -> float:
     return sv[min(int(len(sv) * p / 100), len(sv) - 1)]
 
 
+def compute_stats(sessions: List[Dict]) -> Dict:
+    """对 sessions 做一次性聚合，供 Excel 和 Markdown 共用。"""
+    turns_vals    = [s["user_turns"]        for s in sessions]
+    msg_vals      = [s["total_messages"]    for s in sessions]
+    api_vals      = [s["api_call_count"]    for s in sessions]
+    with_tools    = [s for s in sessions if s["tool_use_count"] > 0]
+    tu_vals       = [s["tool_use_count"]    for s in with_tools]
+    rate_vals     = [s["tool_success_rate"] for s in sessions if s["tool_success_rate"] is not None]
+    multi_timed   = [s for s in sessions if s["api_call_count"] > 1 and s["duration_s"] is not None]
+    dur_vals      = [s["duration_s"]        for s in multi_timed]
+    rate_sessions = [s for s in sessions if s["tool_result_count"] > 0]
+    model_dist    = Counter(s["model"]      for s in sessions)
+    return {
+        "total":         len(sessions),
+        "turns_vals":    turns_vals,
+        "msg_vals":      msg_vals,
+        "api_vals":      api_vals,
+        "with_tools":    with_tools,
+        "tu_vals":       tu_vals,
+        "rate_vals":     rate_vals,
+        "multi_timed":   multi_timed,
+        "dur_vals":      dur_vals,
+        "rate_sessions": rate_sessions,
+        "model_dist":    model_dist,
+        "multi_api":     sum(1 for v in api_vals if v > 1),
+        "api_err":       sum(1 for s in sessions if s["api_errors"] > 0),
+        "total_tu":      sum(s["tool_use_count"]    for s in sessions),
+        "total_tr":      sum(s["tool_result_count"] for s in sessions),
+        "total_succ":    sum(s["tool_success"]      for s in sessions),
+        "total_ff":      sum(s["tool_fail_flag"]    for s in sessions),
+        "total_fk":      sum(s["tool_fail_keyword"] for s in sessions),
+        "total_ft":      sum(s["tool_fail_total"]   for s in sessions),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Excel 导出
 # ---------------------------------------------------------------------------
@@ -334,24 +370,23 @@ def _bucket_df(pd, vals: List[float], buckets: List[Tuple], unit: str = ""):
     return pd.DataFrame(rows)
 
 
-def write_excel(sessions: List[Dict], path: Path) -> None:
+def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
     import pandas as pd
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
+
+    turns_vals = stats["turns_vals"]
+    msg_vals   = stats["msg_vals"]
+    api_vals   = stats["api_vals"]
+    tu_vals    = stats["tu_vals"]
+    rate_vals  = stats["rate_vals"]
+    dur_vals   = stats["dur_vals"]
 
     # ── 构建详情 DataFrame ───────────────────────────────────────────────────
     rows = [{label: s.get(key) for key, label in _DETAIL_COLS} for s in sessions]
     df_detail = pd.DataFrame(rows)
 
     # ── 构建分布 DataFrames ──────────────────────────────────────────────────
-    turns_vals = [s["user_turns"]       for s in sessions]
-    msg_vals   = [s["total_messages"]   for s in sessions]
-    api_vals   = [s["api_call_count"]   for s in sessions]
-    tu_vals    = [s["tool_use_count"]   for s in sessions if s["tool_use_count"] > 0]
-    rate_vals  = [s["tool_success_rate"] for s in sessions if s["tool_success_rate"] is not None]
-    dur_vals   = [s["duration_s"]       for s in sessions
-                  if s["api_call_count"] > 1 and s["duration_s"] is not None]
-
     dist_sections = [
         ("对话轮次分布",
          _bucket_df(pd, turns_vals,
@@ -477,8 +512,26 @@ def write_excel(sessions: List[Dict], path: Path) -> None:
 # Markdown 汇总报告
 # ---------------------------------------------------------------------------
 
-def build_md(sessions: List[Dict], top_n: int = 10) -> str:
-    total = len(sessions)
+def build_md(sessions: List[Dict], stats: Dict, top_n: int = 10) -> str:
+    total         = stats["total"]
+    turns_vals    = stats["turns_vals"]
+    msg_vals      = stats["msg_vals"]
+    api_vals      = stats["api_vals"]
+    with_tools    = stats["with_tools"]
+    tu_vals       = stats["tu_vals"]
+    rate_sessions = stats["rate_sessions"]
+    multi_timed   = stats["multi_timed"]
+    dur_vals      = stats["dur_vals"]
+    model_dist    = stats["model_dist"]
+    multi_api     = stats["multi_api"]
+    api_err       = stats["api_err"]
+    total_tu      = stats["total_tu"]
+    total_tr      = stats["total_tr"]
+    total_succ    = stats["total_succ"]
+    total_ff      = stats["total_ff"]
+    total_fk      = stats["total_fk"]
+    total_ft      = stats["total_ft"]
+
     lines: List[str] = []
 
     def ln(s: str = "") -> None:
@@ -494,7 +547,6 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
     ln()
 
     # ── 1. 对话轮次 ──────────────────────────────────────────────────────────
-    turns_vals = [s["user_turns"] for s in sessions]
     dist_turns = Counter(turns_vals)
     ln("## 1. 对话轮次（User 发言数）")
     ln()
@@ -516,7 +568,6 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
     ln()
 
     # ── 2. 消息总数 ──────────────────────────────────────────────────────────
-    msg_vals = [s["total_messages"] for s in sessions]
     ln("## 2. 消息总数（含 assistant 回复）")
     ln()
     ln("| 统计项 | 数值 |")
@@ -541,9 +592,6 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
     ln()
 
     # ── 3. API Call 次数 ─────────────────────────────────────────────────────
-    api_vals  = [s["api_call_count"] for s in sessions]
-    multi_api = sum(1 for v in api_vals if v > 1)
-    api_err   = sum(1 for s in sessions if s["api_errors"] > 0)
     ln("## 3. API Call 次数")
     ln()
     ln("| 统计项 | 数值 |")
@@ -567,14 +615,6 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
     ln()
 
     # ── 4. 工具调用 ──────────────────────────────────────────────────────────
-    with_tools = [s for s in sessions if s["tool_use_count"] > 0]
-    total_tu   = sum(s["tool_use_count"]    for s in sessions)
-    total_tr   = sum(s["tool_result_count"] for s in sessions)
-    total_succ = sum(s["tool_success"]      for s in sessions)
-    total_ff   = sum(s["tool_fail_flag"]    for s in sessions)
-    total_fk   = sum(s["tool_fail_keyword"] for s in sessions)
-    total_ft   = sum(s["tool_fail_total"]   for s in sessions)
-
     ln("## 4. 工具调用（tool_use / tool_result）")
     ln()
     ln("| 统计项 | 数值 |")
@@ -584,11 +624,10 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
     ln(f"| tool_use 总次数       | {total_tu} |")
     ln(f"| tool_result 总次数    | {total_tr} |")
     if with_tools:
-        wtu = [s["tool_use_count"] for s in with_tools]
-        ln(f"| 有工具 session 平均 tool_use | {sum(wtu)/len(wtu):.1f} |")
-        ln(f"| 最大 tool_use  | {max(wtu)} |")
-        ln(f"| P50 tool_use   | {pct(wtu, 50):.0f} |")
-        ln(f"| P90 tool_use   | {pct(wtu, 90):.0f} |")
+        ln(f"| 有工具 session 平均 tool_use | {sum(tu_vals)/len(tu_vals):.1f} |")
+        ln(f"| 最大 tool_use  | {max(tu_vals)} |")
+        ln(f"| P50 tool_use   | {pct(tu_vals, 50):.0f} |")
+        ln(f"| P90 tool_use   | {pct(tu_vals, 90):.0f} |")
     ln()
     if total_tr > 0:
         ln("**成功率明细：**")
@@ -604,7 +643,6 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
     ln("**tool_use 次数分布（有工具 session）：**")
     ln()
     if with_tools:
-        tu_vals = [s["tool_use_count"] for s in with_tools]
         tu_bkts = [("1-5次",1,6),("6-15次",6,16),("16-30次",16,31),("31-50次",31,51),(">50次",51,10**9)]
         max_c4 = max(sum(1 for v in tu_vals if lo<=v<hi) for _,lo,hi in tu_bkts)
         ln("| 区间 | 数量 | 占比 | 分布 |")
@@ -614,7 +652,6 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
             bar = "█" * max(1, round(cnt / max(max_c4,1) * 15)) if cnt else ""
             ln(f"| {label} | {cnt} | {cnt/len(with_tools)*100:.1f}% | {bar} |")
         ln()
-    rate_sessions = [s for s in sessions if s["tool_result_count"] > 0]
     if rate_sessions:
         ln("**工具成功率分布（有 tool_result 的 session）：**")
         ln()
@@ -630,7 +667,6 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
         ln()
 
     # ── 5. 耗时 ──────────────────────────────────────────────────────────────
-    multi_timed = [s for s in sessions if s["api_call_count"] > 1 and s["duration_s"] is not None]
     ln("## 5. 消耗时长")
     ln()
     ln("> 时长 = 首个 API call 时间戳 → 最后一个 API call 时间戳（单次 session 时长为 0）")
@@ -640,28 +676,26 @@ def build_md(sessions: List[Dict], top_n: int = 10) -> str:
     ln(f"| 单次 API call session | {sum(1 for s in sessions if s['api_call_count']==1)} |")
     ln(f"| 多轮 session（有时长） | {len(multi_timed)} |")
     if multi_timed:
-        dv = [s["duration_s"] for s in multi_timed]
-        ln(f"| 平均耗时 | {fmt_duration(sum(dv)/len(dv))} |")
-        ln(f"| 最长     | {fmt_duration(max(dv))} |")
-        ln(f"| 最短     | {fmt_duration(min(dv))} |")
-        ln(f"| P50      | {fmt_duration(pct(dv, 50))} |")
-        ln(f"| P90      | {fmt_duration(pct(dv, 90))} |")
+        ln(f"| 平均耗时 | {fmt_duration(sum(dur_vals)/len(dur_vals))} |")
+        ln(f"| 最长     | {fmt_duration(max(dur_vals))} |")
+        ln(f"| 最短     | {fmt_duration(min(dur_vals))} |")
+        ln(f"| P50      | {fmt_duration(pct(dur_vals, 50))} |")
+        ln(f"| P90      | {fmt_duration(pct(dur_vals, 90))} |")
         ln()
         dur_bkts = [("<1min",0,60),("1-5min",60,300),("5-15min",300,900),
                     ("15-30min",900,1800),(">30min",1800,10**9)]
-        max_c6 = max(sum(1 for v in dv if lo<=v<hi) for _,lo,hi in dur_bkts)
+        max_c6 = max(sum(1 for v in dur_vals if lo<=v<hi) for _,lo,hi in dur_bkts)
         ln("**耗时分布（多轮 session）：**")
         ln()
         ln("| 区间 | 数量 | 占比 | 分布 |")
         ln("|------|-----:|-----:|------|")
         for label, lo, hi in dur_bkts:
-            cnt = sum(1 for v in dv if lo <= v < hi)
+            cnt = sum(1 for v in dur_vals if lo <= v < hi)
             bar = "█" * max(1, round(cnt / max(max_c6,1) * 15)) if cnt else ""
-            ln(f"| {label} | {cnt} | {cnt/len(dv)*100:.1f}% | {bar} |")
+            ln(f"| {label} | {cnt} | {cnt/len(dur_vals)*100:.1f}% | {bar} |")
     ln()
 
     # ── 6. 模型分布 ──────────────────────────────────────────────────────────
-    model_dist = Counter(s["model"] for s in sessions)
     ln("## 6. 模型使用分布")
     ln()
     ln("| 模型 | 数量 | 占比 |")
@@ -736,18 +770,22 @@ def main() -> None:
     print(f"[info] 发现 {len(folders)} 个 session 文件夹", file=sys.stderr)
 
     sessions: List[Dict] = []
-    for folder in folders:
-        r = analyze_session(folder)
-        if r:
-            sessions.append(r)
+    with ThreadPoolExecutor() as executor:
+        futures = {executor.submit(analyze_session, f): f for f in folders}
+        for future in as_completed(futures):
+            r = future.result()
+            if r:
+                sessions.append(r)
     print(f"[info] 成功解析 {len(sessions)} 个 session", file=sys.stderr)
 
+    stats = compute_stats(sessions)
+
     xlsx_path = stat_dir / "session_report.xlsx"
-    write_excel(sessions, xlsx_path)
+    write_excel(sessions, stats, xlsx_path)
     print(f"[done] Excel    → {xlsx_path}", file=sys.stderr)
 
     md_path = stat_dir / "session_report.md"
-    md_path.write_text(build_md(sessions, top_n=args.top), encoding="utf-8")
+    md_path.write_text(build_md(sessions, stats, top_n=args.top), encoding="utf-8")
     print(f"[done] Markdown → {md_path}", file=sys.stderr)
 
 
