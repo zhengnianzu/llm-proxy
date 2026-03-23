@@ -244,9 +244,15 @@ def main():
 
     # 导出
     exported_files = 0
+    index_entries: List[dict] = []
+
     for session in sessions:
         session_dir = out / session["folder_prefix"]
         session_dir.mkdir(parents=True, exist_ok=True)
+
+        best_file: Optional[str] = None   # msg_count 最多的文件名
+        best_msg_count = -1
+        best_model = ""
 
         for prefix, tri in sorted(session["items"], key=lambda x: x[0]):
             try:
@@ -281,7 +287,31 @@ def main():
                 json.dump(merged, fh, ensure_ascii=False, indent=2)
             exported_files += 1
 
-    print(f"[done] 导出 {exported_files} 个文件到 {out}")
+            # 追踪 msg_count 最多的文件作为 latest_file
+            messages = extract_messages(req_data) or []
+            has_response = bool((merged.get("response") or {}).get("content"))
+            msg_count = len(messages) + (1 if has_response else 0)
+            if msg_count > best_msg_count:
+                best_msg_count = msg_count
+                best_file = f"{prefix}.json"
+                best_model = req_data.get("model", "")
+
+        if best_file:
+            index_entries.append({
+                "folder": session["folder_prefix"],
+                "q1": session["q1"],
+                "latest_file": best_file,
+                "msg_count": best_msg_count,
+                "model": best_model,
+            })
+
+    # 写入 index.json
+    index_path = out / "index.json"
+    with open(index_path, "w", encoding="utf-8") as fh:
+        json.dump(index_entries, fh, ensure_ascii=False, indent=2)
+
+    print(f"[done] 导出 {exported_files} 个文件，{len(index_entries)} 个 session → {out}")
+    print(f"[done] index.json 已生成: {index_path}")
 
 
 if __name__ == "__main__":
