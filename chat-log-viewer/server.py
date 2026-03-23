@@ -9,10 +9,12 @@ trajectory for each unique first-user-message).
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import re
 import sys
+import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,7 +22,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger("chat-log-viewer")
@@ -246,6 +248,75 @@ def api_refresh():
     return JSONResponse({"count": len(_cache)})
 
 
+@app.get("/api/scan-stream")
+async def api_scan_stream(mode: str = Query("incremental")):
+    """
+    Stream scan results as Server-Sent Events.
+
+    mode=incremental  先推送已缓存条目，再增量扫描新文件
+    mode=full         清空缓存，重新扫描全部文件
+    """
+    loop = asyncio.get_event_loop()
+    q: asyncio.Queue = asyncio.Queue()
+
+    def _worker():
+        global _best, _scanned, _cache
+
+        if mode == "full":
+            _best = OrderedDict()
+            _scanned.clear()
+            new_paths = sorted(ROOT_DIR.rglob("*.json"))
+        else:
+            # incremental: emit cached items first, then scan new files
+            for item in list(_cache):
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "item", "data": item})
+            all_paths = sorted(ROOT_DIR.rglob("*.json"))
+            new_paths = [p for p in all_paths if str(p) not in _scanned]
+
+        for p in new_paths:
+            _scanned.add(str(p))
+
+        # local snapshot of _best for dedup decisions
+        local_best: dict = {k: dict(v) for k, v in _best.items()}
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(_parse_file, p): p for p in new_paths}
+            for future in as_completed(futures):
+                entry = future.result()
+                if entry is None:
+                    continue
+                key = entry["label"]
+                is_replace = key in local_best
+                if not is_replace or entry["msg_count"] > local_best[key]["msg_count"]:
+                    local_best[key] = entry
+                    _best[key] = entry
+                    evt = {"type": "replace" if is_replace else "item", "data": entry}
+                    loop.call_soon_threadsafe(q.put_nowait, evt)
+
+        # rebuild global cache
+        result = sorted(_best.values(), key=lambda x: x["rel_path"], reverse=True)
+        for i, item in enumerate(result):
+            item["id"] = i
+        _cache = result
+        loop.call_soon_threadsafe(q.put_nowait, None)  # sentinel
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    async def generate():
+        while True:
+            evt = await q.get()
+            if evt is None:
+                yield f"data: {json.dumps({'type': 'done', 'count': len(_cache)})}\n\n"
+                break
+            yield f"data: {json.dumps(evt)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/file")
 def api_file(rel_path: str = Query(..., description="Relative path from root dir")):
     """Return the parsed JSON of a single file."""
@@ -296,8 +367,11 @@ def api_file(rel_path: str = Query(..., description="Relative path from root dir
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print(f"[chat-log-viewer] Scanning: {ROOT_DIR}")
-    _cache = scan_directory(incremental=False)  # full scan on startup
-    print(f"[chat-log-viewer] Loaded {len(_cache)} conversations")
+    print(f"[chat-log-viewer] Root dir : {ROOT_DIR}")
     print(f"[chat-log-viewer] Listening on http://{args.host}:{args.port}")
+    # 后台启动初次扫描，服务器立即可用
+    threading.Thread(
+        target=lambda: scan_directory(incremental=False),
+        daemon=True,
+    ).start()
     uvicorn.run(app, host=args.host, port=args.port)

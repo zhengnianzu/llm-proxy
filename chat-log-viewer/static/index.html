@@ -291,80 +291,150 @@
 // ----------------------------------------------------------------
 // State
 // ----------------------------------------------------------------
-let allItems = [];
+let allItems = [];     // 扫描完成后的排序去重列表（用于搜索）
 let activeEl  = null;
 
-const fileListEl = document.getElementById('fileList');
-const chatPanel  = document.getElementById('chatPanel');
-const statsChip  = document.getElementById('statsChip');
+// 流式状态
+let _es = null;                 // 当前 EventSource
+let _liveMap = new Map();       // label -> { item, el }  流式阶段的索引
+
+const fileListEl  = document.getElementById('fileList');
+const chatPanel   = document.getElementById('chatPanel');
+const statsChip   = document.getElementById('statsChip');
 const searchInput = document.getElementById('searchInput');
 
 // ----------------------------------------------------------------
-// Load list from backend
+// Stream helpers
 // ----------------------------------------------------------------
-async function loadList() {
-    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
-    activeEl = null;
-    try {
-        const res = await fetch('/api/list');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        allItems = await res.json();
-        renderSidebar(allItems);
-    } catch(e) {
-        fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${esc(e.message)}</div>`;
-    }
+function _closeStream() {
+    if (_es) { _es.close(); _es = null; }
 }
 
-async function refreshList() {
-    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>重新扫描中…</div>';
+function _startStream(url) {
+    _closeStream();
+    _liveMap.clear();
+    allItems = [];
     activeEl = null;
-    try {
-        await fetch('/api/refresh');
-        await loadList();
-    } catch(e) {
-        fileListEl.innerHTML = `<div class="sidebar-tip">刷新失败：${esc(e.message)}</div>`;
-    }
+    let firstItem = true;
+
+    _es = new EventSource(url);
+
+    _es.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+
+        if (msg.type === 'item') {
+            if (firstItem) { fileListEl.innerHTML = ''; firstItem = false; }
+            const holder = { item: Object.assign({}, msg.data) };
+            holder.el = _makeItemEl(holder);
+            _liveMap.set(msg.data.label, holder);
+            if (_matchesFilter(msg.data)) fileListEl.appendChild(holder.el);
+            _setStatsLive();
+
+        } else if (msg.type === 'replace') {
+            const holder = _liveMap.get(msg.data.label);
+            if (holder) {
+                Object.assign(holder.item, msg.data);  // 原地更新，click 闭包自动获得新数据
+                _refreshItemEl(holder);
+            } else {
+                if (firstItem) { fileListEl.innerHTML = ''; firstItem = false; }
+                const h = { item: Object.assign({}, msg.data) };
+                h.el = _makeItemEl(h);
+                _liveMap.set(msg.data.label, h);
+                if (_matchesFilter(msg.data)) fileListEl.appendChild(h.el);
+            }
+            _setStatsLive();
+
+        } else if (msg.type === 'done') {
+            _closeStream();
+            if (firstItem) {
+                fileListEl.innerHTML = '<div class="sidebar-tip">无对话记录</div>';
+                statsChip.style.display = 'none';
+                return;
+            }
+            // 按 rel_path 降序排列
+            allItems = [..._liveMap.values()]
+                .map(h => h.item)
+                .sort((a, b) => b.rel_path.localeCompare(a.rel_path));
+            _applyFilter();   // 重新按顺序排布 DOM，并更新统计
+        }
+    };
+
+    _es.onerror = () => {
+        _closeStream();
+        if (_liveMap.size === 0) {
+            fileListEl.innerHTML = `<div class="sidebar-tip">扫描失败</div>`;
+        }
+    };
+}
+
+// ----------------------------------------------------------------
+// Load / Refresh
+// ----------------------------------------------------------------
+function loadList() {
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>扫描中…</div>';
+    _startStream('/api/scan-stream?mode=incremental');
+}
+
+function refreshList() {
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>全量重新扫描中…</div>';
+    _startStream('/api/scan-stream?mode=full');
 }
 
 // ----------------------------------------------------------------
 // Search filter
 // ----------------------------------------------------------------
 searchInput.addEventListener('input', () => {
+    if (allItems.length) _applyFilter();
+});
+
+function _matchesFilter(item) {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) return true;
+    return item.label_short.toLowerCase().includes(q) ||
+           item.rel_path.toLowerCase().includes(q);
+}
+
+function _applyFilter() {
     const q = searchInput.value.trim().toLowerCase();
     const filtered = q
         ? allItems.filter(it =>
             it.label_short.toLowerCase().includes(q) ||
             it.rel_path.toLowerCase().includes(q))
         : allItems;
-    renderSidebar(filtered, allItems.length);
-});
-
-// ----------------------------------------------------------------
-// Render sidebar
-// ----------------------------------------------------------------
-function renderSidebar(items, total) {
-    const shown = items.length;
-    const tot   = total ?? shown;
-    statsChip.style.display = 'inline';
-    statsChip.textContent = `${shown} / ${tot} 条对话`;
-
-    if (!items.length) {
-        fileListEl.innerHTML = '<div class="sidebar-tip">无匹配对话</div>';
-        return;
-    }
 
     fileListEl.innerHTML = '';
-    items.forEach(item => {
-        const el = document.createElement('div');
-        el.className = 'file-item';
-        el.innerHTML = `
-            <div class="file-item-label">${esc(item.label_short || '(空)')}</div>
-            <div class="file-item-meta">${item.msg_count} 条${item.model ? ' · ' + esc(item.model) : ''}</div>
-            <div class="file-item-path">${esc(item.rel_path)}</div>
-        `;
-        el.addEventListener('click', () => selectItem(item, el));
-        fileListEl.appendChild(el);
+    filtered.forEach(item => {
+        const holder = _liveMap.get(item.label);
+        if (holder) fileListEl.appendChild(holder.el);
     });
+
+    statsChip.style.display = 'inline';
+    statsChip.textContent = `${filtered.length} / ${allItems.length} 条对话`;
+}
+
+function _setStatsLive() {
+    statsChip.style.display = 'inline';
+    statsChip.textContent = `${_liveMap.size} 条对话（扫描中…）`;
+}
+
+// ----------------------------------------------------------------
+// Item DOM helpers
+// ----------------------------------------------------------------
+function _makeItemEl(holder) {
+    const el = document.createElement('div');
+    el.className = 'file-item';
+    el.addEventListener('click', () => selectItem(holder.item, el));
+    holder.el = el;
+    _refreshItemEl(holder);
+    return el;
+}
+
+function _refreshItemEl({ item, el }) {
+    el.innerHTML = `
+        <div class="file-item-label">${esc(item.label_short || '(空)')}</div>
+        <div class="file-item-meta">${item.msg_count} 条${item.model ? ' · ' + esc(item.model) : ''}</div>
+        <div class="file-item-path">${esc(item.rel_path)}</div>
+    `;
 }
 
 // ----------------------------------------------------------------
