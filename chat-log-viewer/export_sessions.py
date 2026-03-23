@@ -32,8 +32,9 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from tqdm import tqdm
@@ -314,27 +315,26 @@ def main():
     print(f"[info] 共 {len(sessions)} 个 session，跳过 {skipped} 个三元组")
 
     # ── 导出 ─────────────────────────────────────────────────────
-    # 只处理有新文件的 session（续接旧 session 或全新 session）
     active_sessions = [s for s in sessions if s.get("items")]
-
-    # 无变化的旧 session：index entry 原样保留，不做任何文件操作
-    updated_folders = {s["folder_prefix"] for s in active_sessions}
-    index_entries: List[dict] = [
-        e for e in base_index if e.get("folder") not in updated_folders
+    index_entries: List[dict] = []
+    all_items: List[Tuple] = [
+        (s, prefix, tri)
+        for s in active_sessions
+        for prefix, tri in sorted(s["items"], key=lambda x: x[0])
     ]
 
-    exported_files = 0
-    all_items = [(s, prefix, tri) for s in active_sessions for prefix, tri in sorted(s["items"], key=lambda x: x[0])]
+    # 预先创建所有 session 目录（避免多线程竞争 mkdir）
+    for s in active_sessions:
+        (out / s["folder_prefix"]).mkdir(parents=True, exist_ok=True)
 
-    for session, prefix, tri in tqdm(all_items, desc="导出文件", unit="file"):
-        session_dir = out / session["folder_prefix"]
-        session_dir.mkdir(parents=True, exist_ok=True)
-
+    def _export_one(task: Tuple) -> Tuple[str, str, Optional[dict]]:
+        """返回 (folder_prefix, out_filename, merged_data | None)"""
+        session, prefix, tri = task
         try:
             req_data = load_json(tri["req"])
         except Exception as e:
             print(f"[warn] 读取 req 失败 {prefix}: {e}")
-            continue
+            return session["folder_prefix"], f"{prefix}.json", None
 
         merged = dict(req_data)
         if "headers" in tri:
@@ -355,14 +355,27 @@ def main():
         else:
             merged["response"] = {}
 
-        out_file = session_dir / f"{prefix}.json"
+        out_file = out / session["folder_prefix"] / f"{prefix}.json"
         with open(out_file, "w", encoding="utf-8") as fh:
             json.dump(merged, fh, ensure_ascii=False, indent=2)
-        exported_files += 1
+        return session["folder_prefix"], f"{prefix}.json", merged
+
+    # 按 folder_prefix 收集写出结果，用于后续计算 index entry
+    results: Dict[str, List[Tuple[str, dict]]] = {s["folder_prefix"]: [] for s in active_sessions}
+    exported_files = 0
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = {executor.submit(_export_one, task): task for task in all_items}
+        with tqdm(total=len(all_items), desc="导出文件", unit="file") as bar:
+            for future in as_completed(futures):
+                folder_prefix, filename, merged = future.result()
+                bar.update(1)
+                if merged is not None:
+                    results[folder_prefix].append((filename, merged))
+                    exported_files += 1
 
     # 为每个 active session 构建 index entry（取 msg_count 最多的文件）
     for session in active_sessions:
-        session_dir = out / session["folder_prefix"]
         best_file: Optional[str] = None
         best_msg_count = -1
         best_model = ""
@@ -376,20 +389,13 @@ def main():
                     best_model = e.get("model", "")
                     break
 
-        for prefix, tri in sorted(session["items"], key=lambda x: x[0]):
-            out_file = session_dir / f"{prefix}.json"
-            if not out_file.exists():
-                continue
-            try:
-                merged = load_json(out_file)
-            except Exception:
-                continue
+        for filename, merged in results[session["folder_prefix"]]:
             messages = extract_messages(merged) or []
             has_response = bool((merged.get("response") or {}).get("content"))
             msg_count = len(messages) + (1 if has_response else 0)
             if msg_count > best_msg_count:
                 best_msg_count = msg_count
-                best_file = f"{prefix}.json"
+                best_file = filename
                 best_model = merged.get("model", "")
 
         if best_file:
