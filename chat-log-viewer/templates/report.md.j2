@@ -175,3 +175,15 @@
 {% for s in top_sessions %}
 | `{{ s.session }}` | {{ s.duration }} | {{ s.user_turns }} | {{ s.tool_use }} | {{ s.tool_result }} | {{ s.rate }} | {{ s.api_count }} | {{ s.completed }} |
 {% endfor %}
+
+---
+
+{% if tools_top10 %}
+## 9. Top 10 工具调用
+
+| 工具名称 | 调用次数 | 成功 | 失败 | 成功率 |
+|---------|--------:|-----:|-----:|-------:|
+{% for t in tools_top10 %}
+| `{{ t.name }}` | {{ t.calls }} | {{ t.success }} | {{ t.fail }} | {{ t.rate }}% |
+{% endfor %}
+{% endif %}

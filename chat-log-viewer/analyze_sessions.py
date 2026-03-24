@@ -159,6 +159,48 @@ def analyze_tool_results(messages: List[dict]) -> Dict[str, int]:
     }
 
 
+def analyze_tools_detail(full_messages: List[dict]) -> Dict[str, Dict[str, int]]:
+    """统计每个工具的调用次数和成功/失败次数。
+
+    返回 {"use": {tool_name: count}, "success": {...}, "fail": {...}}
+    """
+    id_to_name: Dict[str, str] = {}
+    use_counts: Counter = Counter()
+    success_counts: Counter = Counter()
+    fail_counts: Counter = Counter()
+
+    for m in full_messages:
+        for blk in iter_blocks(m.get("content", [])):
+            if blk.get("type") == "tool_use":
+                tool_id = blk.get("id", "")
+                name = blk.get("name", "unknown")
+                if tool_id:
+                    id_to_name[tool_id] = name
+                use_counts[name] += 1
+
+    for m in full_messages:
+        if m.get("role") != "user":
+            continue
+        for blk in iter_blocks(m.get("content", [])):
+            if blk.get("type") != "tool_result":
+                continue
+            name = id_to_name.get(blk.get("tool_use_id", ""), "unknown")
+            if blk.get("is_error"):
+                fail_counts[name] += 1
+            else:
+                text = _collect_text(blk.get("content", ""))
+                if _has_error_keywords(text):
+                    fail_counts[name] += 1
+                else:
+                    success_counts[name] += 1
+
+    return {
+        "use":     dict(use_counts),
+        "success": dict(success_counts),
+        "fail":    dict(fail_counts),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Q1 提取
 # ---------------------------------------------------------------------------
@@ -326,6 +368,7 @@ def analyze_session(folder: Path) -> Optional[Dict]:
     total_messages = len(full_messages)
     tool_use_cnt   = count_tool_use(messages, resp_content)
     tr             = analyze_tool_results(full_messages)
+    td             = analyze_tools_detail(full_messages)
 
     tool_result_cnt   = tr["total"]
     tool_success_rate = (
@@ -333,23 +376,26 @@ def analyze_session(folder: Path) -> Optional[Dict]:
     )
 
     return {
-        "session":           folder.name,
-        "start_time":        start_ts.strftime("%Y-%m-%d %H:%M:%S") if start_ts else None,
-        "end_time":          end_ts.strftime("%Y-%m-%d %H:%M:%S")   if end_ts   else None,
-        "duration_s":        duration_s,
-        "api_call_count":    api_call_count,
-        "api_errors":        api_errors,
-        "user_turns":        user_turns,
-        "total_messages":    total_messages,
-        "tool_use_count":    tool_use_cnt,
-        "tool_result_count": tool_result_cnt,
-        "tool_success":      tr["success"],
-        "tool_fail_flag":    tr["fail_flag"],
-        "tool_fail_keyword": tr["fail_kw"],
-        "tool_fail_total":   tr["fail_total"],
-        "tool_success_rate": tool_success_rate,
-        "model":             models[-1] if models else "",
-        "q1":                q1,
+        "session":            folder.name,
+        "start_time":         start_ts.strftime("%Y-%m-%d %H:%M:%S") if start_ts else None,
+        "end_time":           end_ts.strftime("%Y-%m-%d %H:%M:%S")   if end_ts   else None,
+        "duration_s":         duration_s,
+        "api_call_count":     api_call_count,
+        "api_errors":         api_errors,
+        "user_turns":         user_turns,
+        "total_messages":     total_messages,
+        "tool_use_count":     tool_use_cnt,
+        "tool_result_count":  tool_result_cnt,
+        "tool_success":       tr["success"],
+        "tool_fail_flag":     tr["fail_flag"],
+        "tool_fail_keyword":  tr["fail_kw"],
+        "tool_fail_total":    tr["fail_total"],
+        "tool_success_rate":  tool_success_rate,
+        "model":              models[-1] if models else "",
+        "q1":                 q1,
+        "tool_use_detail":    td["use"],
+        "tool_success_detail": td["success"],
+        "tool_fail_detail":   td["fail"],
         **dict(zip(("completed", "completed_note"),
                    fmt_quality(check_quality(all_data, tool_use_cnt)))),
     }
@@ -416,6 +462,16 @@ def compute_stats(sessions: List[Dict]) -> Dict:
     dur_vals      = [s["duration_s"]        for s in multi_timed]
     rate_sessions = [s for s in sessions if s["tool_result_count"] > 0]
     model_dist    = Counter(s["model"]      for s in sessions)
+
+    # 全局工具调用统计
+    global_use:     Counter = Counter()
+    global_success: Counter = Counter()
+    global_fail:    Counter = Counter()
+    for s in sessions:
+        global_use.update(s.get("tool_use_detail", {}))
+        global_success.update(s.get("tool_success_detail", {}))
+        global_fail.update(s.get("tool_fail_detail", {}))
+
     return {
         "total":         len(sessions),
         "turns_vals":    turns_vals,
@@ -436,6 +492,9 @@ def compute_stats(sessions: List[Dict]) -> Dict:
         "total_ff":      sum(s["tool_fail_flag"]    for s in sessions),
         "total_fk":      sum(s["tool_fail_keyword"] for s in sessions),
         "total_ft":      sum(s["tool_fail_total"]   for s in sessions),
+        "global_use":    global_use,
+        "global_success": global_success,
+        "global_fail":   global_fail,
     }
 
 
@@ -595,6 +654,17 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
             }
             for s in top_raw
         ],
+
+        "tools_top10": [
+            {
+                "name":    name,
+                "calls":   calls,
+                "success": stats["global_success"].get(name, 0),
+                "fail":    stats["global_fail"].get(name, 0),
+                "rate":    f"{stats['global_success'].get(name, 0) / calls * 100:.1f}" if calls else "0",
+            }
+            for name, calls in stats["global_use"].most_common(10)
+        ],
     }
 
 
@@ -612,6 +682,13 @@ def _sanitize_cell(val: Any) -> Any:
     if not isinstance(val, str):
         return val
     return _ILLEGAL_CHARS_RE.sub("", val)
+
+
+def _fmt_tool_dict(d: Any) -> str:
+    """将工具调用 dict 转为 'tool:count, ...' 字符串，按次数降序。"""
+    if not isinstance(d, dict) or not d:
+        return ""
+    return ", ".join(f"{k}:{v}" for k, v in sorted(d.items(), key=lambda x: -x[1]))
 
 
 # 列定义：(字段key, 中文表头)
@@ -633,6 +710,7 @@ _DETAIL_COLS: List[Tuple[str, str]] = [
     ("tool_fail_total",   "失败合计"),
     ("tool_success_rate", "工具成功率(%)"),
     ("model",             "模型"),
+    ("tool_use_detail",   "工具调用详情"),
     ("completed",         "任务完成"),
     ("completed_note",    "错误备注"),
 ]
@@ -668,7 +746,11 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
     q1_vals   = [_sanitize_cell(s.get("q1")) for s in sessions]
 
     rows = [
-        {label: ("" if key == "q1" else _sanitize_cell(s.get(key)))
+        {label: (
+            "" if key == "q1"
+            else _fmt_tool_dict(s.get(key)) if isinstance(s.get(key), dict)
+            else _sanitize_cell(s.get(key))
+        )
          for key, label in _DETAIL_COLS}
         for s in sessions
     ]
@@ -756,6 +838,14 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
             except IllegalCharacterError:
                 cell.value = ""
             cell.alignment = Alignment(vertical="top")
+
+        # 任务完成列：左对齐
+        completed_col_idx = next(
+            i for i, (_, lbl) in enumerate(_DETAIL_COLS, 1) if lbl == "任务完成"
+        )
+        completed_letter = get_column_letter(completed_col_idx)
+        for row_idx in range(2, ws1.max_row + 1):
+            ws1[f"{completed_letter}{row_idx}"].alignment = Alignment(horizontal="left")
 
         # 列宽自适应
         for col_idx, col_cells in enumerate(ws1.columns, start=1):

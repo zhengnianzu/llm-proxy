@@ -341,6 +341,28 @@
     </table>
   </div>
 
+  <!-- ── 9. Top 10 工具 ── -->
+  {% if tools_top10 %}
+  <div class="card">
+    <h2>9. Top 10 工具调用</h2>
+    <table>
+      <tr>
+        <th>工具名称</th><th class="r">调用次数</th>
+        <th class="r">成功</th><th class="r">失败</th><th class="r">成功率</th>
+      </tr>
+      {% for t in tools_top10 %}
+      <tr>
+        <td><code>{{ t.name }}</code></td>
+        <td class="r">{{ t.calls }}</td>
+        <td class="r">{{ t.success }}</td>
+        <td class="r">{{ t.fail }}</td>
+        <td class="r">{{ t.rate }}%</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
 </div>
 </body>
 </html>
