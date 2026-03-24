@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Session 分析报告</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         font-size: 14px; color: #1a1a2e; background: #f4f6fb; }
+  .page { max-width: 1100px; margin: 32px auto; padding: 0 20px 60px; }
+
+  /* 页头 */
+  .report-header { background: linear-gradient(135deg, #1f4e79 0%, #2e75b6 100%);
+    color: #fff; border-radius: 10px; padding: 28px 36px; margin-bottom: 28px; }
+  .report-header h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .report-header .meta { font-size: 13px; opacity: .8; }
+
+  /* 卡片 */
+  .card { background: #fff; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.07);
+          padding: 24px 28px; margin-bottom: 22px; }
+  .card h2 { font-size: 16px; color: #1f4e79; border-left: 4px solid #2e75b6;
+             padding-left: 10px; margin-bottom: 16px; }
+  .card h3 { font-size: 13px; color: #555; margin: 14px 0 8px; font-weight: 600; }
+
+  /* 汇总指标行 */
+  .kpi-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+  .kpi { flex: 1 1 140px; background: #f0f5ff; border-radius: 8px;
+         padding: 14px 16px; text-align: center; }
+  .kpi .val { font-size: 26px; font-weight: 700; color: #1f4e79; line-height: 1.2; }
+  .kpi .lbl { font-size: 11px; color: #888; margin-top: 4px; }
+
+  /* 表格 */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #1f4e79; color: #fff; padding: 8px 12px; text-align: left; font-weight: 600; }
+  th.r, td.r { text-align: right; }
+  td { padding: 7px 12px; border-bottom: 1px solid #eef0f5; }
+  tr:nth-child(even) td { background: #f7f9fd; }
+  tr:hover td { background: #edf3fb; }
+
+  /* 条形图 */
+  .bar-cell { display: flex; align-items: center; gap: 8px; }
+  .bar-wrap { flex: 1; background: #e8edf5; border-radius: 3px; height: 10px; overflow: hidden; }
+  .bar-fill  { height: 100%; background: linear-gradient(90deg, #2e75b6, #5ba4e0);
+               border-radius: 3px; transition: width .4s; }
+  .bar-pct   { font-size: 11px; color: #666; min-width: 38px; text-align: right; }
+
+  /* 错误标签 */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-ok   { background: #e6f9ee; color: #1a7a3c; }
+  .badge-e001 { background: #fff3cd; color: #856404; }
+  .badge-e002 { background: #fde8e8; color: #b91c1c; }
+  .badge-e003 { background: #e8f0fe; color: #1a56db; }
+  .badge-err  { background: #fde8e8; color: #b91c1c; }
+
+  /* 质量进度环（CSS-only 半圆） */
+  .quality-summary { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  .q-bar-wrap { flex: 1; min-width: 200px; }
+  .q-bar-bg   { background: #e8edf5; border-radius: 4px; height: 16px; overflow: hidden; }
+  .q-bar-ok   { background: #34c759; height: 100%; border-radius: 4px 0 0 4px; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+  code { background: #eef0f5; padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- 页头 -->
+  <div class="report-header">
+    <h1>Session 分析报告</h1>
+    <div class="meta">生成时间：{{ generated_at }}　｜　总 session 数：{{ total }}</div>
+  </div>
+
+  <!-- ── 1. 对话轮次 ── -->
+  <div class="card">
+    <h2>1. 对话轮次（User 发言数）</h2>
+    <div class="kpi-row">
+      <div class="kpi"><div class="val">{{ turns.avg }}</div><div class="lbl">平均</div></div>
+      <div class="kpi"><div class="val">{{ turns.max }}</div><div class="lbl">最大</div></div>
+      <div class="kpi"><div class="val">{{ turns.p50 }}</div><div class="lbl">P50</div></div>
+      <div class="kpi"><div class="val">{{ turns.p90 }}</div><div class="lbl">P90</div></div>
+    </div>
+    <h3>分布</h3>
+    <table>
+      <tr><th>区间</th><th class="r">数量</th><th class="r">占比</th><th style="min-width:180px">分布</th></tr>
+      {% for row in turns.dist %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td class="r">{{ row.count }}</td>
+        <td class="r">{{ row.pct }}%</td>
+        <td><div class="bar-cell">
+          <div class="bar-wrap"><div class="bar-fill" style="width:{{ row.pct }}%"></div></div>
+          <span class="bar-pct">{{ row.pct }}%</span>
+        </div></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <!-- ── 2. 消息总数 ── -->
+  <div class="card">
+    <h2>2. 消息总数（含 assistant 回复）</h2>
+    <div class="kpi-row">
+      <div class="kpi"><div class="val">{{ messages.avg }}</div><div class="lbl">平均</div></div>
+      <div class="kpi"><div class="val">{{ messages.max }}</div><div class="lbl">最大</div></div>
+      <div class="kpi"><div class="val">{{ messages.min }}</div><div class="lbl">最小</div></div>
+      <div class="kpi"><div class="val">{{ messages.p50 }}</div><div class="lbl">P50</div></div>
+      <div class="kpi"><div class="val">{{ messages.p90 }}</div><div class="lbl">P90</div></div>
+    </div>
+    <h3>分布</h3>
+    <table>
+      <tr><th>区间</th><th class="r">数量</th><th class="r">占比</th><th style="min-width:180px">分布</th></tr>
+      {% for row in messages.dist %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td class="r">{{ row.count }}</td>
+        <td class="r">{{ row.pct }}%</td>
+        <td><div class="bar-cell">
+          <div class="bar-wrap"><div class="bar-fill" style="width:{{ row.pct }}%"></div></div>
+          <span class="bar-pct">{{ row.pct }}%</span>
+        </div></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <!-- ── 3. API Call ── -->
+  <div class="card">
+    <h2>3. API Call 次数</h2>
+    <div class="kpi-row">
+      <div class="kpi"><div class="val">{{ api.avg }}</div><div class="lbl">平均</div></div>
+      <div class="kpi"><div class="val">{{ api.max }}</div><div class="lbl">最大</div></div>
+      <div class="kpi"><div class="val">{{ api.single_count }}</div><div class="lbl">单次 ({{ api.single_pct }}%)</div></div>
+      <div class="kpi"><div class="val">{{ api.multi_count }}</div><div class="lbl">多次 ({{ api.multi_pct }}%)</div></div>
+      <div class="kpi"><div class="val">{{ api.err_count }}</div><div class="lbl">含错误 ({{ api.err_pct }}%)</div></div>
+    </div>
+    <h3>分布</h3>
+    <table>
+      <tr><th>区间</th><th class="r">数量</th><th class="r">占比</th><th style="min-width:180px">分布</th></tr>
+      {% for row in api.dist %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td class="r">{{ row.count }}</td>
+        <td class="r">{{ row.pct }}%</td>
+        <td><div class="bar-cell">
+          <div class="bar-wrap"><div class="bar-fill" style="width:{{ row.pct }}%"></div></div>
+          <span class="bar-pct">{{ row.pct }}%</span>
+        </div></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <!-- ── 4. 工具调用 ── -->
+  <div class="card">
+    <h2>4. 工具调用（tool_use / tool_result）</h2>
+    <div class="kpi-row">
+      <div class="kpi"><div class="val">{{ tools.with_count }}</div><div class="lbl">有工具 session ({{ tools.with_pct }}%)</div></div>
+      <div class="kpi"><div class="val">{{ tools.without_count }}</div><div class="lbl">无工具 session ({{ tools.without_pct }}%)</div></div>
+      <div class="kpi"><div class="val">{{ tools.total_use }}</div><div class="lbl">tool_use 总次数</div></div>
+      <div class="kpi"><div class="val">{{ tools.total_result }}</div><div class="lbl">tool_result 总次数</div></div>
+      {% if tools.has_sessions %}
+      <div class="kpi"><div class="val">{{ tools.avg_use }}</div><div class="lbl">有工具 session 均 use</div></div>
+      {% endif %}
+    </div>
+
+    {% if tools.has_results %}
+    <h3>成功率明细</h3>
+    <table>
+      <tr><th>判断方式</th><th class="r">次数</th><th class="r">占总 tool_result</th></tr>
+      <tr><td>成功（无 flag + 无错误关键字）</td><td class="r">{{ tools.total_succ }}</td><td class="r">{{ tools.succ_pct }}%</td></tr>
+      <tr><td>失败：is_error=True</td><td class="r">{{ tools.total_ff }}</td><td class="r">{{ tools.ff_pct }}%</td></tr>
+      <tr><td>失败：内容含错误关键字</td><td class="r">{{ tools.total_fk }}</td><td class="r">{{ tools.fk_pct }}%</td></tr>
+      <tr><td><strong>失败合计</strong></td><td class="r"><strong>{{ tools.total_ft }}</strong></td><td class="r"><strong>{{ tools.ft_pct }}%</strong></td></tr>
+      <tr><td><strong>整体成功率</strong></td><td class="r">—</td><td class="r"><strong>{{ tools.overall_rate }}%</strong></td></tr>
+    </table>
+    {% endif %}
+
+    <div class="two-col" style="margin-top:16px">
+      {% if tools.has_sessions %}
+      <div>
+        <h3>tool_use 次数分布（有工具 session）</h3>
+        <table>
+          <tr><th>区间</th><th class="r">数量</th><th class="r">占比</th><th>分布</th></tr>
+          {% for row in tools.use_dist %}
+          <tr>
+            <td>{{ row.label }}</td><td class="r">{{ row.count }}</td><td class="r">{{ row.pct }}%</td>
+            <td><div class="bar-cell">
+              <div class="bar-wrap"><div class="bar-fill" style="width:{{ row.pct }}%"></div></div>
+              <span class="bar-pct">{{ row.pct }}%</span>
+            </div></td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+      {% endif %}
+      {% if tools.rate_sessions_count > 0 %}
+      <div>
+        <h3>工具成功率分布（有 tool_result 的 session）</h3>
+        <table>
+          <tr><th>区间</th><th class="r">数量</th><th class="r">占比</th><th>分布</th></tr>
+          {% for row in tools.rate_dist %}
+          <tr>
+            <td>{{ row.label }}</td><td class="r">{{ row.count }}</td><td class="r">{{ row.pct }}%</td>
+            <td><div class="bar-cell">
+              <div class="bar-wrap"><div class="bar-fill" style="width:{{ row.pct }}%"></div></div>
+              <span class="bar-pct">{{ row.pct }}%</span>
+            </div></td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ── 5. 耗时 ── -->
+  <div class="card">
+    <h2>5. 消耗时长</h2>
+    <p style="font-size:12px;color:#888;margin-bottom:14px">
+      时长 = 首个 API call 时间戳 → 最后一个 API call 时间戳（单次 session 时长为 0）
+    </p>
+    <div class="kpi-row">
+      <div class="kpi"><div class="val">{{ duration.single_api_count }}</div><div class="lbl">单次 API session</div></div>
+      <div class="kpi"><div class="val">{{ duration.multi_count }}</div><div class="lbl">多轮 session</div></div>
+      {% if duration.has_multi %}
+      <div class="kpi"><div class="val">{{ duration.avg }}</div><div class="lbl">平均耗时</div></div>
+      <div class="kpi"><div class="val">{{ duration.max }}</div><div class="lbl">最长</div></div>
+      <div class="kpi"><div class="val">{{ duration.p50 }}</div><div class="lbl">P50</div></div>
+      <div class="kpi"><div class="val">{{ duration.p90 }}</div><div class="lbl">P90</div></div>
+      {% endif %}
+    </div>
+    {% if duration.has_multi %}
+    <h3>耗时分布（多轮 session）</h3>
+    <table>
+      <tr><th>区间</th><th class="r">数量</th><th class="r">占比</th><th style="min-width:180px">分布</th></tr>
+      {% for row in duration.dist %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td class="r">{{ row.count }}</td>
+        <td class="r">{{ row.pct }}%</td>
+        <td><div class="bar-cell">
+          <div class="bar-wrap"><div class="bar-fill" style="width:{{ row.pct }}%"></div></div>
+          <span class="bar-pct">{{ row.pct }}%</span>
+        </div></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </div>
+
+  <!-- ── 6. 模型 ── -->
+  <div class="card">
+    <h2>6. 模型使用分布</h2>
+    <table>
+      <tr><th>模型</th><th class="r">数量</th><th class="r">占比</th><th style="min-width:180px">分布</th></tr>
+      {% for m in models %}
+      <tr>
+        <td><code>{{ m.name }}</code></td>
+        <td class="r">{{ m.count }}</td>
+        <td class="r">{{ m.pct }}%</td>
+        <td><div class="bar-cell">
+          <div class="bar-wrap"><div class="bar-fill" style="width:{{ m.pct }}%"></div></div>
+          <span class="bar-pct">{{ m.pct }}%</span>
+        </div></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <!-- ── 7. 质量评估 ── -->
+  <div class="card">
+    <h2>7. 质量评估（任务完成状态）</h2>
+    <div class="quality-summary" style="margin-bottom:18px">
+      <div class="kpi" style="background:#e6f9ee">
+        <div class="val" style="color:#1a7a3c">{{ quality.ok_count }}</div>
+        <div class="lbl">无问题（{{ quality.ok_pct }}%）</div>
+      </div>
+      <div class="kpi" style="background:#fde8e8">
+        <div class="val" style="color:#b91c1c">{{ quality.fail_count }}</div>
+        <div class="lbl">存在问题（{{ quality.fail_pct }}%）</div>
+      </div>
+      <div class="q-bar-wrap">
+        <div style="font-size:12px;color:#666;margin-bottom:6px">质量通过率</div>
+        <div class="q-bar-bg">
+          <div class="q-bar-ok" style="width:{{ quality.ok_pct }}%"></div>
+        </div>
+        <div style="font-size:11px;color:#888;margin-top:4px">{{ quality.ok_pct }}% 无质量问题</div>
+      </div>
+    </div>
+    {% if quality.has_fails %}
+    <h3>错误类型分布</h3>
+    <table>
+      <tr><th>错误码</th><th>说明</th><th class="r">命中 session 数</th><th class="r">占比</th><th style="min-width:160px">分布</th></tr>
+      {% for e in quality.error_dist %}
+      <tr>
+        <td><span class="badge badge-err">{{ e.code }}</span></td>
+        <td>{{ e.desc }}</td>
+        <td class="r">{{ e.count }}</td>
+        <td class="r">{{ e.pct }}%</td>
+        <td><div class="bar-cell">
+          <div class="bar-wrap"><div class="bar-fill" style="width:{{ e.pct }}%;background:linear-gradient(90deg,#e55,#f88)"></div></div>
+          <span class="bar-pct">{{ e.pct }}%</span>
+        </div></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </div>
+
+  <!-- ── 8. Top N ── -->
+  <div class="card">
+    <h2>8. 耗时最长 Top {{ top_n }} Session</h2>
+    <table>
+      <tr>
+        <th>Session</th><th class="r">时长</th><th class="r">用户轮次</th>
+        <th class="r">tool_use</th><th class="r">tool_result</th>
+        <th class="r">成功率</th><th class="r">请求次数</th><th>完成状态</th>
+      </tr>
+      {% for s in top_sessions %}
+      <tr>
+        <td><code>{{ s.session }}</code></td>
+        <td class="r">{{ s.duration }}</td>
+        <td class="r">{{ s.user_turns }}</td>
+        <td class="r">{{ s.tool_use }}</td>
+        <td class="r">{{ s.tool_result }}</td>
+        <td class="r">{{ s.rate }}</td>
+        <td class="r">{{ s.api_count }}</td>
+        <td>
+          {% if s.completed == 0 %}
+            <span class="badge badge-ok">✓ 正常</span>
+          {% else %}
+            <span class="badge badge-err">{{ s.completed }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+</div>
+</body>
+</html>

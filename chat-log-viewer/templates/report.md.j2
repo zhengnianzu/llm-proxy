@@ -1,0 +1,177 @@
+# Session 分析报告
+
+> 生成时间: {{ generated_at }}　　总 session 数: **{{ total }}**
+
+---
+
+## 1. 对话轮次（User 发言数）
+
+| 统计项 | 数值 |
+|--------|-----:|
+| 平均   | {{ turns.avg }} |
+| 最大   | {{ turns.max }} |
+| P50    | {{ turns.p50 }} |
+| P90    | {{ turns.p90 }} |
+
+**分布：**
+
+| 区间 | 数量 | 占比 | 分布 |
+|------|-----:|-----:|------|
+{% for row in turns.dist %}
+| {{ row.label }} | {{ row.count }} | {{ row.pct }}% | {{ row.bar }} |
+{% endfor %}
+
+---
+
+## 2. 消息总数（含 assistant 回复）
+
+| 统计项 | 数值 |
+|--------|-----:|
+| 平均   | {{ messages.avg }} |
+| 最大   | {{ messages.max }} |
+| 最小   | {{ messages.min }} |
+| P50    | {{ messages.p50 }} |
+| P90    | {{ messages.p90 }} |
+
+**分布：**
+
+| 区间 | 数量 | 占比 | 分布 |
+|------|-----:|-----:|------|
+{% for row in messages.dist %}
+| {{ row.label }} | {{ row.count }} | {{ row.pct }}% | {{ row.bar }} |
+{% endfor %}
+
+---
+
+## 3. API Call 次数
+
+| 统计项 | 数值 |
+|--------|-----:|
+| 平均              | {{ api.avg }} |
+| 最大              | {{ api.max }} |
+| 单次              | {{ api.single_count }} ({{ api.single_pct }}%) |
+| 多次              | {{ api.multi_count }} ({{ api.multi_pct }}%) |
+| 含 4xx/5xx 错误   | {{ api.err_count }} ({{ api.err_pct }}%) |
+
+**分布：**
+
+| 区间 | 数量 | 占比 | 分布 |
+|------|-----:|-----:|------|
+{% for row in api.dist %}
+| {{ row.label }} | {{ row.count }} | {{ row.pct }}% | {{ row.bar }} |
+{% endfor %}
+
+---
+
+## 4. 工具调用（tool_use / tool_result）
+
+| 统计项 | 数值 |
+|--------|-----:|
+| 有工具调用的 session  | {{ tools.with_count }} ({{ tools.with_pct }}%) |
+| 无工具调用的 session  | {{ tools.without_count }} ({{ tools.without_pct }}%) |
+| tool_use 总次数       | {{ tools.total_use }} |
+| tool_result 总次数    | {{ tools.total_result }} |
+{% if tools.has_sessions %}
+| 有工具 session 平均 tool_use | {{ tools.avg_use }} |
+| 最大 tool_use                | {{ tools.max_use }} |
+| P50 tool_use                 | {{ tools.p50_use }} |
+| P90 tool_use                 | {{ tools.p90_use }} |
+{% endif %}
+
+{% if tools.has_results %}
+**成功率明细：**
+
+| 判断方式 | 次数 | 占总 tool_result |
+|----------|-----:|-----------------:|
+| 成功（无 flag + 无错误关键字） | {{ tools.total_succ }} | {{ tools.succ_pct }}% |
+| 失败：is_error=True           | {{ tools.total_ff }}   | {{ tools.ff_pct }}% |
+| 失败：内容含错误关键字        | {{ tools.total_fk }}   | {{ tools.fk_pct }}% |
+| **失败合计**                  | **{{ tools.total_ft }}** | **{{ tools.ft_pct }}%** |
+| **整体成功率**                | —  | **{{ tools.overall_rate }}%** |
+
+{% endif %}
+{% if tools.has_sessions %}
+**tool_use 次数分布（有工具 session）：**
+
+| 区间 | 数量 | 占比 | 分布 |
+|------|-----:|-----:|------|
+{% for row in tools.use_dist %}
+| {{ row.label }} | {{ row.count }} | {{ row.pct }}% | {{ row.bar }} |
+{% endfor %}
+{% endif %}
+{% if tools.rate_sessions_count > 0 %}
+**工具成功率分布（有 tool_result 的 session）：**
+
+| 区间 | 数量 | 占比 | 分布 |
+|------|-----:|-----:|------|
+{% for row in tools.rate_dist %}
+| {{ row.label }} | {{ row.count }} | {{ row.pct }}% | {{ row.bar }} |
+{% endfor %}
+{% endif %}
+
+---
+
+## 5. 消耗时长
+
+> 时长 = 首个 API call 时间戳 → 最后一个 API call 时间戳（单次 session 时长为 0）
+
+| 统计项 | 数值 |
+|--------|-----:|
+| 单次 API call session | {{ duration.single_api_count }} |
+| 多轮 session（有时长） | {{ duration.multi_count }} |
+{% if duration.has_multi %}
+| 平均耗时 | {{ duration.avg }} |
+| 最长     | {{ duration.max }} |
+| 最短     | {{ duration.min }} |
+| P50      | {{ duration.p50 }} |
+| P90      | {{ duration.p90 }} |
+{% endif %}
+
+{% if duration.has_multi %}
+**耗时分布（多轮 session）：**
+
+| 区间 | 数量 | 占比 | 分布 |
+|------|-----:|-----:|------|
+{% for row in duration.dist %}
+| {{ row.label }} | {{ row.count }} | {{ row.pct }}% | {{ row.bar }} |
+{% endfor %}
+{% endif %}
+
+---
+
+## 6. 模型使用分布
+
+| 模型 | 数量 | 占比 |
+|------|-----:|-----:|
+{% for m in models %}
+| `{{ m.name }}` | {{ m.count }} | {{ m.pct }}% |
+{% endfor %}
+
+---
+
+## 7. 质量评估（任务完成状态）
+
+| 统计项 | 数量 | 占比 |
+|--------|-----:|-----:|
+| 无质量问题（completed = 0） | {{ quality.ok_count }}   | {{ quality.ok_pct }}%   |
+| 存在质量问题                | {{ quality.fail_count }} | {{ quality.fail_pct }}% |
+
+{% if quality.has_fails %}
+**错误类型分布：**
+
+| 错误码 | 说明 | 命中 session 数 | 占比 |
+|--------|------|----------------:|-----:|
+{% for e in quality.error_dist %}
+| `{{ e.code }}` | {{ e.desc }} | {{ e.count }} | {{ e.pct }}% |
+{% endfor %}
+{% endif %}
+
+---
+
+## 8. 耗时最长 Top {{ top_n }} Session
+
+| Session | 时长 | 用户轮次 | tool_use | tool_result | 成功率 | 请求次数 | 完成状态 |
+|---------|-----:|---------:|---------:|------------:|-------:|---------:|---------|
+{% for s in top_sessions %}
+| `{{ s.session }}` | {{ s.duration }} | {{ s.user_turns }} | {{ s.tool_use }} | {{ s.tool_result }} | {{ s.rate }} | {{ s.api_count }} | {{ s.completed }} |
+{% endfor %}
