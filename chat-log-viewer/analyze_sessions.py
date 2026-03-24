@@ -15,6 +15,7 @@ import re
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -189,6 +190,89 @@ def get_q1(messages: List[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 质量评估
+# ---------------------------------------------------------------------------
+
+# 错误代码 → 中文说明
+QUALITY_ERRORS: Dict[str, str] = {
+    "E001": "乱码(行均字符过少)",
+    "E002": "200空响应",
+    "E003": "工具调用过少(<3次)",
+}
+
+
+def _is_garbled(text: str, min_lines: int = 10, max_avg_chars: float = 5.0) -> bool:
+    """判断文本是否疑似乱码：非空行数 >= min_lines 且平均每行字符数 < max_avg_chars。"""
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) < min_lines:
+        return False
+    return (sum(len(l) for l in lines) / len(lines)) < max_avg_chars
+
+
+def _scan_garbled(all_data: List[dict]) -> bool:
+    """遍历所有请求的 messages content、thinking 块及 response content，检测乱码。"""
+    for data in all_data:
+        # messages
+        for msg in (data.get("messages") or []):
+            content = msg.get("content", [])
+            # 普通文本内容
+            text = _collect_text(content)
+            if text and _is_garbled(text):
+                return True
+            # thinking / reasoning 块
+            if isinstance(content, list):
+                for blk in content:
+                    if not isinstance(blk, dict):
+                        continue
+                    thinking = blk.get("thinking") or blk.get("reasoning_content") or ""
+                    if isinstance(thinking, str) and _is_garbled(thinking):
+                        return True
+        # response content
+        resp_content = (data.get("response") or {}).get("content")
+        if resp_content:
+            text = _collect_text(resp_content)
+            if text and _is_garbled(text):
+                return True
+    return False
+
+
+def check_quality(all_data: List[dict], tool_use_cnt: int) -> List[str]:
+    """
+    对单个 session 的原始 JSON 数据做质量检查。
+    返回触发的错误代码列表（空列表 = 无问题）。
+    """
+    errors: List[str] = []
+
+    # E001: 乱码
+    if _scan_garbled(all_data):
+        errors.append("E001")
+
+    # E002: 请求返回 200 但响应内容为空
+    for data in all_data:
+        resp = data.get("response") or {}
+        status = resp.get("status_code")
+        content = resp.get("content")
+        if status == 200 and not content:
+            errors.append("E002")
+            break
+
+    # E003: 工具调用次数 < 3
+    if tool_use_cnt < 3:
+        errors.append("E003")
+
+    return errors
+
+
+def fmt_quality(error_codes: List[str]) -> tuple:
+    """返回 (codes, note) 二元组。无错误时 codes=0, note=''。"""
+    if not error_codes:
+        return 0, ""
+    codes = ",".join(error_codes)
+    note  = "; ".join(QUALITY_ERRORS[c] for c in error_codes if c in QUALITY_ERRORS)
+    return codes, note
+
+
+# ---------------------------------------------------------------------------
 # 单 session 分析
 # ---------------------------------------------------------------------------
 
@@ -266,7 +350,8 @@ def analyze_session(folder: Path) -> Optional[Dict]:
         "tool_success_rate": tool_success_rate,
         "model":             models[-1] if models else "",
         "q1":                q1,
-        "completed":         None,
+        **dict(zip(("completed", "completed_note"),
+                   fmt_quality(check_quality(all_data, tool_use_cnt)))),
     }
 
 
@@ -295,8 +380,32 @@ def pct(values: List[float], p: int) -> float:
     return sv[min(int(len(sv) * p / 100), len(sv) - 1)]
 
 
+def _dist_rows(vals: List, buckets: List[Tuple], unit: str = "") -> List[Dict]:
+    """将数值列表按桶分组，返回含标签/计数/占比/条形图的行列表，供模板直接渲染。"""
+    total  = len(vals)
+    counts = [sum(1 for v in vals if v is not None and lo <= v < hi) for _, lo, hi in buckets]
+    max_c  = max(counts, default=1)
+    return [
+        {
+            "label": f"{label}{unit}",
+            "count": cnt,
+            "pct":   round(cnt / total * 100, 1) if total else 0.0,
+            "bar":   "█" * (max(1, round(cnt / max(max_c, 1) * 15)) if cnt else 0),
+        }
+        for (label, lo, hi), cnt in zip(buckets, counts)
+    ]
+
+
+def _extract_error_codes(completed) -> List[str]:
+    """从 completed 字段值提取错误代码列表。"""
+    if completed == 0:
+        return []
+    codes_part = str(completed).split(" ")[0]
+    return [c.strip() for c in codes_part.split(",") if c.strip()]
+
+
 def compute_stats(sessions: List[Dict]) -> Dict:
-    """对 sessions 做一次性聚合，供 Excel 和 Markdown 共用。"""
+    """对 sessions 做一次性聚合，供 Excel 和模板渲染共用。"""
     turns_vals    = [s["user_turns"]        for s in sessions]
     msg_vals      = [s["total_messages"]    for s in sessions]
     api_vals      = [s["api_call_count"]    for s in sessions]
@@ -330,9 +439,180 @@ def compute_stats(sessions: List[Dict]) -> Dict:
     }
 
 
+def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
+    """将 sessions 和 stats 组装为 Jinja2 模板上下文，HTML 和 Markdown 模板共用。"""
+    total         = stats["total"]
+    turns_vals    = stats["turns_vals"]
+    msg_vals      = stats["msg_vals"]
+    api_vals      = stats["api_vals"]
+    with_tools    = stats["with_tools"]
+    tu_vals       = stats["tu_vals"]
+    rate_sessions = stats["rate_sessions"]
+    multi_timed   = stats["multi_timed"]
+    dur_vals      = stats["dur_vals"]
+    total_tr      = stats["total_tr"]
+    single_count  = sum(1 for v in api_vals if v == 1)
+
+    # 质量 / 完成状态统计
+    ok_count    = sum(1 for s in sessions if s["completed"] == 0)
+    fail_count  = total - ok_count
+    err_counter: Counter = Counter()
+    for s in sessions:
+        for code in _extract_error_codes(s["completed"]):
+            err_counter[code] += 1
+
+    top_raw = sorted(
+        [s for s in sessions if s.get("duration_s")],
+        key=lambda x: -x["duration_s"],
+    )[:top_n]
+
+    def p(vals, q):  # shorthand
+        return int(pct(vals, q))
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total":  total,
+        "top_n":  top_n,
+
+        "turns": {
+            "avg":  f"{sum(turns_vals)/total:.2f}",
+            "max":  max(turns_vals),
+            "p50":  p(turns_vals, 50),
+            "p90":  p(turns_vals, 90),
+            "dist": _dist_rows(turns_vals, [
+                ("1",1,2),("2-3",2,4),("4-7",4,8),("8-15",8,16),(">15",16,10**9)
+            ], "轮"),
+        },
+
+        "messages": {
+            "avg":  f"{sum(msg_vals)/total:.2f}",
+            "max":  max(msg_vals),
+            "min":  min(msg_vals),
+            "p50":  p(msg_vals, 50),
+            "p90":  p(msg_vals, 90),
+            "dist": _dist_rows(msg_vals, [
+                ("1-2",0,3),("3-5",3,6),("6-10",6,11),
+                ("11-20",11,21),("21-50",21,51),(">50",51,10**9)
+            ], "条"),
+        },
+
+        "api": {
+            "avg":          f"{sum(api_vals)/total:.2f}",
+            "max":          max(api_vals),
+            "single_count": single_count,
+            "single_pct":   f"{single_count/total*100:.1f}",
+            "multi_count":  stats["multi_api"],
+            "multi_pct":    f"{stats['multi_api']/total*100:.1f}",
+            "err_count":    stats["api_err"],
+            "err_pct":      f"{stats['api_err']/total*100:.1f}",
+            "dist": _dist_rows(api_vals, [
+                ("1次",1,2),("2-3次",2,4),("4-10次",4,11),("11-30次",11,31),(">30次",31,10**9)
+            ]),
+        },
+
+        "tools": {
+            "with_count":    len(with_tools),
+            "with_pct":      f"{len(with_tools)/total*100:.1f}",
+            "without_count": total - len(with_tools),
+            "without_pct":   f"{(total-len(with_tools))/total*100:.1f}",
+            "total_use":     stats["total_tu"],
+            "total_result":  total_tr,
+            "has_sessions":  bool(with_tools),
+            "avg_use":       f"{sum(tu_vals)/len(tu_vals):.1f}" if tu_vals else "0",
+            "max_use":       max(tu_vals) if tu_vals else 0,
+            "p50_use":       p(tu_vals, 50) if tu_vals else 0,
+            "p90_use":       p(tu_vals, 90) if tu_vals else 0,
+            "has_results":   total_tr > 0,
+            "total_succ":    stats["total_succ"],
+            "total_ff":      stats["total_ff"],
+            "total_fk":      stats["total_fk"],
+            "total_ft":      stats["total_ft"],
+            "succ_pct":      f"{stats['total_succ']/total_tr*100:.1f}" if total_tr else "0",
+            "ff_pct":        f"{stats['total_ff']/total_tr*100:.1f}"   if total_tr else "0",
+            "fk_pct":        f"{stats['total_fk']/total_tr*100:.1f}"   if total_tr else "0",
+            "ft_pct":        f"{stats['total_ft']/total_tr*100:.1f}"   if total_tr else "0",
+            "overall_rate":  f"{stats['total_succ']/total_tr*100:.1f}" if total_tr else "0",
+            "use_dist": _dist_rows(tu_vals, [
+                ("1-5次",1,6),("6-15次",6,16),("16-30次",16,31),
+                ("31-50次",31,51),(">50次",51,10**9)
+            ]) if tu_vals else [],
+            "rate_sessions_count": len(rate_sessions),
+            "rate_dist": _dist_rows(
+                [s["tool_success_rate"] for s in rate_sessions],
+                [("0-50%",0,50),("50-80%",50,80),("80-95%",80,95),
+                 ("95-99%",95,99),("100%",100,101)]
+            ) if rate_sessions else [],
+        },
+
+        "duration": {
+            "single_api_count": sum(1 for s in sessions if s["api_call_count"] == 1),
+            "multi_count":      len(multi_timed),
+            "has_multi":        bool(multi_timed),
+            "avg": fmt_duration(sum(dur_vals)/len(dur_vals)) if dur_vals else "N/A",
+            "max": fmt_duration(max(dur_vals))               if dur_vals else "N/A",
+            "min": fmt_duration(min(dur_vals))               if dur_vals else "N/A",
+            "p50": fmt_duration(pct(dur_vals, 50))           if dur_vals else "N/A",
+            "p90": fmt_duration(pct(dur_vals, 90))           if dur_vals else "N/A",
+            "dist": _dist_rows(dur_vals, [
+                ("<1min",0,60),("1-5min",60,300),("5-15min",300,900),
+                ("15-30min",900,1800),(">30min",1800,10**9)
+            ]) if dur_vals else [],
+        },
+
+        "models": [
+            {"name": mdl or "(未知)", "count": cnt, "pct": f"{cnt/total*100:.1f}"}
+            for mdl, cnt in sorted(stats["model_dist"].items(), key=lambda x: -x[1])
+        ],
+
+        "quality": {
+            "ok_count":   ok_count,
+            "ok_pct":     f"{ok_count/total*100:.1f}",
+            "fail_count": fail_count,
+            "fail_pct":   f"{fail_count/total*100:.1f}",
+            "has_fails":  fail_count > 0,
+            "error_dist": [
+                {
+                    "code":  code,
+                    "desc":  QUALITY_ERRORS.get(code, code),
+                    "count": cnt,
+                    "pct":   f"{cnt/total*100:.1f}",
+                }
+                for code, cnt in sorted(err_counter.items(), key=lambda x: -x[1])
+            ],
+        },
+
+        "top_sessions": [
+            {
+                "session":     s["session"],
+                "duration":    fmt_duration(s["duration_s"]),
+                "user_turns":  s["user_turns"],
+                "tool_use":    s["tool_use_count"],
+                "tool_result": s["tool_result_count"],
+                "rate":        fmt_rate(s["tool_success_rate"]),
+                "api_count":   s["api_call_count"],
+                "completed":      s["completed"],
+                "completed_note": s.get("completed_note", ""),
+            }
+            for s in top_raw
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Excel 导出
 # ---------------------------------------------------------------------------
+
+# openpyxl 非法字符（ASCII 控制字符）过滤
+_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_Q1_MAX_LEN = 2000
+
+
+def _sanitize_cell(val: Any) -> Any:
+    """去除 Excel 非法控制字符。"""
+    if not isinstance(val, str):
+        return val
+    return _ILLEGAL_CHARS_RE.sub("", val)
+
 
 # 列定义：(字段key, 中文表头)
 _DETAIL_COLS: List[Tuple[str, str]] = [
@@ -354,6 +634,7 @@ _DETAIL_COLS: List[Tuple[str, str]] = [
     ("tool_success_rate", "工具成功率(%)"),
     ("model",             "模型"),
     ("completed",         "任务完成"),
+    ("completed_note",    "错误备注"),
 ]
 
 
@@ -382,8 +663,15 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
     rate_vals  = stats["rate_vals"]
     dur_vals   = stats["dur_vals"]
 
-    # ── 构建详情 DataFrame ───────────────────────────────────────────────────
-    rows = [{label: s.get(key) for key, label in _DETAIL_COLS} for s in sessions]
+    # ── 构建详情 DataFrame（Q1 列先置空，后续单独写入）────────────────────────
+    _q1_label = next(label for key, label in _DETAIL_COLS if key == "q1")
+    q1_vals   = [_sanitize_cell(s.get("q1")) for s in sessions]
+
+    rows = [
+        {label: ("" if key == "q1" else _sanitize_cell(s.get(key)))
+         for key, label in _DETAIL_COLS}
+        for s in sessions
+    ]
     df_detail = pd.DataFrame(rows)
 
     # ── 构建分布 DataFrames ──────────────────────────────────────────────────
@@ -453,13 +741,21 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
                 except (TypeError, ValueError):
                     pass
 
-        # Q1列文字对齐
+        # Q1列：逐格写入，捕获 IllegalCharacterError 时置空
+        from openpyxl.utils.exceptions import IllegalCharacterError
         q1_col_idx = next(
             i for i, (_, lbl) in enumerate(_DETAIL_COLS, 1) if lbl == "Q1首问"
         )
         q1_letter = get_column_letter(q1_col_idx)
-        for row in range(2, ws1.max_row + 1):
-            ws1[f"{q1_letter}{row}"].alignment = Alignment(wrap_text=True, vertical="top")
+        for row_idx, val in enumerate(q1_vals, start=2):
+            cell = ws1[f"{q1_letter}{row_idx}"]
+            if val and len(val) > _Q1_MAX_LEN:
+                val = val[:_Q1_MAX_LEN] + "…"
+            try:
+                cell.value = val
+            except IllegalCharacterError:
+                cell.value = ""
+            cell.alignment = Alignment(vertical="top")
 
         # 列宽自适应
         for col_idx, col_cells in enumerate(ws1.columns, start=1):
@@ -509,218 +805,21 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Markdown 汇总报告
+# 报告渲染（Jinja2）
 # ---------------------------------------------------------------------------
 
-def build_md(sessions: List[Dict], stats: Dict, top_n: int = 10) -> str:
-    total         = stats["total"]
-    turns_vals    = stats["turns_vals"]
-    msg_vals      = stats["msg_vals"]
-    api_vals      = stats["api_vals"]
-    with_tools    = stats["with_tools"]
-    tu_vals       = stats["tu_vals"]
-    rate_sessions = stats["rate_sessions"]
-    multi_timed   = stats["multi_timed"]
-    dur_vals      = stats["dur_vals"]
-    model_dist    = stats["model_dist"]
-    multi_api     = stats["multi_api"]
-    api_err       = stats["api_err"]
-    total_tu      = stats["total_tu"]
-    total_tr      = stats["total_tr"]
-    total_succ    = stats["total_succ"]
-    total_ff      = stats["total_ff"]
-    total_fk      = stats["total_fk"]
-    total_ft      = stats["total_ft"]
-
-    lines: List[str] = []
-
-    def ln(s: str = "") -> None:
-        lines.append(s)
-
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    ln("# Session 分析报告")
-    ln()
-    ln(f"> 生成时间: {generated_at}　　总 session 数: **{total}**")
-    ln()
-    ln("---")
-    ln()
-
-    # ── 1. 对话轮次 ──────────────────────────────────────────────────────────
-    dist_turns = Counter(turns_vals)
-    ln("## 1. 对话轮次（User 发言数）")
-    ln()
-    ln("| 统计项 | 数值 |")
-    ln("|--------|------|")
-    ln(f"| 平均 | {sum(turns_vals)/total:.2f} |")
-    ln(f"| 最大 | {max(turns_vals)} |")
-    ln(f"| P50  | {pct(turns_vals, 50):.0f} |")
-    ln(f"| P90  | {pct(turns_vals, 90):.0f} |")
-    ln()
-    ln("**分布：**")
-    ln()
-    max_c = max(dist_turns.values())
-    ln("| 轮次 | 数量 | 占比 | 分布 |")
-    ln("|-----:|-----:|-----:|------|")
-    for k in sorted(dist_turns):
-        bar = "█" * max(1, round(dist_turns[k] / max_c * 15))
-        ln(f"| {k} | {dist_turns[k]} | {dist_turns[k]/total*100:.1f}% | {bar} |")
-    ln()
-
-    # ── 2. 消息总数 ──────────────────────────────────────────────────────────
-    ln("## 2. 消息总数（含 assistant 回复）")
-    ln()
-    ln("| 统计项 | 数值 |")
-    ln("|--------|------|")
-    ln(f"| 平均 | {sum(msg_vals)/total:.2f} |")
-    ln(f"| 最大 | {max(msg_vals)} |")
-    ln(f"| 最小 | {min(msg_vals)} |")
-    ln(f"| P50  | {pct(msg_vals, 50):.0f} |")
-    ln(f"| P90  | {pct(msg_vals, 90):.0f} |")
-    ln()
-    ln("**分布：**")
-    ln()
-    ln("| 区间 | 数量 | 占比 | 分布 |")
-    ln("|------|-----:|-----:|------|")
-    msg_buckets = [("1-2条",0,3),("3-5条",3,6),("6-10条",6,11),
-                   ("11-20条",11,21),("21-50条",21,51),(">50条",51,10**9)]
-    max_c2 = max(sum(1 for v in msg_vals if lo<=v<hi) for _,lo,hi in msg_buckets)
-    for label, lo, hi in msg_buckets:
-        cnt = sum(1 for v in msg_vals if lo <= v < hi)
-        bar = "█" * max(1, round(cnt / max(max_c2,1) * 15)) if cnt else ""
-        ln(f"| {label} | {cnt} | {cnt/total*100:.1f}% | {bar} |")
-    ln()
-
-    # ── 3. API Call 次数 ─────────────────────────────────────────────────────
-    ln("## 3. API Call 次数")
-    ln()
-    ln("| 统计项 | 数值 |")
-    ln("|--------|------|")
-    ln(f"| 平均   | {sum(api_vals)/total:.2f} |")
-    ln(f"| 最大   | {max(api_vals)} |")
-    ln(f"| 单次   | {sum(1 for v in api_vals if v==1)} ({sum(1 for v in api_vals if v==1)/total*100:.1f}%) |")
-    ln(f"| 多次   | {multi_api} ({multi_api/total*100:.1f}%) |")
-    ln(f"| 含 4xx/5xx 错误 | {api_err} ({api_err/total*100:.1f}%) |")
-    ln()
-    ln("**分布：**")
-    ln()
-    api_buckets = [("1次",1,2),("2-3次",2,4),("4-10次",4,11),("11-30次",11,31),(">30次",31,10**9)]
-    ln("| 区间 | 数量 | 占比 | 分布 |")
-    ln("|------|-----:|-----:|------|")
-    max_c3 = max(sum(1 for v in api_vals if lo<=v<hi) for _,lo,hi in api_buckets)
-    for label, lo, hi in api_buckets:
-        cnt = sum(1 for v in api_vals if lo <= v < hi)
-        bar = "█" * max(1, round(cnt / max(max_c3,1) * 15)) if cnt else ""
-        ln(f"| {label} | {cnt} | {cnt/total*100:.1f}% | {bar} |")
-    ln()
-
-    # ── 4. 工具调用 ──────────────────────────────────────────────────────────
-    ln("## 4. 工具调用（tool_use / tool_result）")
-    ln()
-    ln("| 统计项 | 数值 |")
-    ln("|--------|------|")
-    ln(f"| 有工具调用的 session  | {len(with_tools)} ({len(with_tools)/total*100:.1f}%) |")
-    ln(f"| 无工具调用的 session  | {total-len(with_tools)} ({(total-len(with_tools))/total*100:.1f}%) |")
-    ln(f"| tool_use 总次数       | {total_tu} |")
-    ln(f"| tool_result 总次数    | {total_tr} |")
-    if with_tools:
-        ln(f"| 有工具 session 平均 tool_use | {sum(tu_vals)/len(tu_vals):.1f} |")
-        ln(f"| 最大 tool_use  | {max(tu_vals)} |")
-        ln(f"| P50 tool_use   | {pct(tu_vals, 50):.0f} |")
-        ln(f"| P90 tool_use   | {pct(tu_vals, 90):.0f} |")
-    ln()
-    if total_tr > 0:
-        ln("**成功率明细：**")
-        ln()
-        ln("| 判断方式 | 次数 | 占总 tool_result |")
-        ln("|----------|-----:|-----------------:|")
-        ln(f"| 成功（无 flag + 无错误关键字） | {total_succ} | {total_succ/total_tr*100:.1f}% |")
-        ln(f"| 失败：is_error=True           | {total_ff}   | {total_ff/total_tr*100:.1f}% |")
-        ln(f"| 失败：内容含错误关键字        | {total_fk}   | {total_fk/total_tr*100:.1f}% |")
-        ln(f"| **失败合计**  | **{total_ft}** | **{total_ft/total_tr*100:.1f}%** |")
-        ln(f"| **整体成功率** | — | **{total_succ/total_tr*100:.1f}%** |")
-        ln()
-    ln("**tool_use 次数分布（有工具 session）：**")
-    ln()
-    if with_tools:
-        tu_bkts = [("1-5次",1,6),("6-15次",6,16),("16-30次",16,31),("31-50次",31,51),(">50次",51,10**9)]
-        max_c4 = max(sum(1 for v in tu_vals if lo<=v<hi) for _,lo,hi in tu_bkts)
-        ln("| 区间 | 数量 | 占比 | 分布 |")
-        ln("|------|-----:|-----:|------|")
-        for label, lo, hi in tu_bkts:
-            cnt = sum(1 for v in tu_vals if lo <= v < hi)
-            bar = "█" * max(1, round(cnt / max(max_c4,1) * 15)) if cnt else ""
-            ln(f"| {label} | {cnt} | {cnt/len(with_tools)*100:.1f}% | {bar} |")
-        ln()
-    if rate_sessions:
-        ln("**工具成功率分布（有 tool_result 的 session）：**")
-        ln()
-        rv = [s["tool_success_rate"] for s in rate_sessions]
-        rate_bkts = [("0-50%",0,50),("50-80%",50,80),("80-95%",80,95),("95-99%",95,99),("100%",100,101)]
-        max_c5 = max(sum(1 for v in rv if lo<=v<hi) for _,lo,hi in rate_bkts)
-        ln("| 区间 | 数量 | 占比 | 分布 |")
-        ln("|------|-----:|-----:|------|")
-        for label, lo, hi in rate_bkts:
-            cnt = sum(1 for v in rv if v is not None and lo <= v < hi)
-            bar = "█" * max(1, round(cnt / max(max_c5,1) * 15)) if cnt else ""
-            ln(f"| {label} | {cnt} | {cnt/len(rate_sessions)*100:.1f}% | {bar} |")
-        ln()
-
-    # ── 5. 耗时 ──────────────────────────────────────────────────────────────
-    ln("## 5. 消耗时长")
-    ln()
-    ln("> 时长 = 首个 API call 时间戳 → 最后一个 API call 时间戳（单次 session 时长为 0）")
-    ln()
-    ln("| 统计项 | 数值 |")
-    ln("|--------|------|")
-    ln(f"| 单次 API call session | {sum(1 for s in sessions if s['api_call_count']==1)} |")
-    ln(f"| 多轮 session（有时长） | {len(multi_timed)} |")
-    if multi_timed:
-        ln(f"| 平均耗时 | {fmt_duration(sum(dur_vals)/len(dur_vals))} |")
-        ln(f"| 最长     | {fmt_duration(max(dur_vals))} |")
-        ln(f"| 最短     | {fmt_duration(min(dur_vals))} |")
-        ln(f"| P50      | {fmt_duration(pct(dur_vals, 50))} |")
-        ln(f"| P90      | {fmt_duration(pct(dur_vals, 90))} |")
-        ln()
-        dur_bkts = [("<1min",0,60),("1-5min",60,300),("5-15min",300,900),
-                    ("15-30min",900,1800),(">30min",1800,10**9)]
-        max_c6 = max(sum(1 for v in dur_vals if lo<=v<hi) for _,lo,hi in dur_bkts)
-        ln("**耗时分布（多轮 session）：**")
-        ln()
-        ln("| 区间 | 数量 | 占比 | 分布 |")
-        ln("|------|-----:|-----:|------|")
-        for label, lo, hi in dur_bkts:
-            cnt = sum(1 for v in dur_vals if lo <= v < hi)
-            bar = "█" * max(1, round(cnt / max(max_c6,1) * 15)) if cnt else ""
-            ln(f"| {label} | {cnt} | {cnt/len(dur_vals)*100:.1f}% | {bar} |")
-    ln()
-
-    # ── 6. 模型分布 ──────────────────────────────────────────────────────────
-    ln("## 6. 模型使用分布")
-    ln()
-    ln("| 模型 | 数量 | 占比 |")
-    ln("|------|-----:|-----:|")
-    for mdl, cnt in sorted(model_dist.items(), key=lambda x: -x[1]):
-        ln(f"| `{mdl or '(未知)'}` | {cnt} | {cnt/total*100:.1f}% |")
-    ln()
-
-    # ── 7. Top 10 最长 session ───────────────────────────────────────────────
-    ln(f"## 7. 耗时最长 Top {top_n} Session")
-    ln()
-    ln("| Session | 时长 | 用户轮次 | tool_use | tool_result | 成功率 | 请求次数 |")
-    ln("|---------|-----:|---------:|---------:|------------:|-------:|---------:|")
-    top10 = sorted(
-        [s for s in sessions if s.get("duration_s")],
-        key=lambda x: -x["duration_s"],
-    )[:top_n]
-    for s in top10:
-        ln(f"| `{s['session']}` | {fmt_duration(s['duration_s'])} "
-           f"| {s['user_turns']} | {s['tool_use_count']} "
-           f"| {s['tool_result_count']} | {fmt_rate(s['tool_success_rate'])} "
-           f"| {s['api_call_count']} |")
-    ln()
-
-    return "\n".join(lines)
+def render_report(template_name: str, context: Dict, output_path: Path) -> None:
+    """用指定 Jinja2 模板渲染报告并写入文件。模板目录为脚本同级的 templates/。"""
+    from jinja2 import Environment, FileSystemLoader
+    templates_dir = Path(__file__).parent / "templates"
+    env = Environment(
+        loader=FileSystemLoader(str(templates_dir)),
+        autoescape=False,
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    output_path.write_text(env.get_template(template_name).render(**context), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -729,33 +828,18 @@ def build_md(sessions: List[Dict], stats: Dict, top_n: int = 10) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="分析 session 格式对话日志，输出 Excel + Markdown 到 <session目录>/stat/",
+        description="分析 session 格式对话日志，输出 Excel + HTML + Markdown 到 <session目录>/stat/",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例:\n"
             "  python analyze_sessions.py test_session\n"
-            "  python analyze_sessions.py test_session --out /tmp/report\n"
-            "  python analyze_sessions.py test_session --top 20"
+            "  python analyze_sessions.py test_session --out /tmp/report"
         ),
     )
-    parser.add_argument(
-        "session_dir",
-        metavar="SESSION_DIR",
-        help="session 根目录（各 session 文件夹所在目录）",
-    )
-    parser.add_argument(
-        "--out", "-o",
-        default=None,
-        metavar="OUTPUT_DIR",
-        help="输出目录，默认为 <SESSION_DIR>/stat",
-    )
-    parser.add_argument(
-        "--top", "-t",
-        type=int,
-        default=10,
-        metavar="N",
-        help="Markdown 报告中展示耗时最长的 Top N session，默认 10",
-    )
+    parser.add_argument("session_dir", metavar="SESSION_DIR",
+                        help="session 根目录（各 session 文件夹所在目录）")
+    parser.add_argument("--out", "-o", default=None, metavar="OUTPUT_DIR",
+                        help="输出目录，默认为 <SESSION_DIR>/stat")
     args = parser.parse_args()
 
     session_dir = Path(args.session_dir).resolve()
@@ -772,20 +856,25 @@ def main() -> None:
     sessions: List[Dict] = []
     with ThreadPoolExecutor() as executor:
         futures = {executor.submit(analyze_session, f): f for f in folders}
-        for future in as_completed(futures):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="解析 session", unit="个"):
             r = future.result()
             if r:
                 sessions.append(r)
     print(f"[info] 成功解析 {len(sessions)} 个 session", file=sys.stderr)
 
     stats = compute_stats(sessions)
+    ctx   = build_context(sessions, stats)
 
     xlsx_path = stat_dir / "session_report.xlsx"
     write_excel(sessions, stats, xlsx_path)
     print(f"[done] Excel    → {xlsx_path}", file=sys.stderr)
 
+    html_path = stat_dir / "session_report.html"
+    render_report("report.html.j2", ctx, html_path)
+    print(f"[done] HTML     → {html_path}", file=sys.stderr)
+
     md_path = stat_dir / "session_report.md"
-    md_path.write_text(build_md(sessions, stats, top_n=args.top), encoding="utf-8")
+    render_report("report.md.j2", ctx, md_path)
     print(f"[done] Markdown → {md_path}", file=sys.stderr)
 
 
