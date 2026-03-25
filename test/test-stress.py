@@ -2,10 +2,10 @@
 压力测试 & 长连接测试
 用法:
   # 并发压力测试（默认 10 并发，每并发 5 次）
-  python test/test_stress.py --host http://127.0.0.1:4002 --concurrency 10 --requests 5
+  python test/test_stress.py --host http://127.0.0.1:4001 --concurrency 10 --requests 5
 
   # 长连接测试（单连接跑 60 秒，连续发请求）
-  python test/test_stress.py --host http://127.0.0.1:4002 --mode long --duration 60
+  python test/test_stress.py --host http://127.0.0.1:4001 --mode long --duration 60
 """
 
 import argparse
@@ -22,7 +22,7 @@ import httpx
 # 配置
 # ---------------------------------------------------------------------------
 ANTHROPIC_PAYLOAD = {
-    "model": "h:glm-5-thinking",
+    "model": "h:claude-sonnet-4-6",
     "max_tokens": 64,
     "stream": True,
     "messages": [{"role": "user", "content": "用一句话介绍你自己"}],

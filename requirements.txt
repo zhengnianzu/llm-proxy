@@ -1,2 +1,8 @@
 fastapi
-pydanticpandas
+pydantic
+pandas
+httpx
+anthropic
+dotenv
+uvicorn
+openai

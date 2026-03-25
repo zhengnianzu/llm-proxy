@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from print_stats_summary import statistic_tokens
 from auth import validate_api_key
-from utils.metrics import record_request, get_metrics_snapshot
+from utils.metrics import record_request, record_validity, get_metrics_snapshot, get_rate_history
 from utils.log_routes import register_log_routes
 
 load_dotenv(override=True)
@@ -35,6 +35,13 @@ LOGS_SESSION_ANTHROPIC = "logs_session_anthropic"
 LOGS_ANTHROPIC = "logs_anthropic"
 LOGS_SESSION_OPENAI = "logs_session_openai"
 LOGS_OPENAI = "logs_openai"
+INDEX_FILE_ANTHROPIC = os.path.join(LOGS_ANTHROPIC, "index.jsonl")
+INDEX_FILE_OPENAI    = os.path.join(LOGS_OPENAI,    "index.jsonl")
+
+# 请求计数（启动时从 index.jsonl 加载，运行时在内存中累计）
+_first_count: int = 0   # 首次请求数（每次 endpoint 调用 = 1）
+_total_count: int = 0   # 总体上游请求数（含重试）
+_valid_count: int = 0   # 有效响应数（获得有效 Anthropic 内容的首次请求）
 
 app = FastAPI(title="Anthropic+OpenAI Proxy (FastAPI)")
 
@@ -154,6 +161,37 @@ def is_rate_limit_status(status_code: int) -> bool:
     return status_code in RATE_LIMIT_STATUS_CODES
 
 
+_VALID_CONTENT_TYPES = {"text", "thinking", "tool_use"}
+
+
+def _has_valid_content(resp_json: dict) -> bool:
+    """非流式：content 数组中至少有一个有效内容块（text/thinking/tool_use 非空）。"""
+    for block in resp_json.get("content", []):
+        btype = block.get("type")
+        if btype == "text" and block.get("text"):
+            return True
+        if btype == "thinking" and block.get("thinking"):
+            return True
+        if btype == "tool_use" and block.get("input") is not None:
+            return True
+    return False
+
+
+def _has_valid_sse_content(chunks: list) -> bool:
+    """流式：SSE chunks 中至少有一个有效 delta（text/thinking/tool_use input）。"""
+    for chunk in chunks:
+        if chunk.get("type") == "content_block_delta":
+            delta = chunk.get("delta", {})
+            dtype = delta.get("type")
+            if dtype == "text_delta" and delta.get("text"):
+                return True
+            if dtype == "thinking_delta" and delta.get("thinking"):
+                return True
+            if dtype == "input_json_delta" and delta.get("partial_json") is not None:
+                return True
+    return False
+
+
 # -----------------------------
 # Endpoints
 # -----------------------------
@@ -177,6 +215,67 @@ def _resp_to_obj(r):  # httpx.Response -> dict
     except Exception:
         base["text"] = r.text
     return base
+
+
+def _load_index_anthropic():
+    """启动时从 index.jsonl 恢复历史计数，避免重启后归零。"""
+    global _first_count, _total_count, _valid_count
+    if not os.path.exists(INDEX_FILE_ANTHROPIC):
+        return
+    with open(INDEX_FILE_ANTHROPIC, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                _first_count += 1
+                _total_count += entry.get("total_attempts", 1)
+                if entry.get("valid"):
+                    _valid_count += 1
+            except json.JSONDecodeError:
+                pass
+
+
+def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0):
+    """追加一条请求记录到 index.jsonl，并更新内存计数。"""
+    global _first_count, _total_count, _valid_count
+    entry = {
+        "ts": ts,
+        "req_file": req_file,
+        "model": model,
+        "total_attempts": total_attempts,
+        "retried": total_attempts > 1,
+        "valid": valid,
+        "tok_in": tok_in,
+        "tok_out": tok_out,
+    }
+    os.makedirs(LOGS_ANTHROPIC, exist_ok=True)
+    with open(INDEX_FILE_ANTHROPIC, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _first_count += 1
+    _total_count += total_attempts
+    if valid:
+        _valid_count += 1
+
+
+def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True):
+    """追加 OpenAI 请求记录到 index.jsonl。"""
+    entry = {
+        "ts": ts,
+        "req_file": req_file,
+        "model": model,
+        "tok_in": tok_in,
+        "tok_out": tok_out,
+        "success": success,
+    }
+    os.makedirs(LOGS_OPENAI, exist_ok=True)
+    with open(INDEX_FILE_OPENAI, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+# 启动时加载历史 index
+_load_index_anthropic()
 
 
 def _sanitize_messages(messages: Any) -> Any:
@@ -376,6 +475,8 @@ async def anthropic_messages(req: Request):
         r = None
         last_exception = None
         success = False
+        final_valid = False
+        upstream_attempts = 0
         try:
             async with httpx.AsyncClient(
                     verify=verify,
@@ -383,13 +484,28 @@ async def anthropic_messages(req: Request):
                     trust_env=TRUST_ENV,
             ) as client:
                 for attempt in range(MAX_RETRIES):
+                    upstream_attempts += 1
                     try:
                         r = await client.post(upstream_url, headers=upstream_headers, json=body)
                         last_exception = None
-                        if not is_rate_limit_status(r.status_code):
+                        if is_rate_limit_status(r.status_code):
+                            logging.warning(f"Attempt {attempt} rate limit (anthropic non-stream): {r.status_code} {r.text}")
+                        elif r.status_code != 200:
+                            # 非 200 非限流（如 400 参数错误）：直接透传，不重试
                             success = True
                             break
-                        logging.warning(f"Attempt {attempt} rate limit (anthropic non-stream): {r.status_code} {r.text}")
+                        else:
+                            try:
+                                resp_json = r.json()
+                                if _has_valid_content(resp_json):
+                                    success = True
+                                    final_valid = True
+                                    break
+                                logging.warning(f"Attempt {attempt} empty content (anthropic non-stream), retrying: {r.text[:200]}")
+                            except Exception:
+                                # JSON 解析失败：透传原始响应
+                                success = True
+                                break
                     except Exception as e:
                         last_exception = e
                         logging.warning(f"Attempt {attempt} upstream error (anthropic non-stream): {e}")
@@ -406,20 +522,25 @@ async def anthropic_messages(req: Request):
             error_msg = str(last_exception) if last_exception else (f"HTTP {r.status_code}" if r else "unknown")
             logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
             _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+            _append_index_anthropic(ts, req_path, upstream_attempts, False, model)
+            record_validity(False, model)
             return JSONResponse(
                 status_code=502,
                 content={"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}},
             )
 
         _dump_json(res_path, _resp_to_obj(r))
+        tok_in, tok_out = 0, 0
         try:
             resp_json = r.json()
             usage = resp_json.get("usage", {})
             tok_in = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
-            record_request(tok_in, tok_out, success=r.status_code < 400)
+            record_request(tok_in, tok_out, success=r.status_code < 400, model=model)
         except Exception:
-            record_request(success=r.status_code < 400)
+            record_request(success=r.status_code < 400, model=model)
+        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out)
+        record_validity(final_valid, model)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -430,6 +551,7 @@ async def anthropic_messages(req: Request):
     async def anthropic_sse_passthrough() -> AsyncIterator[bytes]:
         up_chunks: List[Any] = []
         connection_established = False
+        upstream_attempts = 0
         last_exception = None
         last_retry_status = None
         retry_headers = upstream_headers
@@ -443,6 +565,7 @@ async def anthropic_messages(req: Request):
             ) as client:
                 # Retry loop: only retries BEFORE any bytes are yielded to the client
                 for attempt in range(MAX_RETRIES):
+                    upstream_attempts += 1
                     try:
                         async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
                             up_chunks.append({
@@ -474,14 +597,51 @@ async def anthropic_messages(req: Request):
                                 yield f"event: error\ndata: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
                                 return
 
-                            # Pure pass-through: tee raw bytes to client and capture for logging
-                            raw_buf = bytearray()
-                            async for raw in r.aiter_bytes():
-                                raw_buf.extend(raw)
-                                yield raw
+                            # Stream with early commit on message_start:
+                            # Buffer until we see message_start, then flush + pass-through directly.
+                            # If stream ends without message_start → no valid response → retry.
+                            log_buf = bytearray()   # full capture for logging
+                            raw_buf = bytearray()   # pre-commit buffer only
+                            committed = False
+                            line_buf = ""
 
-                            # Parse captured SSE for logging (best-effort)
-                            for line in raw_buf.decode("utf-8", errors="replace").splitlines():
+                            async for raw in r.aiter_bytes():
+                                log_buf.extend(raw)
+                                if committed:
+                                    yield raw
+                                else:
+                                    raw_buf.extend(raw)
+                                    line_buf += raw.decode("utf-8", errors="replace")
+                                    while "\n" in line_buf:
+                                        line, line_buf = line_buf.split("\n", 1)
+                                        if line.startswith("data:"):
+                                            data_part = line[5:].strip()
+                                            if data_part and data_part != "[DONE]":
+                                                try:
+                                                    if json.loads(data_part).get("type") == "message_start":
+                                                        committed = True
+                                                        connection_established = True
+                                                        yield bytes(raw_buf)
+                                                        raw_buf = bytearray()
+                                                        break
+                                                except json.JSONDecodeError:
+                                                    pass
+
+                            if not committed:
+                                if attempt < MAX_RETRIES - 1:
+                                    logging.warning(f"Attempt {attempt} no message_start in SSE (anthropic stream), retrying")
+                                    connection_established = False
+                                    up_chunks.clear()
+                                    await asyncio.sleep(0.5)
+                                    retry_token = await get_x_auth_token(req)
+                                    retry_headers = build_upstream_headers(retry_token, model)
+                                    continue
+                                else:
+                                    connection_established = True
+                                    yield bytes(raw_buf)
+
+                            # Parse full log_buf for logging
+                            for line in log_buf.decode("utf-8", errors="replace").splitlines():
                                 if line.startswith("data:"):
                                     data_part = line[5:].strip()
                                     if data_part and data_part != "[DONE]":
@@ -521,7 +681,9 @@ async def anthropic_messages(req: Request):
                     _u = _c.get("message", {}).get("usage") or _c.get("usage") or {}
                     _tok_in = _tok_in or (_u.get("input_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("output_tokens") or 0)
-            record_request(_tok_in, _tok_out, success=connection_established)
+            record_request(_tok_in, _tok_out, success=connection_established, model=model)
+            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model)
+            record_validity(connection_established, model)
 
 
     return StreamingResponse(anthropic_sse_passthrough(), media_type="text/event-stream")
@@ -608,6 +770,7 @@ async def openai_chat_completions(req: Request):
         r = None
         last_exception = None
         success = False
+        upstream_attempts = 0
         try:
             async with httpx.AsyncClient(
                     verify=verify,
@@ -615,6 +778,7 @@ async def openai_chat_completions(req: Request):
                     trust_env=TRUST_ENV,
             ) as client:
                 for attempt in range(MAX_RETRIES):
+                    upstream_attempts += 1
                     try:
                         r = await client.post(upstream_url, headers=upstream_headers, json=body)
                         last_exception = None
@@ -638,20 +802,23 @@ async def openai_chat_completions(req: Request):
             error_msg = str(last_exception) if last_exception else (f"HTTP {r.status_code}" if r else "unknown")
             logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
             _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+            _append_index_openai(ts, req_path, model=model, success=False)
             return JSONResponse(
                 status_code=502,
                 content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
             )
 
         _dump_json(res_path, _resp_to_obj(r))
+        tok_in, tok_out = 0, 0
         try:
             resp_json = r.json()
             usage = resp_json.get("usage", {})
             tok_in = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
-            record_request(tok_in, tok_out, success=r.status_code < 400)
+            record_request(tok_in, tok_out, success=r.status_code < 400, model=model)
         except Exception:
-            record_request(success=r.status_code < 400)
+            record_request(success=r.status_code < 400, model=model)
+        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -662,6 +829,7 @@ async def openai_chat_completions(req: Request):
     async def sse_passthrough() -> AsyncIterator[bytes]:
         up_chunks: List[Any] = []
         connection_established = False
+        upstream_attempts = 0
         last_exception = None
         last_retry_status = None
         retry_headers = upstream_headers
@@ -674,6 +842,7 @@ async def openai_chat_completions(req: Request):
                     trust_env=TRUST_ENV,
             ) as client:
                 for attempt in range(MAX_RETRIES):
+                    upstream_attempts += 1
                     try:
                         async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
                             up_chunks.append({
@@ -755,7 +924,8 @@ async def openai_chat_completions(req: Request):
                     _u = _c.get("usage") or {}
                     _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
-            record_request(_tok_in, _tok_out, success=connection_established)
+            record_request(_tok_in, _tok_out, success=connection_established, model=model)
+            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established)
 
     return StreamingResponse(sse_passthrough(), media_type="text/event-stream")
 
@@ -782,6 +952,25 @@ def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = 
 def metrics_realtime():
     """返回最近 120 分钟的 RPM/TPM 数据"""
     return JSONResponse(get_metrics_snapshot())
+
+
+@app.get("/metrics/index-stats")
+def index_stats():
+    """返回 Anthropic 请求的首次/总体/有效次数及成功率。"""
+    rate = (_valid_count / _first_count) if _first_count > 0 else 0.0
+    return JSONResponse({
+        "first_count": _first_count,
+        "total_count": _total_count,
+        "valid_count": _valid_count,
+        "success_rate": round(rate, 4),
+        "index_file": INDEX_FILE_ANTHROPIC,
+    })
+
+
+@app.get("/metrics/rate-history")
+def rate_history():
+    """返回最近 60 分钟的有效率时序数据。"""
+    return JSONResponse(get_rate_history())
 
 
 register_log_routes(app)

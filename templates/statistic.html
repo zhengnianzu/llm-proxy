@@ -1,170 +1,213 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>token数统计</title>
-    <!-- Bootstrap 5 样式 -->
+    <title>监控统计</title>
     <link href="/static/css/bootstrap.min.css" rel="stylesheet">
     <script src="/static/js/vue.min.js"></script>
-    <!-- Chart.js CDN (无本地依赖) -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
-        .sortable { cursor: pointer; user-select: none; }
-        .sortable:hover { background-color: #e2e6ea; }
-        .arrow { font-size: 0.8rem; margin-left: 4px; }
-        .summary-section { background: #f8f9fa; border-radius: 10px; padding: 20px; margin-bottom: 25px; }
-        .summary-card { border-left: 4px solid; transition: 0.2s; }
+        body { background: #f4f6fb; }
+        /* 仪表盘 */
+        .dashboard { background: #1e2a3a; color: #fff; border-radius: 12px; padding: 18px 24px; margin-bottom: 20px; }
+        .dashboard h5 { color: #a8b8d0; font-size: .85rem; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .05em; }
+        .dash-val { font-size: 1.75rem; font-weight: 700; line-height: 1; }
+        .dash-sub { font-size: .75rem; color: #7a8fa6; margin-top: 3px; }
+        .dash-divider { border-left: 1px solid #2d3f55; }
+        .dash-status-good   { color: #4ade80; }
+        .dash-status-warn   { color: #fbbf24; }
+        .dash-status-danger { color: #f87171; }
+        .blink { animation: blink 1.5s infinite; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+        /* 实时监控区 */
+        .rt-card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
+        .chart-wrap { position: relative; height: 170px; }
+        .chart-title { font-size: .8rem; color: #6c757d; text-align: center; margin-top: 6px; }
+        /* 模型选择器 */
+        .model-pill { cursor: pointer; border-radius: 20px; padding: 4px 14px; font-size: .82rem; border: 1.5px solid #dee2e6; background: #fff; transition: .15s; user-select: none; }
+        .model-pill.active { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+        .model-pill:hover:not(.active) { background: #e9f0ff; border-color: #0d6efd; color: #0d6efd; }
+        /* 历史统计 */
+        .filter-row { background: #fff; border-radius: 10px; padding: 18px; margin-bottom: 18px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+        .summary-card { border-left: 4px solid; }
         .summary-card.success { border-left-color: #28a745; background: #f0fff4; }
-        .summary-card.error { border-left-color: #dc3545; background: #fff5f5; }
-        .filter-row { background: #e9ecef; padding: 20px; border-radius: 10px; margin-bottom: 25px; }
-        .badge-success { background-color: #28a745; color: white; }
-        .badge-error { background-color: #dc3545; color: white; }
-        .realtime-section { background: #fff; border: 1px solid #dee2e6; border-radius: 10px; padding: 20px; margin-bottom: 25px; }
-        .metric-badge { font-size: 1.1rem; font-weight: bold; padding: 6px 14px; border-radius: 20px; }
-        .chart-wrap { position: relative; height: 180px; }
+        .summary-card.error   { border-left-color: #dc3545; background: #fff5f5; }
+        .badge-success { background-color: #28a745; color: #fff; }
+        .badge-error   { background-color: #dc3545; color: #fff; }
+        .sortable { cursor: pointer; user-select: none; }
+        .sortable:hover { background: #e9ecef; }
+        .arrow { font-size: .8rem; margin-left: 4px; }
     </style>
 </head>
 <body>
-    <div id="app" class="container mt-4">
-        <h2 class="mb-4">📈 token用量统计</h2>
+<div id="app" class="container-lg py-4">
+    <div class="d-flex align-items-center mb-3 gap-3">
+        <h2 class="mb-0">📊 监控统计</h2>
+        <span class="text-muted small">自动刷新 {{ refreshInterval }}s</span>
+        <button class="btn btn-sm btn-outline-secondary ms-auto" @click="toggleAutoRefresh">
+            {{ autoRefresh ? '⏸ 暂停' : '▶ 继续' }}
+        </button>
+    </div>
 
-        <!-- ===== 实时监控区域 ===== -->
-        <div class="realtime-section">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <h5 class="mb-0">⚡ 实时监控（最近120分钟）</h5>
-                <div class="d-flex align-items-center gap-3">
-                    <span class="badge bg-primary metric-badge">RPM: {{ latestRpm }}</span>
-                    <span class="badge bg-success metric-badge">TPM输入: {{ latestTpmIn }}</span>
-                    <span class="badge bg-info text-dark metric-badge">TPM输出: {{ latestTpmOut }}</span>
-                    <span class="badge bg-danger metric-badge">错误/分: {{ latestErrors }}</span>
-                    <span class="text-muted small">自动刷新 {{ refreshInterval }}s</span>
-                    <button class="btn btn-sm btn-outline-secondary" @click="toggleAutoRefresh">
-                        {{ autoRefresh ? '⏸ 暂停' : '▶ 继续' }}
-                    </button>
-                </div>
+    <!-- ===== 仪表盘 ===== -->
+    <div class="dashboard">
+        <div class="row g-0 text-center">
+            <div class="col">
+                <h5>首次请求</h5>
+                <div class="dash-val">{{ indexStats.first_count }}</div>
+                <div class="dash-sub">累计</div>
             </div>
-            <div class="row g-3">
-                <div class="col-md-6">
-                    <div class="chart-wrap"><canvas id="chartRpm"></canvas></div>
-                    <div class="text-center text-muted small mt-1">RPM（每分钟请求数）</div>
-                </div>
-                <div class="col-md-6">
-                    <div class="chart-wrap"><canvas id="chartTpm"></canvas></div>
-                    <div class="text-center text-muted small mt-1">TPM（每分钟Token数）</div>
-                </div>
+            <div class="col dash-divider">
+                <h5>有效请求</h5>
+                <div class="dash-val">{{ indexStats.valid_count }}</div>
+                <div class="dash-sub">累计</div>
             </div>
-        </div>
-
-        <!-- 筛选区域: 起始日期、模型、状态 -->
-        <div class="filter-row">
-            <div class="row g-3 align-items-end">
-                <div class="col-md-3">
-                    <label class="form-label">开始日期</label>
-                    <input type="date" class="form-control" v-model="startDate" placeholder="开始日期">
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label">结束日期</label>
-                    <input type="date" class="form-control" v-model="endDate" placeholder="结束日期">
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label">模型(多个用,拼接)</label>
-                    <input type="text" class="form-control" v-model="model" placeholder="例如: model1,model2">
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label">状态</label>
-                    <select class="form-select" v-model="statusFilter">
-                        <option value="">全部</option>
-                        <option value="success">成功</option>
-                        <option value="error">失败</option>
-                    </select>
-                </div>
-                <div class="col-md-2 d-flex gap-2">
-                    <button class="btn btn-primary flex-grow-1" @click="fetchData" :disabled="loading">
-                        {{ loading ? '查询中...' : '筛选' }}
-                    </button>
-                    <button class="btn btn-outline-secondary" @click="resetFilter" :disabled="loading">重置</button>
+            <div class="col dash-divider">
+                <h5>重试次数</h5>
+                <div class="dash-val">{{ totalRetries }}</div>
+                <div class="dash-sub">总上游 {{ indexStats.total_count }}</div>
+            </div>
+            <div class="col dash-divider">
+                <h5>当前 RPM</h5>
+                <div class="dash-val">{{ latestRpm }}</div>
+                <div class="dash-sub">本分钟请求数</div>
+            </div>
+            <div class="col dash-divider">
+                <h5>TPM 输入</h5>
+                <div class="dash-val">{{ latestTpmIn }}</div>
+                <div class="dash-sub">本分钟 tokens</div>
+            </div>
+            <div class="col dash-divider">
+                <h5>有效率</h5>
+                <div class="dash-val" :class="'dash-status-' + rateLevel">{{ successRatePct }}%</div>
+                <div class="dash-sub">
+                    <span class="blink" :class="'dash-status-' + rateLevel">●</span>
+                    {{ rateLevel === 'good' ? '正常' : rateLevel === 'warn' ? '偏低' : '异常' }}
                 </div>
             </div>
         </div>
+    </div>
 
-        <!-- 汇总区域 (按状态分别展示) -->
-        <div class="summary-section" v-if="summaryList.length > 0">
-            <h5 class="mb-3">📊 按状态汇总</h5>
-            <div class="row g-3">
-                <div v-for="(stat, idx) in summaryList" :key="idx" class="col-md-6">
-                    <div class="card summary-card" :class="stat.status">
-                        <div class="card-body">
-                            <h6 class="card-title">
-                                <span class="badge" :class="stat.status === 'success' ? 'badge-success' : 'badge-error'">
-                                    {{ stat.status === 'success' ? '成功' : '失败' }}
-                                </span>
-                            </h6>
-                            <div class="row mt-2">
-                                <div class="col-4 text-center">
-                                    <small class="text-muted">记录数</small>
-                                    <p class="fw-bold fs-5">{{ stat.count }}</p>
-                                </div>
-                                <div class="col-4 text-center">
-                                    <small class="text-muted">输入Token</small>
-                                    <p class="fw-bold">{{ stat.total_input }}</p>
-                                </div>
-                                <div class="col-4 text-center">
-                                    <small class="text-muted">输出Token</small>
-                                    <p class="fw-bold">{{ stat.total_output }}</p>
-                                </div>
-                            </div>
-                        </div>
+    <!-- ===== 实时监控 ===== -->
+    <div class="rt-card mb-4">
+        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+            <span class="fw-semibold">⚡ 实时监控</span>
+            <span class="text-muted small">（最近 120 分钟）</span>
+            <div class="ms-3 d-flex gap-2 flex-wrap align-items-center">
+                <span class="text-muted small">模型：</span>
+                <span class="model-pill" :class="{ active: selectedModel === '__all__' }" @click="setModel('__all__')">全部</span>
+                <span v-for="m in modelList" :key="m"
+                      class="model-pill" :class="{ active: selectedModel === m }" @click="setModel(m)">
+                    {{ m }}
+                </span>
+            </div>
+        </div>
+        <div class="row g-3">
+            <div class="col-md-4">
+                <div class="chart-wrap"><canvas id="chartRpm"></canvas></div>
+                <div class="chart-title">RPM — 每分钟请求数</div>
+            </div>
+            <div class="col-md-4">
+                <div class="chart-wrap"><canvas id="chartTpm"></canvas></div>
+                <div class="chart-title">TPM — 每分钟 Token 数</div>
+            </div>
+            <div class="col-md-4">
+                <div class="chart-wrap"><canvas id="chartRate"></canvas></div>
+                <div class="chart-title">有效率 % — 最近 60 分钟</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== 历史统计筛选 ===== -->
+    <div class="filter-row">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label small">开始日期</label>
+                <input type="date" class="form-control form-control-sm" v-model="startDate">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small">结束日期</label>
+                <input type="date" class="form-control form-control-sm" v-model="endDate">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">模型</label>
+                <input type="text" class="form-control form-control-sm" v-model="histModel" placeholder="多个用 , 分隔">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">状态</label>
+                <select class="form-select form-select-sm" v-model="statusFilter">
+                    <option value="">全部</option>
+                    <option value="success">成功</option>
+                    <option value="error">失败</option>
+                </select>
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+                <button class="btn btn-primary btn-sm flex-grow-1" @click="fetchData" :disabled="loading">
+                    {{ loading ? '查询中…' : '查询' }}
+                </button>
+                <button class="btn btn-outline-secondary btn-sm" @click="resetFilter" :disabled="loading">重置</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 汇总 -->
+    <div v-if="summaryList.length" class="row g-3 mb-3">
+        <div v-for="(stat, i) in summaryList" :key="i" class="col-md-6">
+            <div class="card summary-card" :class="stat.status">
+                <div class="card-body py-2">
+                    <h6 class="card-title mb-2">
+                        <span class="badge" :class="stat.status === 'success' ? 'badge-success' : 'badge-error'">
+                            {{ stat.status === 'success' ? '成功' : '失败' }}
+                        </span>
+                    </h6>
+                    <div class="row text-center">
+                        <div class="col-4"><small class="text-muted d-block">记录数</small><strong>{{ stat.count }}</strong></div>
+                        <div class="col-4"><small class="text-muted d-block">输入 Token</small><strong>{{ stat.total_input }}</strong></div>
+                        <div class="col-4"><small class="text-muted d-block">输出 Token</small><strong>{{ stat.total_output }}</strong></div>
                     </div>
                 </div>
-                <div class="col-md-12 mt-2" v-if="summaryList.length === 2">
-                    <div class="card bg-light">
-                        <div class="card-body">
-                            <h6 class="card-title">📌 总计 (成功+失败)</h6>
-                            <div class="row">
-                                <div class="col-4 text-center">
-                                    <small>总记录数</small>
-                                    <p class="fw-bold">{{ totalCount }}</p>
-                                </div>
-                                <div class="col-4 text-center">
-                                    <small>总输入Token</small>
-                                    <p class="fw-bold">{{ totalInput }}</p>
-                                </div>
-                                <div class="col-4 text-center">
-                                    <small>总输出Token</small>
-                                    <p class="fw-bold">{{ totalOutput }}</p>
-                                </div>
-                            </div>
-                        </div>
+            </div>
+        </div>
+        <div v-if="summaryList.length === 2" class="col-md-12">
+            <div class="card bg-light">
+                <div class="card-body py-2">
+                    <h6 class="mb-2">📌 总计</h6>
+                    <div class="row text-center">
+                        <div class="col-4"><small class="text-muted d-block">总记录数</small><strong>{{ totalCount }}</strong></div>
+                        <div class="col-4"><small class="text-muted d-block">总输入 Token</small><strong>{{ totalInput }}</strong></div>
+                        <div class="col-4"><small class="text-muted d-block">总输出 Token</small><strong>{{ totalOutput }}</strong></div>
                     </div>
                 </div>
             </div>
         </div>
-        <div v-else class="alert alert-info py-2" role="alert">暂无汇总数据</div>
+    </div>
+    <div v-else class="alert alert-info py-2 small">暂无汇总数据</div>
 
-        <!-- 数据表格 -->
-        <div class="table-responsive mt-4">
-            <table class="table table-striped table-hover align-middle">
+    <!-- 明细表 -->
+    <div class="card">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle mb-0">
                 <thead class="table-light">
                     <tr>
-                        <th @click="sortBy('model')" class="sortable">模型<span v-if="sortField === 'model'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
-                        <th @click="sortBy('date_start')" class="sortable">开始日期<span v-if="sortField === 'date_start'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
-                        <th @click="sortBy('date_end')" class="sortable">结束日期<span v-if="sortField === 'date_end'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
-                        <th @click="sortBy('status')" class="sortable">状态<span v-if="sortField === 'status'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
-                        <th @click="sortBy('count')" class="sortable text-end">请求次数<span v-if="sortField === 'count'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
-                        <th @click="sortBy('input_token_num')" class="sortable text-end">输入Token<span v-if="sortField === 'input_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
-                        <th @click="sortBy('output_token_num')" class="sortable text-end">输出Token<span v-if="sortField === 'output_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                        <th @click="sortBy('model')" class="sortable">模型<span v-if="sortField==='model'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
+                        <th @click="sortBy('date_start')" class="sortable">开始日期<span v-if="sortField==='date_start'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
+                        <th @click="sortBy('date_end')" class="sortable">结束日期<span v-if="sortField==='date_end'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
+                        <th @click="sortBy('status')" class="sortable">状态<span v-if="sortField==='status'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
+                        <th @click="sortBy('count')" class="sortable text-end">请求次数<span v-if="sortField==='count'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
+                        <th @click="sortBy('input_token_num')" class="sortable text-end">输入Token<span v-if="sortField==='input_token_num'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
+                        <th @click="sortBy('output_token_num')" class="sortable text-end">输出Token<span v-if="sortField==='output_token_num'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
                     </tr>
                 </thead>
                 <tbody>
-                    <tr v-if="items.length === 0">
-                        <td colspan="7" class="text-center text-muted py-4">暂无符合条件的详细记录</td>
+                    <tr v-if="!items.length">
+                        <td colspan="7" class="text-center text-muted py-4">暂无数据</td>
                     </tr>
-                    <tr v-for="(item, index) in items" :key="index">
+                    <tr v-for="(item, i) in items" :key="i">
                         <td>{{ item.model }}</td>
                         <td>{{ item.date_start }}</td>
                         <td>{{ item.date_end }}</td>
-                        <td><span class="badge" :class="item.status === 'success' ? 'badge-success' : 'badge-error'">{{ item.status === 'success' ? '成功' : '失败' }}</span></td>
+                        <td><span class="badge" :class="item.status==='success'?'badge-success':'badge-error'">{{ item.status==='success'?'成功':'失败' }}</span></td>
                         <td class="text-end">{{ item.count }}</td>
                         <td class="text-end">{{ item.input_token_num }}</td>
                         <td class="text-end">{{ item.output_token_num }}</td>
@@ -172,155 +215,197 @@
                 </tbody>
             </table>
         </div>
-
-        <div v-if="loading" class="text-center text-muted py-2"><span>数据加载中...</span></div>
     </div>
+    <div v-if="loading" class="text-center text-muted py-3 small">加载中…</div>
+</div>
 
-    <script>
-    const app = new Vue({
-        el: '#app',
-        data: {
-            // 历史统计
-            model: '',
-            startDate: '',
-            endDate: '',
-            statusFilter: '',
-            items: [],
-            summaryList: [],
-            sortField: 'date_start',
-            sortAsc: true,
-            loading: false,
-            // 实时监控
-            latestRpm: 0,
-            latestTpmIn: 0,
-            latestTpmOut: 0,
-            latestErrors: 0,
-            autoRefresh: true,
-            refreshInterval: 15,
-            _refreshTimer: null,
-            _chartRpm: null,
-            _chartTpm: null,
+<script>
+const app = new Vue({
+    el: '#app',
+    data: {
+        // 历史统计
+        histModel: '', startDate: '', endDate: '', statusFilter: '',
+        items: [], summaryList: [],
+        sortField: 'date_start', sortAsc: true, loading: false,
+        // 仪表盘 / 实时
+        latestRpm: 0, latestTpmIn: 0, latestTpmOut: 0, latestErrors: 0,
+        autoRefresh: true, refreshInterval: 15, _refreshTimer: null,
+        // 图表实例
+        _chartRpm: null, _chartTpm: null, _chartRate: null,
+        // 原始数据（用于模型切换重绘）
+        _realtimeRaw: [], _rateRaw: [],
+        // 模型选择
+        selectedModel: '__all__',
+        modelList: [],
+        // 有效率汇总
+        indexStats: { first_count: 0, total_count: 0, valid_count: 0, success_rate: 0 },
+    },
+    computed: {
+        totalCount()  { return this.summaryList.reduce((a,c) => a+(c.count||0), 0); },
+        totalInput()  { return this.summaryList.reduce((a,c) => a+(c.total_input||0), 0); },
+        totalOutput() { return this.summaryList.reduce((a,c) => a+(c.total_output||0), 0); },
+        totalRetries() { return Math.max(0, this.indexStats.total_count - this.indexStats.first_count); },
+        successRatePct() { return (this.indexStats.success_rate * 100).toFixed(1); },
+        rateLevel() {
+            const r = this.indexStats.success_rate;
+            return r >= 0.9 ? 'good' : r >= 0.7 ? 'warn' : 'danger';
         },
-        computed: {
-            totalCount() { return this.summaryList.reduce((a, c) => a + (c.count || 0), 0); },
-            totalInput() { return this.summaryList.reduce((a, c) => a + (c.total_input || 0), 0); },
-            totalOutput() { return this.summaryList.reduce((a, c) => a + (c.total_output || 0), 0); },
+    },
+    methods: {
+        // ---- 历史统计 ----
+        fetchData() {
+            this.loading = true;
+            const p = new URLSearchParams();
+            if (this.histModel)    p.append('model', this.histModel);
+            if (this.startDate)    p.append('date_start', this.startDate);
+            if (this.endDate)      p.append('date_end', this.endDate);
+            if (this.statusFilter) p.append('status', this.statusFilter);
+            fetch('/statistic?' + p)
+                .then(r => r.json())
+                .then(d => { this.items = d.data||[]; this.summaryList = d.summary||[]; this.applySort(); })
+                .catch(e => alert('加载失败：' + e))
+                .finally(() => { this.loading = false; });
         },
-        methods: {
-            // ---- 历史统计 ----
-            fetchData() {
-                this.loading = true;
-                const params = new URLSearchParams();
-                if (this.model) params.append('model', this.model);
-                if (this.startDate) params.append('date_start', this.startDate);
-                if (this.endDate) params.append('date_end', this.endDate);
-                if (this.statusFilter) params.append('status', this.statusFilter);
-                fetch(`/statistic?${params.toString()}`)
-                    .then(r => r.json())
-                    .then(data => { this.items = data.data || []; this.summaryList = data.summary || []; this.applySort(); })
-                    .catch(err => alert('加载失败：' + err))
-                    .finally(() => { this.loading = false; });
-            },
-            resetFilter() {
-                this.model = ''; this.startDate = ''; this.endDate = ''; this.statusFilter = '';
-                this.fetchData();
-            },
-            applySort() {
-                if (!this.sortField) return;
-                const f = this.sortField, asc = this.sortAsc;
-                this.items = [...this.items].sort((a, b) => {
-                    let va = a[f], vb = b[f];
-                    if (['count', 'input_token_num', 'output_token_num'].includes(f)) return asc ? va - vb : vb - va;
-                    if (va < vb) return asc ? -1 : 1;
-                    if (va > vb) return asc ? 1 : -1;
-                    return 0;
-                });
-            },
-            sortBy(field) {
-                if (this.sortField === field) this.sortAsc = !this.sortAsc;
-                else { this.sortField = field; this.sortAsc = true; }
-                this.applySort();
-            },
-            // ---- 实时监控 ----
-            initCharts() {
-                const commonOpts = {
-                    responsive: true, maintainAspectRatio: false, animation: false,
-                    plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } } },
-                    scales: {
-                        x: { ticks: { maxTicksLimit: 10, font: { size: 10 }, maxRotation: 0 } },
-                        y: { beginAtZero: true, ticks: { font: { size: 10 } } }
-                    }
-                };
-                this._chartRpm = new Chart(document.getElementById('chartRpm'), {
-                    type: 'line',
-                    data: { labels: [], datasets: [
-                        { label: 'RPM', data: [], borderColor: '#0d6efd', backgroundColor: 'rgba(13,110,253,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
-                        { label: '错误/分', data: [], borderColor: '#dc3545', backgroundColor: 'rgba(220,53,69,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
-                    ]},
-                    options: commonOpts
-                });
-                this._chartTpm = new Chart(document.getElementById('chartTpm'), {
-                    type: 'line',
-                    data: { labels: [], datasets: [
-                        { label: 'TPM输入', data: [], borderColor: '#198754', backgroundColor: 'rgba(25,135,84,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
-                        { label: 'TPM输出', data: [], borderColor: '#0dcaf0', backgroundColor: 'rgba(13,202,240,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
-                    ]},
-                    options: commonOpts
-                });
-            },
-            fetchRealtime() {
-                fetch('/metrics/realtime')
-                    .then(r => r.json())
-                    .then(data => {
-                        if (!data.length) return;
-                        const labels = data.map(d => d.ts.slice(11)); // HH:MM
-                        const rpm    = data.map(d => d.rpm);
-                        const errors = data.map(d => d.errors);
-                        const tpmIn  = data.map(d => d.tpm_in);
-                        const tpmOut = data.map(d => d.tpm_out);
-
-                        // 最新一分钟的值
-                        const last = data[data.length - 1];
-                        this.latestRpm    = last.rpm;
-                        this.latestTpmIn  = last.tpm_in;
-                        this.latestTpmOut = last.tpm_out;
-                        this.latestErrors = last.errors;
-
-                        // 更新图表
-                        this._chartRpm.data.labels = labels;
-                        this._chartRpm.data.datasets[0].data = rpm;
-                        this._chartRpm.data.datasets[1].data = errors;
-                        this._chartRpm.update('none');
-
-                        this._chartTpm.data.labels = labels;
-                        this._chartTpm.data.datasets[0].data = tpmIn;
-                        this._chartTpm.data.datasets[1].data = tpmOut;
-                        this._chartTpm.update('none');
-                    })
-                    .catch(() => {});
-            },
-            startAutoRefresh() {
-                this.fetchRealtime();
-                this._refreshTimer = setInterval(() => {
-                    if (this.autoRefresh) this.fetchRealtime();
-                }, this.refreshInterval * 1000);
-            },
-            toggleAutoRefresh() {
-                this.autoRefresh = !this.autoRefresh;
-                if (this.autoRefresh) this.fetchRealtime();
-            },
-        },
-        mounted() {
-            this.$nextTick(() => {
-                this.initCharts();
-                this.startAutoRefresh();
-            });
+        resetFilter() {
+            this.histModel=''; this.startDate=''; this.endDate=''; this.statusFilter='';
             this.fetchData();
         },
-        beforeDestroy() {
-            clearInterval(this._refreshTimer);
-        }
-    });
-    </script>
+        applySort() {
+            const f = this.sortField, asc = this.sortAsc;
+            this.items = [...this.items].sort((a,b) => {
+                let va=a[f], vb=b[f];
+                if (['count','input_token_num','output_token_num'].includes(f)) return asc?va-vb:vb-va;
+                return asc ? (va<vb?-1:va>vb?1:0) : (vb<va?-1:vb>va?1:0);
+            });
+        },
+        sortBy(f) {
+            if (this.sortField===f) this.sortAsc=!this.sortAsc; else { this.sortField=f; this.sortAsc=true; }
+            this.applySort();
+        },
+        // ---- 图表初始化 ----
+        initCharts() {
+            const base = {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                plugins: { legend: { position:'top', labels:{boxWidth:12, font:{size:11}} } },
+                scales: {
+                    x: { ticks: { maxTicksLimit:10, font:{size:10}, maxRotation:0 } },
+                    y: { beginAtZero:true, ticks:{font:{size:10}} }
+                }
+            };
+            this._chartRpm = new Chart(document.getElementById('chartRpm'), {
+                type: 'line',
+                data: { labels:[], datasets:[
+                    { label:'RPM',    data:[], borderColor:'#0d6efd', backgroundColor:'rgba(13,110,253,.08)', fill:true, tension:.3, pointRadius:2 },
+                    { label:'错误/分', data:[], borderColor:'#dc3545', backgroundColor:'rgba(220,53,69,.08)',  fill:true, tension:.3, pointRadius:2 },
+                ]},
+                options: base,
+            });
+            this._chartTpm = new Chart(document.getElementById('chartTpm'), {
+                type: 'line',
+                data: { labels:[], datasets:[
+                    { label:'TPM输入', data:[], borderColor:'#198754', backgroundColor:'rgba(25,135,84,.08)',  fill:true, tension:.3, pointRadius:2 },
+                    { label:'TPM输出', data:[], borderColor:'#0dcaf0', backgroundColor:'rgba(13,202,240,.08)', fill:true, tension:.3, pointRadius:2 },
+                ]},
+                options: base,
+            });
+            this._chartRate = new Chart(document.getElementById('chartRate'), {
+                type: 'line',
+                data: { labels:[], datasets:[
+                    { label:'有效率%',  data:[], borderColor:'#6f42c1', backgroundColor:'rgba(111,66,193,.08)', fill:true, tension:.3, pointRadius:3, pointHoverRadius:5 },
+                    { label:'警戒 70%', data:[], borderColor:'#ffc107', borderDash:[4,4], borderWidth:1.5, pointRadius:0, fill:false },
+                    { label:'正常 90%', data:[], borderColor:'#28a745', borderDash:[4,4], borderWidth:1.5, pointRadius:0, fill:false },
+                ]},
+                options: { ...base, scales: {
+                    x: { ticks:{maxTicksLimit:10, font:{size:10}, maxRotation:0} },
+                    y: { min:0, max:100, ticks:{ font:{size:10}, callback: v => v+'%' } }
+                }},
+            });
+        },
+        // ---- 模型选择 ----
+        setModel(m) {
+            this.selectedModel = m;
+            this._applyModelFilter();
+        },
+        _applyModelFilter() {
+            const rt = this._realtimeRaw, rd = this._rateRaw;
+            const m = this.selectedModel, all = m === '__all__';
+            // RPM / errors
+            const labels = rt.map(d => d.ts.slice(11));
+            const rpm    = rt.map(d => all ? d.rpm    : ((d.models&&d.models[m]&&d.models[m].rpm)    || 0));
+            const errors = rt.map(d => d.errors);   // 错误暂不细分模型，始终展示全局
+            const tpmIn  = rt.map(d => all ? d.tpm_in  : ((d.models&&d.models[m]&&d.models[m].tpm_in)  || 0));
+            const tpmOut = rt.map(d => all ? d.tpm_out : ((d.models&&d.models[m]&&d.models[m].tpm_out) || 0));
+            this._chartRpm.data.labels = labels;
+            this._chartRpm.data.datasets[0].data = rpm;
+            this._chartRpm.data.datasets[1].data = errors;
+            this._chartRpm.update('none');
+            this._chartTpm.data.labels = labels;
+            this._chartTpm.data.datasets[0].data = tpmIn;
+            this._chartTpm.data.datasets[1].data = tpmOut;
+            this._chartTpm.update('none');
+            // 有效率
+            const rLabels = rd.map(d => d.ts.slice(11));
+            const rates   = rd.map(d => {
+                if (all) return +(d.rate * 100).toFixed(1);
+                const md = d.models && d.models[m];
+                if (!md || !md.first) return null;
+                return +((md.valid / md.first) * 100).toFixed(1);
+            });
+            this._chartRate.data.labels = rLabels;
+            this._chartRate.data.datasets[0].data = rates;
+            this._chartRate.data.datasets[1].data = rd.map(() => 70);
+            this._chartRate.data.datasets[2].data = rd.map(() => 90);
+            this._chartRate.update('none');
+            // 仪表盘最新值
+            if (rt.length) {
+                const last = rt[rt.length-1];
+                this.latestRpm    = all ? last.rpm    : ((last.models&&last.models[m]&&last.models[m].rpm)    || 0);
+                this.latestTpmIn  = all ? last.tpm_in  : ((last.models&&last.models[m]&&last.models[m].tpm_in)  || 0);
+                this.latestTpmOut = all ? last.tpm_out : ((last.models&&last.models[m]&&last.models[m].tpm_out) || 0);
+                this.latestErrors = last.errors;
+            }
+        },
+        // ---- 自动刷新 ----
+        fetchRealtime() {
+            fetch('/metrics/realtime')
+                .then(r => r.json())
+                .then(data => {
+                    this._realtimeRaw = data;
+                    // 更新模型列表
+                    const models = new Set();
+                    data.forEach(d => Object.keys(d.models||{}).forEach(k => models.add(k)));
+                    this._rateRaw.forEach(d => Object.keys(d.models||{}).forEach(k => models.add(k)));
+                    this.modelList = [...models].sort();
+                    this._applyModelFilter();
+                }).catch(() => {});
+            fetch('/metrics/index-stats')
+                .then(r => r.json())
+                .then(d => { this.indexStats = d; }).catch(() => {});
+            fetch('/metrics/rate-history')
+                .then(r => r.json())
+                .then(data => {
+                    this._rateRaw = data;
+                    const models = new Set(this.modelList);
+                    data.forEach(d => Object.keys(d.models||{}).forEach(k => models.add(k)));
+                    this.modelList = [...models].sort();
+                    this._applyModelFilter();
+                }).catch(() => {});
+        },
+        startAutoRefresh() {
+            this.fetchRealtime();
+            this._refreshTimer = setInterval(() => { if (this.autoRefresh) this.fetchRealtime(); }, this.refreshInterval * 1000);
+        },
+        toggleAutoRefresh() {
+            this.autoRefresh = !this.autoRefresh;
+            if (this.autoRefresh) this.fetchRealtime();
+        },
+    },
+    mounted() {
+        this.$nextTick(() => { this.initCharts(); this.startAutoRefresh(); });
+        this.fetchData();
+    },
+    beforeDestroy() { clearInterval(this._refreshTimer); }
+});
+</script>
 </body>
 </html>
