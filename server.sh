@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # server.sh — manage LLM_PROXY-PT service
-# Usage: bash server.sh {start|stop|restart|status}
+# Usage: bash server.sh {start|stop|restart|status} [env_file]
+#   env_file: optional .env file to load (default: .env)
+#   Examples:
+#     bash server.sh start            # loads .env
+#     bash server.sh start .env.yibu  # loads .env.yibu
 
 set -euo pipefail
 
@@ -9,9 +13,12 @@ APP="$SCRIPT_DIR/app.py"
 PID_FILE="$SCRIPT_DIR/logs/app.pid"
 LOG_FILE="$SCRIPT_DIR/logs/app.log"
 
-# Load PROXY_HOST / PROXY_PORT from .env if present
+# Load env vars from specified file (default: .env)
 # Handles inline comments (KEY=value  # comment) and quoted values
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
+ENV_FILE="${2:-.env}"
+ENV_PATH="$SCRIPT_DIR/$ENV_FILE"
+if [[ -f "$ENV_PATH" ]]; then
+    echo "[server] Loading env from $ENV_FILE"
     while IFS= read -r line || [[ -n "$line" ]]; do
         # skip blank lines and full-line comments
         [[ -z "$line" || "$line" =~ ^\s*# ]] && continue
@@ -20,8 +27,10 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
         # must look like KEY=...
         [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
         export "$line"
-    done < "$SCRIPT_DIR/.env"
+    done < "$ENV_PATH"
 fi
+# Pass the env file path to app.py so load_dotenv loads the same file
+export ENV_FILE="$ENV_PATH"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-4000}"

@@ -20,7 +20,7 @@ from auth import validate_api_key
 from utils.metrics import record_request, record_validity, get_metrics_snapshot, get_rate_history
 from utils.log_routes import register_log_routes
 
-load_dotenv(override=True)
+load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
 
 # 全局默认：是否屏蔽 Task 工具里的 "- Explore:" 行
 BAN_EXPLORE = os.getenv("BAN_EXPLORE", "false").lower() == "true"
@@ -35,6 +35,7 @@ LOGS_SESSION_ANTHROPIC = "logs_session_anthropic"
 LOGS_ANTHROPIC = "logs_anthropic"
 LOGS_SESSION_OPENAI = "logs_session_openai"
 LOGS_OPENAI = "logs_openai"
+LOGS_DEBUG = os.path.join("logs", "debug")
 INDEX_FILE_ANTHROPIC = os.path.join(LOGS_ANTHROPIC, "index.jsonl")
 INDEX_FILE_OPENAI    = os.path.join(LOGS_OPENAI,    "index.jsonl")
 
@@ -206,6 +207,21 @@ def _dump_json(path: str, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
+
+
+def _write_debug(ts: str, attempt: int, model: str, reason: str, body: str):
+    """将失败尝试的原始响应写入 logs/debug/ 目录，便于排查问题。返回文件名。"""
+    try:
+        os.makedirs(LOGS_DEBUG, exist_ok=True)
+        safe_model = model.replace("/", "_").replace(":", "_")
+        filename = f"{ts}_attempt{attempt}_{safe_model}_{reason}.txt"
+        path = os.path.join(LOGS_DEBUG, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        return filename
+    except Exception as ex:
+        logging.warning(f"Failed to write debug log: {ex}")
+        return None
 
 
 def _resp_to_obj(r):  # httpx.Response -> dict
@@ -488,13 +504,7 @@ async def anthropic_messages(req: Request):
                     try:
                         r = await client.post(upstream_url, headers=upstream_headers, json=body)
                         last_exception = None
-                        if is_rate_limit_status(r.status_code):
-                            logging.warning(f"Attempt {attempt} rate limit (anthropic non-stream): {r.status_code} {r.text}")
-                        elif r.status_code != 200:
-                            # 非 200 非限流（如 400 参数错误）：直接透传，不重试
-                            success = True
-                            break
-                        else:
+                        if r.status_code == 200:
                             try:
                                 resp_json = r.json()
                                 if _has_valid_content(resp_json):
@@ -502,16 +512,22 @@ async def anthropic_messages(req: Request):
                                     final_valid = True
                                     break
                                 logging.warning(f"Attempt {attempt} empty content (anthropic non-stream), retrying: {r.text[:200]}")
+                                _dbg = _write_debug(ts, attempt, model, "empty_content", r.text[:2000])
+                                if _dbg: logging.warning(f"  -> debug: {_dbg}")
                             except Exception:
                                 # JSON 解析失败：透传原始响应
                                 success = True
                                 break
+                        else:
+                            # 非 200 一律重试，最大次数后透传
+                            _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                            logging.warning(f"Attempt {attempt} non-200 (anthropic non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
                         logging.warning(f"Attempt {attempt} upstream error (anthropic non-stream): {e}")
 
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(0.5 )
+                        await asyncio.sleep(0.5)
                         x_auth_token = await get_x_auth_token(req)
                         upstream_headers = build_upstream_headers(x_auth_token, model)
         except Exception as e:
@@ -519,15 +535,29 @@ async def anthropic_messages(req: Request):
             logging.error(f"Failed to create httpx client (anthropic non-stream): {e}")
 
         if not success:
-            error_msg = str(last_exception) if last_exception else (f"HTTP {r.status_code}" if r else "unknown")
-            logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
-            _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-            _append_index_anthropic(ts, req_path, upstream_attempts, False, model)
-            record_validity(False, model)
-            return JSONResponse(
-                status_code=502,
-                content={"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}},
-            )
+            if r is not None:
+                # 透传上游最后一次错误响应
+                error_msg = f"HTTP {r.status_code}"
+                logging.error(f"All retries exhausted (anthropic non-stream), passing through: {error_msg}")
+                _dump_json(res_path, _resp_to_obj(r))
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model)
+                record_validity(False, model)
+                record_request(0, 0, success=False, model=model)
+                return Response(
+                    content=r.content,
+                    status_code=r.status_code,
+                    media_type=r.headers.get("content-type", "application/json"),
+                )
+            else:
+                error_msg = str(last_exception) if last_exception else "unknown"
+                logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
+                _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model)
+                record_validity(False, model)
+                return JSONResponse(
+                    status_code=502,
+                    content={"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}},
+                )
 
         _dump_json(res_path, _resp_to_obj(r))
         tok_in, tok_out = 0, 0
@@ -579,7 +609,8 @@ async def anthropic_messages(req: Request):
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                logging.warning(f"Attempt {attempt} rate limit (anthropic stream): {r.status_code}")
+                                _dbg = _write_debug(ts, attempt, model, "rate_limit", last_retry_err_text[:2000])
+                                logging.warning(f"Attempt {attempt} rate limit (anthropic stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
                                     retry_token = await get_x_auth_token(req)
@@ -628,8 +659,10 @@ async def anthropic_messages(req: Request):
                                                     pass
 
                             if not committed:
+                                raw_text = raw_buf.decode("utf-8", errors="replace")
                                 if attempt < MAX_RETRIES - 1:
-                                    logging.warning(f"Attempt {attempt} no message_start in SSE (anthropic stream), retrying")
+                                    _dbg = _write_debug(ts, attempt, model, "no_message_start", raw_text[:4000])
+                                    logging.warning(f"Attempt {attempt} no message_start in SSE (anthropic stream), retrying" + (f" -> debug: {_dbg}" if _dbg else ""))
                                     connection_established = False
                                     up_chunks.clear()
                                     await asyncio.sleep(0.5)
@@ -782,31 +815,46 @@ async def openai_chat_completions(req: Request):
                     try:
                         r = await client.post(upstream_url, headers=upstream_headers, json=body)
                         last_exception = None
-                        if not is_rate_limit_status(r.status_code):
+                        if r.status_code == 200:
                             success = True
                             break
-                        logging.warning(f"Attempt {attempt} rate limit (openai non-stream): {r.status_code} {r.text}")
+                        # 非 200 一律重试，最大次数后透传
+                        _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                        logging.warning(f"Attempt {attempt} non-200 (openai non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
                         logging.warning(f"Attempt {attempt} upstream error (openai non-stream): {e}")
 
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(0.5 )
-                    x_auth_token = await get_x_auth_token(req)
-                    upstream_headers = build_upstream_headers(x_auth_token, model)
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(0.5)
+                        x_auth_token = await get_x_auth_token(req)
+                        upstream_headers = build_upstream_headers(x_auth_token, model)
         except Exception as e:
             last_exception = e
             logging.error(f"Failed to create httpx client (openai non-stream): {e}")
 
         if not success:
-            error_msg = str(last_exception) if last_exception else (f"HTTP {r.status_code}" if r else "unknown")
-            logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
-            _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-            _append_index_openai(ts, req_path, model=model, success=False)
-            return JSONResponse(
-                status_code=502,
-                content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
-            )
+            if r is not None:
+                # 透传上游最后一次错误响应
+                error_msg = f"HTTP {r.status_code}"
+                logging.error(f"All retries exhausted (openai non-stream), passing through: {error_msg}")
+                _dump_json(res_path, _resp_to_obj(r))
+                _append_index_openai(ts, req_path, model=model, success=False)
+                record_request(0, 0, success=False, model=model)
+                return Response(
+                    content=r.content,
+                    status_code=r.status_code,
+                    media_type=r.headers.get("content-type", "application/json"),
+                )
+            else:
+                error_msg = str(last_exception) if last_exception else "unknown"
+                logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
+                _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+                _append_index_openai(ts, req_path, model=model, success=False)
+                return JSONResponse(
+                    status_code=502,
+                    content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
+                )
 
         _dump_json(res_path, _resp_to_obj(r))
         tok_in, tok_out = 0, 0
@@ -851,12 +899,14 @@ async def openai_chat_completions(req: Request):
                                 "headers": dict(r.headers),
                             })
 
-                            if is_rate_limit_status(r.status_code):
+                            if r.status_code != 200:
+                                # 非 200 一律重试，最大次数后透传
                                 err = await r.aread()
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                logging.warning(f"Attempt {attempt} rate limit (openai stream): {r.status_code}")
+                                _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
+                                logging.warning(f"Attempt {attempt} non-200 (openai stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
                                     retry_token = await get_x_auth_token(req)
@@ -864,15 +914,6 @@ async def openai_chat_completions(req: Request):
                                 continue
 
                             connection_established = True
-
-                            if r.status_code >= 400:
-                                err = await r.aread()
-                                err_text = err.decode("utf-8", errors="replace")
-                                up_chunks.append({"type": "error_body", "body": err_text})
-                                error_data = {"error": {"message": err_text, "type": "api_error", "code": r.status_code}}
-                                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
-                                yield b"data: [DONE]\n\n"
-                                return
 
                             # Pure pass-through: tee raw bytes to client and capture for logging
                             raw_buf = bytearray()

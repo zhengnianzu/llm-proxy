@@ -54,6 +54,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 _cache: List[Dict] = []
 _best: OrderedDict = OrderedDict()
 _scanned: Set[str] = set()
+_index_line_count: int = 0  # 已处理的 index.jsonl 行数（用于增量刷新）
 
 _SKIP_SUFFIXES = ("-res.json", "-headers.json")
 
@@ -169,15 +170,56 @@ def _collect_json_paths(root: Path) -> List[Path]:
     return paths
 
 
+def _get_req_paths_from_index(root: Path, start_line: int = 0):
+    """从 index.jsonl 读取 req 文件路径，从 start_line 行开始。
+    返回 (new_paths: List[Path], total_lines: int)。"""
+    index_path = root / "index.jsonl"
+    paths: List[Path] = []
+    total = 0
+    with open(index_path, "r", encoding="utf-8") as f:
+        for i, raw in enumerate(f):
+            total += 1
+            if i < start_line:
+                continue
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                req_file = entry.get("req_file", "")
+                if not req_file:
+                    continue
+                # req_file 是相对于项目根目录的路径（root 的上级目录）
+                abs_path = (root.parent / req_file).resolve()
+                if abs_path.is_file():
+                    paths.append(abs_path)
+            except json.JSONDecodeError:
+                pass
+    return paths, total
+
+
 # ---------------------------------------------------------------------------
 # Scan modes
 # ---------------------------------------------------------------------------
 
 def scan_directory(incremental: bool = False) -> List[Dict]:
-    global _best, _scanned
+    global _best, _scanned, _index_line_count
 
-    all_paths = _collect_json_paths(ROOT_DIR)
-    new_paths = [p for p in all_paths if str(p) not in _scanned] if incremental else all_paths
+    index_path = ROOT_DIR / "index.jsonl"
+    if index_path.exists():
+        # 快速路径：从 index.jsonl 获取 req 文件列表，无需遍历目录
+        start = _index_line_count if incremental else 0
+        if not incremental:
+            _best.clear()
+            _scanned.clear()
+        new_paths, total = _get_req_paths_from_index(ROOT_DIR, start)
+        _index_line_count = total
+        logger.info(f"[index] {'Incremental' if incremental else 'Full'} load: {len(new_paths)} new entries (total lines: {total})")
+    else:
+        # 降级路径：遍历目录
+        all_paths = _collect_json_paths(ROOT_DIR)
+        new_paths = [p for p in all_paths if str(p) not in _scanned] if incremental else all_paths
+
     for p in new_paths:
         _scanned.add(str(p))
 
