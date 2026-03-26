@@ -201,6 +201,32 @@ def analyze_tools_detail(full_messages: List[dict]) -> Dict[str, Dict[str, int]]
     }
 
 
+_SKILL_PATH_RE = re.compile(r"(?:^|/)\.openclaw/skills/([^/]+)/SKILL\.md")
+
+
+def analyze_skills(full_messages: List[dict]) -> Dict[str, int]:
+    """统计使用的自定义技能。
+
+    识别条件：工具名为 'read'，且 input.file_path 匹配 .openclaw/skills/xxx/SKILL.md。
+    技能名取 xxx 部分。
+
+    返回 {skill_name: count}
+    """
+    skill_counts: Counter = Counter()
+    for m in full_messages:
+        for blk in iter_blocks(m.get("content", [])):
+            if blk.get("type") != "tool_use" or blk.get("name") != "read":
+                continue
+            inp = blk.get("input") or {}
+            file_path = inp.get("file_path") or inp.get("path") or ""
+            if "SKILL.md" not in file_path:
+                continue
+            match = _SKILL_PATH_RE.search(file_path)
+            if match:
+                skill_counts[match.group(1)] += 1
+    return dict(skill_counts)
+
+
 # ---------------------------------------------------------------------------
 # Q1 提取
 # ---------------------------------------------------------------------------
@@ -369,6 +395,7 @@ def analyze_session(folder: Path) -> Optional[Dict]:
     tool_use_cnt   = count_tool_use(messages, resp_content)
     tr             = analyze_tool_results(full_messages)
     td             = analyze_tools_detail(full_messages)
+    skills         = analyze_skills(full_messages)
 
     tool_result_cnt   = tr["total"]
     tool_success_rate = (
@@ -396,6 +423,7 @@ def analyze_session(folder: Path) -> Optional[Dict]:
         "tool_use_detail":    td["use"],
         "tool_success_detail": td["success"],
         "tool_fail_detail":   td["fail"],
+        "skills_used":        skills,
         **dict(zip(("completed", "completed_note"),
                    fmt_quality(check_quality(all_data, tool_use_cnt)))),
     }
@@ -467,10 +495,12 @@ def compute_stats(sessions: List[Dict]) -> Dict:
     global_use:     Counter = Counter()
     global_success: Counter = Counter()
     global_fail:    Counter = Counter()
+    global_skills:  Counter = Counter()
     for s in sessions:
         global_use.update(s.get("tool_use_detail", {}))
         global_success.update(s.get("tool_success_detail", {}))
         global_fail.update(s.get("tool_fail_detail", {}))
+        global_skills.update(s.get("skills_used", {}))
 
     return {
         "total":         len(sessions),
@@ -495,6 +525,7 @@ def compute_stats(sessions: List[Dict]) -> Dict:
         "global_use":    global_use,
         "global_success": global_success,
         "global_fail":   global_fail,
+        "global_skills": global_skills,
     }
 
 
@@ -623,6 +654,20 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
             for mdl, cnt in sorted(stats["model_dist"].items(), key=lambda x: -x[1])
         ],
 
+        "skills": {
+            "total_use": sum(stats["global_skills"].values()),
+            "distinct_count": len(stats["global_skills"]),
+            "top10": [
+                {
+                    "name": name,
+                    "count": count,
+                    "pct": f"{count / sum(stats['global_skills'].values()) * 100:.1f}" if sum(stats["global_skills"].values()) else "0",
+                }
+                for name, count in stats["global_skills"].most_common(10)
+            ],
+            "has_skills": bool(stats["global_skills"]),
+        },
+
         "quality": {
             "ok_count":   ok_count,
             "ok_pct":     f"{ok_count/total*100:.1f}",
@@ -691,6 +736,13 @@ def _fmt_tool_dict(d: Any) -> str:
     return ", ".join(f"{k}:{v}" for k, v in sorted(d.items(), key=lambda x: -x[1]))
 
 
+def _fmt_skill_dict(d: Any) -> str:
+    """将技能 dict 转为 'skillA, skillB' 字符串，按次数降序。"""
+    if not isinstance(d, dict) or not d:
+        return ""
+    return ", ".join(k for k, _ in sorted(d.items(), key=lambda x: (-x[1], x[0])))
+
+
 # 列定义：(字段key, 中文表头)
 _DETAIL_COLS: List[Tuple[str, str]] = [
     ("q1",                "Q1首问"),
@@ -711,6 +763,8 @@ _DETAIL_COLS: List[Tuple[str, str]] = [
     ("tool_success_rate", "工具成功率(%)"),
     ("model",             "模型"),
     ("tool_use_detail",   "工具调用详情"),
+    ("tool_success_detail", "工具成功详情"),
+    ("skills_used",       "使用的技能"),
     ("completed",         "任务完成"),
     ("completed_note",    "错误备注"),
 ]
@@ -748,6 +802,7 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
     rows = [
         {label: (
             "" if key == "q1"
+            else _fmt_skill_dict(s.get(key)) if key == "skills_used"
             else _fmt_tool_dict(s.get(key)) if isinstance(s.get(key), dict)
             else _sanitize_cell(s.get(key))
         )
@@ -892,6 +947,29 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
         # 列宽
         for col in ws2.columns:
             ws2.column_dimensions[get_column_letter(col[0].column)].width = 32
+
+        # Sheet 3: 技能统计
+        ws3 = ew.book.create_sheet("技能统计")
+        ws3.cell(1, 1, "技能名称").font = subhdr_font
+        ws3.cell(1, 1).fill = subhdr_fill
+        ws3.cell(1, 2, "使用次数").font = subhdr_font
+        ws3.cell(1, 2).fill = subhdr_fill
+        ws3.cell(1, 2).alignment = Alignment(horizontal="center")
+
+        # 统计全局技能使用
+        global_skills: Counter = Counter()
+        for s in sessions:
+            global_skills.update(s.get("skills_used", {}))
+
+        row_idx = 2
+        for skill_name, count in sorted(global_skills.items(), key=lambda x: (-x[1], x[0])):
+            ws3.cell(row_idx, 1, skill_name)
+            ws3.cell(row_idx, 2, count)
+            ws3.cell(row_idx, 2).alignment = Alignment(horizontal="center")
+            row_idx += 1
+
+        ws3.column_dimensions["A"].width = 32
+        ws3.column_dimensions["B"].width = 14
 
 
 # ---------------------------------------------------------------------------

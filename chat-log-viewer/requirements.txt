@@ -1,2 +1,5 @@
 fastapi
 uvicorn[standard]
+tqdm
+openpyxl
+jinja2

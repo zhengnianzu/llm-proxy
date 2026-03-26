@@ -59,9 +59,14 @@ _LABEL_TO_KEY = {
     "工具成功率(%)":      "tool_success_rate",
     "模型":              "model",
     "工具调用详情":        "tool_use_detail",
+    "工具成功详情":        "tool_success_detail",
+    "使用的技能":         "skills_used",
     "任务完成":           "completed",
     "错误备注":           "completed_note",
 }
+
+_TOOLS_SUCCESS_LABELS = {"工具成功详情", "工具成功分布"}
+_TOOLS_FAIL_LABELS = {"工具失败详情", "工具失败分布"}
 
 _INT_COLS   = {"api_call_count", "api_errors", "user_turns", "total_messages",
                "tool_use_count", "tool_result_count", "tool_success",
@@ -69,9 +74,49 @@ _INT_COLS   = {"api_call_count", "api_errors", "user_turns", "total_messages",
 _FLOAT_COLS = {"duration_s", "tool_success_rate"}
 
 
+def _parse_tool_dict(s: str) -> dict:
+    """将 'exec:1138, read:130' 反解析回 {'exec': 1138, 'read': 130}。"""
+    if not isinstance(s, str) or not s.strip():
+        return {}
+    result = {}
+    for part in s.split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        name, _, count = part.rpartition(":")
+        name = name.strip()
+        try:
+            result[name] = int(count.strip())
+        except ValueError:
+            pass
+    return result
+
+
+def _parse_skills_str(s: str) -> dict:
+    """将 'skillA, skillB' 反解析回 {'skillA': 1, 'skillB': 1}。"""
+    if not isinstance(s, str) or not s.strip():
+        return {}
+    return {name.strip(): 1 for name in s.split(",") if name.strip()}
+
+
 def _coerce(key: str, val: Any) -> Any:
     if pd.isna(val) if not isinstance(val, (list, dict)) else False:
         return None
+    if key == "completed":
+        text = str(val).strip()
+        return 0 if text == "0" else text
+    if key == "tool_use_detail":
+        if isinstance(val, dict):
+            return val
+        return _parse_tool_dict(str(val)) if val else {}
+    if key == "tool_success_detail":
+        if isinstance(val, dict):
+            return val
+        return _parse_tool_dict(str(val)) if val else {}
+    if key == "skills_used":
+        if isinstance(val, dict):
+            return val
+        return _parse_skills_str(str(val)) if val else {}
     if key in _INT_COLS:
         try:
             return int(float(val))
@@ -115,6 +160,7 @@ def load_xlsx(path: Path) -> List[Dict]:
         s.setdefault("tool_use_detail", {})
         s.setdefault("tool_success_detail", {})
         s.setdefault("tool_fail_detail", {})
+        s.setdefault("skills_used", {})
 
         sessions.append(s)
     return sessions

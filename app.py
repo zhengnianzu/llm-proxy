@@ -998,7 +998,7 @@ def metrics_realtime():
 @app.get("/metrics/index-stats")
 def index_stats():
     """返回 Anthropic 请求的首次/总体/有效次数及成功率。"""
-    rate = (_valid_count / _first_count) if _first_count > 0 else 0.0
+    rate = (_valid_count / _total_count) if _total_count > 0 else 0.0
     return JSONResponse({
         "first_count": _first_count,
         "total_count": _total_count,
