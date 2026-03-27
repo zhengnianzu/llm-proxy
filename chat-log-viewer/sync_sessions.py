@@ -705,17 +705,18 @@ def run_raw(
         }
         for future in as_completed(futures):
             prefix, all_ok, paths = future.result()
+            # 无论是否全部成功，已上传的文件都记录下来（供 erase 使用）
+            uploaded_files.extend(paths)
             if all_ok:
                 ok_count += 1
                 ok_prefixes.append(prefix)
-                uploaded_files.extend(paths)
             else:
                 logger.error("raw upload incomplete for prefix=%s", prefix)
 
-    logger.info("raw upload summary: %d/%d triplets OK", ok_count, len(triplets))
+    logger.info("raw upload summary: %d/%d triplets fully OK", ok_count, len(triplets))
 
-    if upload_erase and ok_prefixes:
-        logger.info("upload_erase: removing %d uploaded triplet sets from src", len(ok_prefixes))
+    if upload_erase and uploaded_files:
+        logger.info("upload_erase: removing %d uploaded files from src", len(uploaded_files))
         deleted = 0
         for p in uploaded_files:
             try:
