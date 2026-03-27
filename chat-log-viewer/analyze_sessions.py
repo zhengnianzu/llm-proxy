@@ -218,6 +218,14 @@ def analyze_skills(full_messages: List[dict]) -> Dict[str, int]:
             if blk.get("type") != "tool_use" or blk.get("name") != "read":
                 continue
             inp = blk.get("input") or {}
+            if isinstance(inp, str):
+                try:
+                    import json as _json
+                    inp = _json.loads(inp)
+                except Exception:
+                    inp = {}
+            if not isinstance(inp, dict):
+                inp = {}
             file_path = inp.get("file_path") or inp.get("path") or ""
             if "SKILL.md" not in file_path:
                 continue
