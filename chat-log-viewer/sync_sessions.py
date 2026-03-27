@@ -856,11 +856,15 @@ def run_daemon(config: dict, logger: logging.Logger, once: bool = False) -> None
                 logger.info("Uploading %d changed folders to OBS (obs_session)...", len(changed))
                 ok_folders = run_uploads(session_dir, obs_session, changed, workers, logger, upload_script)
                 if upload_erase and ok_folders:
-                    # export 模式下 erase：先删 session folder，再删 src 原始文件
+                    # session folder 已上传到 obs_session，可以删除
                     logger.info("upload_erase: removing %d uploaded session folders", len(ok_folders))
                     erase_session_folders(session_dir, ok_folders, logger)
-                    logger.info("upload_erase: removing src triplets for %d uploaded folders", len(ok_folders))
-                    erase_src_triplets(src, ok_folders, logger)
+                    # src 原始文件只有在 obs_raw 已备份的情况下才能删除
+                    if obs_raw:
+                        logger.info("upload_erase: removing src triplets for %d uploaded folders", len(ok_folders))
+                        erase_src_triplets(src, ok_folders, logger)
+                    else:
+                        logger.info("upload_erase: skipping src erase — obs_raw not configured (no raw backup)")
             else:
                 logger.info("No changes — skipping session upload")
 
