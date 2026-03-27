@@ -187,3 +187,17 @@
 | `{{ t.name }}` | {{ t.calls }} | {{ t.success }} | {{ t.fail }} | {{ t.rate }}% |
 {% endfor %}
 {% endif %}
+
+---
+
+{% if skills.has_skills %}
+## 10. 自定义技能使用统计
+
+> 共使用 **{{ skills.distinct_count }}** 种技能，合计调用 **{{ skills.total_use }}** 次
+
+| 技能名称 | 调用次数 | 占比 |
+|---------|--------:|-----:|
+{% for s in skills.top10 %}
+| `{{ s.name }}` | {{ s.count }} | {{ s.pct }}% |
+{% endfor %}
+{% endif %}

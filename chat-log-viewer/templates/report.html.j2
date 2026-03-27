@@ -363,6 +363,31 @@
   </div>
   {% endif %}
 
+  <!-- ── 10. 技能统计 ── -->
+  {% if skills.has_skills %}
+  <div class="card">
+    <h2>10. 自定义技能使用统计</h2>
+    <div class="kpi-row">
+      <div class="kpi"><div class="val">{{ skills.distinct_count }}</div><div class="lbl">技能种类数</div></div>
+      <div class="kpi"><div class="val">{{ skills.total_use }}</div><div class="lbl">技能总调用次数</div></div>
+    </div>
+    <table>
+      <tr><th>技能名称</th><th class="r">调用次数</th><th class="r">占比</th><th style="min-width:180px">分布</th></tr>
+      {% for s in skills.top10 %}
+      <tr>
+        <td><code>{{ s.name }}</code></td>
+        <td class="r">{{ s.count }}</td>
+        <td class="r">{{ s.pct }}%</td>
+        <td><div class="bar-cell">
+          <div class="bar-wrap"><div class="bar-fill" style="width:{{ s.pct }}%"></div></div>
+          <span class="bar-pct">{{ s.pct }}%</span>
+        </div></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
 </div>
 </body>
 </html>
