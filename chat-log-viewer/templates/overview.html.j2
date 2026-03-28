@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>报告总览</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         font-size: 14px; color: #1a1a2e; background: #f4f6fb; }
+  .page { max-width: 1100px; margin: 32px auto; padding: 0 20px 60px; }
+
+  /* 页头 */
+  .report-header { background: linear-gradient(135deg, #1f4e79 0%, #2e75b6 100%);
+    color: #fff; border-radius: 10px; padding: 28px 36px; margin-bottom: 28px; }
+  .report-header h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .report-header .meta { font-size: 13px; opacity: .8; }
+
+  /* 卡片 */
+  .card { background: #fff; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.07);
+          padding: 24px 28px; margin-bottom: 22px; }
+  .card h2 { font-size: 16px; color: #1f4e79; border-left: 4px solid #2e75b6;
+             padding-left: 10px; margin-bottom: 16px; }
+
+  /* 汇总指标行 */
+  .kpi-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
+  .kpi { flex: 1 1 140px; background: #f0f5ff; border-radius: 8px;
+         padding: 14px 16px; text-align: center; }
+  .kpi .val { font-size: 26px; font-weight: 700; color: #1f4e79; line-height: 1.2; }
+  .kpi .lbl { font-size: 11px; color: #888; margin-top: 4px; }
+
+  /* 表格 */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #1f4e79; color: #fff; padding: 10px 14px; text-align: left; font-weight: 600; }
+  th.r, td.r { text-align: right; }
+  td { padding: 9px 14px; border-bottom: 1px solid #eef0f5; vertical-align: middle; }
+  tr:nth-child(even) td { background: #f7f9fd; }
+  tr:hover td { background: #edf3fb; }
+
+  /* 条形图 */
+  .rate-bar { display: flex; align-items: center; gap: 8px; }
+  .bar-wrap { flex: 1; background: #e8edf5; border-radius: 3px; height: 10px; overflow: hidden; }
+  .bar-fill  { height: 100%; border-radius: 3px; transition: width .4s; }
+  .bar-green { background: linear-gradient(90deg, #34c759, #5ae075); }
+  .bar-blue  { background: linear-gradient(90deg, #2e75b6, #5ba4e0); }
+  .bar-pct   { font-size: 11px; color: #666; min-width: 44px; text-align: right; }
+
+  a.detail-link { color: #2e75b6; text-decoration: none; font-weight: 600; }
+  a.detail-link:hover { text-decoration: underline; }
+  .no-data { color: #aaa; font-size: 12px; }
+  a.overview-link { display: inline-block; margin-top: 12px; padding: 8px 18px;
+    background: #1f4e79; color: #fff; border-radius: 6px; text-decoration: none;
+    font-size: 13px; font-weight: 600; }
+  a.overview-link:hover { background: #2e75b6; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="report-header">
+    <h1>报告总览</h1>
+    <div class="meta">
+      目录：{{ report_dir }} &nbsp;|&nbsp; 更新时间：{{ generated_at }}
+      &nbsp;|&nbsp; 共 {{ key_count }} 个 key
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="kpi-row">
+      <div class="kpi"><div class="val">{{ key_count }}</div><div class="lbl">Key 数量</div></div>
+      <div class="kpi"><div class="val">{{ total_sessions }}</div><div class="lbl">总 Session 数</div></div>
+      <div class="kpi"><div class="val">{{ avg_success_rate }}%</div><div class="lbl">平均成功率</div></div>
+      <div class="kpi"><div class="val">{{ avg_tool_rate }}</div><div class="lbl">平均工具成功率</div></div>
+    </div>
+    <p class="refresh-hint">页面每次加载时自动重新扫描目录；key 集合变化时自动重新生成汇总报告</p>
+    {% if has_overview %}
+    <a class="overview-link" href="/files/overview.html">查看全量合并报告 →</a>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>各 Key 详情</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Key</th>
+          <th class="r">Sessions</th>
+          <th class="r">成功数</th>
+          <th style="min-width:180px">任务成功率</th>
+          <th style="min-width:180px">工具成功率</th>
+          <th>详细报告</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in keys %}
+        <tr>
+          <td><strong>{{ k.key }}</strong></td>
+          <td class="r">{{ k.total }}</td>
+          <td class="r">{{ k.ok_count }}</td>
+          <td>
+            <div class="rate-bar">
+              <div class="bar-wrap"><div class="bar-fill bar-green" style="width:{{ k.success_rate }}%"></div></div>
+              <span class="bar-pct">{{ k.success_rate }}%</span>
+            </div>
+          </td>
+          <td>
+            {% if k.tool_rate is not none %}
+            <div class="rate-bar">
+              <div class="bar-wrap"><div class="bar-fill bar-blue" style="width:{{ k.tool_rate }}%"></div></div>
+              <span class="bar-pct">{{ k.tool_rate }}%</span>
+            </div>
+            {% else %}
+            <span class="no-data">无数据</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if k.has_html %}
+            <a class="detail-link" href="/files/{{ k.key }}/session_report.html">查看详情 →</a>
+            {% else %}
+            <span class="no-data">暂无报告</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+</body>
+</html>
