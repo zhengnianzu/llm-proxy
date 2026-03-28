@@ -31,6 +31,18 @@
         .header h1 { font-size: 16px; font-weight: 600; color: #1a202c; white-space: nowrap; }
         .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         .label { font-size: 13px; color: #6b7280; white-space: nowrap; }
+        .dir-select {
+            min-width: 240px;
+            max-width: 420px;
+            padding: 7px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 7px;
+            font-size: 13px;
+            color: #1f2937;
+            background: #fff;
+            outline: none;
+        }
+        .dir-select:focus { border-color: #10a37f; }
         .btn {
             padding: 7px 14px; border: none; border-radius: 7px;
             cursor: pointer; font-size: 13px; font-weight: 500;
@@ -256,6 +268,7 @@
 <div class="header">
     <h1>💬 Chat Log Viewer</h1>
     <div class="header-right">
+        <select id="dirSelect" class="dir-select" style="display:none"></select>
         <button class="btn btn-green" onclick="refreshList()">🔄 刷新</button>
         <span class="stats-chip" id="statsChip" style="display:none"></span>
     </div>
@@ -293,11 +306,25 @@
 // ----------------------------------------------------------------
 let allItems = [];
 let activeEl  = null;
+let currentDir = null;
+let availableDirs = [];
 
 const fileListEl  = document.getElementById('fileList');
 const chatPanel   = document.getElementById('chatPanel');
 const statsChip   = document.getElementById('statsChip');
 const searchInput = document.getElementById('searchInput');
+const dirSelect   = document.getElementById('dirSelect');
+
+dirSelect.addEventListener('change', async () => {
+    currentDir = dirSelect.value || null;
+    activeEl = null;
+    chatPanel.innerHTML = `
+        <div class="empty-state">
+            <p>从左侧选择一个对话</p>
+        </div>
+    `;
+    await loadList();
+});
 
 // ----------------------------------------------------------------
 // Load / Refresh
@@ -305,7 +332,7 @@ const searchInput = document.getElementById('searchInput');
 async function loadList() {
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     try {
-        const res = await fetch('/api/list');
+        const res = await fetch('/api/list' + _dirQuery());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         allItems = await res.json();
         _applyFilter();
@@ -317,7 +344,8 @@ async function loadList() {
 async function refreshList() {
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>刷新中…</div>';
     try {
-        await fetch('/api/refresh');
+        await initConfig();
+        await fetch('/api/refresh' + _dirQuery());
         await loadList();
     } catch(e) {
         fileListEl.innerHTML = `<div class="sidebar-tip">刷新失败：${esc(e.message)}</div>`;
@@ -338,10 +366,44 @@ function _applyFilter() {
         : allItems;
 
     fileListEl.innerHTML = '';
-    filtered.forEach(item => fileListEl.appendChild(_makeItemEl(item)));
+	    filtered.forEach(item => fileListEl.appendChild(_makeItemEl(item)));
 
-    statsChip.style.display = 'inline';
-    statsChip.textContent = `${filtered.length} / ${allItems.length} 条对话`;
+	    statsChip.style.display = 'inline';
+	    statsChip.textContent = `${filtered.length} / ${allItems.length} 条对话`;
+}
+
+function _dirQuery() {
+    if (!currentDir) return '';
+    return `?dir=${encodeURIComponent(currentDir)}`;
+}
+
+async function initConfig() {
+    const res = await fetch('/api/config');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const config = await res.json();
+    availableDirs = Array.isArray(config.dirs) ? config.dirs : [];
+    const prevDir = currentDir;
+
+    if (availableDirs.length > 1) {
+        dirSelect.innerHTML = '';
+        availableDirs.forEach(dir => {
+            const opt = document.createElement('option');
+            opt.value = dir.key;
+            opt.textContent = dir.label;
+            dirSelect.appendChild(opt);
+        });
+        currentDir = availableDirs.some(dir => dir.key === prevDir)
+            ? prevDir
+            : (config.active_dir || availableDirs[0].key);
+        dirSelect.value = currentDir;
+        dirSelect.style.display = 'inline-block';
+    } else if (availableDirs.length === 1) {
+        currentDir = availableDirs[0].key;
+        dirSelect.style.display = 'none';
+    } else {
+        currentDir = null;
+        dirSelect.style.display = 'none';
+    }
 }
 
 // ----------------------------------------------------------------
@@ -369,7 +431,9 @@ async function selectItem(item, el) {
 
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
-        const res = await fetch('/api/file?rel_path=' + encodeURIComponent(item.rel_path));
+        const params = new URLSearchParams({ rel_path: item.rel_path });
+        if (item.dir_key) params.set('dir', item.dir_key);
+        const res = await fetch('/api/file?' + params.toString());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         renderMessages(await res.json(), item.rel_path, item.label_short);
     } catch(e) {
@@ -694,7 +758,14 @@ function showError(msg) {
 // ----------------------------------------------------------------
 // Init
 // ----------------------------------------------------------------
-loadList();
+(async function init() {
+    try {
+        await initConfig();
+        await loadList();
+    } catch (e) {
+        fileListEl.innerHTML = `<div class="sidebar-tip">初始化失败：${esc(e.message)}</div>`;
+    }
+})();
 </script>
 </body>
 </html>

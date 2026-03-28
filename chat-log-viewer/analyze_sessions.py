@@ -285,52 +285,49 @@ def _is_garbled(text: str, min_lines: int = 10, max_avg_chars: float = 5.0) -> b
     return (sum(len(l) for l in lines) / len(lines)) < max_avg_chars
 
 
-def _scan_garbled(all_data: List[dict]) -> bool:
-    """遍历所有请求的 messages content、thinking 块及 response content，检测乱码。"""
-    for data in all_data:
-        # messages
-        for msg in (data.get("messages") or []):
-            content = msg.get("content", [])
-            # 普通文本内容
-            text = _collect_text(content)
-            if text and _is_garbled(text):
-                return True
-            # thinking / reasoning 块
-            if isinstance(content, list):
-                for blk in content:
-                    if not isinstance(blk, dict):
-                        continue
-                    thinking = blk.get("thinking") or blk.get("reasoning_content") or ""
-                    if isinstance(thinking, str) and _is_garbled(thinking):
-                        return True
-        # response content
-        resp_content = (data.get("response") or {}).get("content")
-        if resp_content:
-            text = _collect_text(resp_content)
-            if text and _is_garbled(text):
-                return True
+def _scan_garbled(data: dict) -> bool:
+    """遍历单个请求的 messages content、thinking 块及 response content，检测乱码。"""
+    # messages
+    for msg in (data.get("messages") or []):
+        content = msg.get("content", [])
+        # 普通文本内容
+        text = _collect_text(content)
+        if text and _is_garbled(text):
+            return True
+        # thinking / reasoning 块
+        if isinstance(content, list):
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                thinking = blk.get("thinking") or blk.get("reasoning_content") or ""
+                if isinstance(thinking, str) and _is_garbled(thinking):
+                    return True
+    # response content
+    resp_content = (data.get("response") or {}).get("content")
+    if resp_content:
+        text = _collect_text(resp_content)
+        if text and _is_garbled(text):
+            return True
     return False
 
 
-def check_quality(all_data: List[dict], tool_use_cnt: int) -> List[str]:
+def check_quality(best_data: dict, tool_use_cnt: int) -> List[str]:
     """
-    对单个 session 的原始 JSON 数据做质量检查。
+    对单个 session 的最佳快照做质量检查。
     返回触发的错误代码列表（空列表 = 无问题）。
     """
     errors: List[str] = []
 
     # E001: 乱码
-    if _scan_garbled(all_data):
+    if _scan_garbled(best_data):
         errors.append("E001")
 
     # E002: 请求返回 200 但响应内容为空
-    for data in all_data:
-        resp = data.get("response") or {}
-        status = resp.get("status_code")
-        content = resp.get("content")
-        if status == 200 and not content:
-            errors.append("E002")
-            break
+    resp = best_data.get("response") or {}
+    status = resp.get("status_code")
+    content = resp.get("content")
+    if status == 200 and not content:
+        errors.append("E002")
 
     # E003: 工具调用次数 < 3
     if tool_use_cnt < 3:
@@ -433,7 +430,7 @@ def analyze_session(folder: Path) -> Optional[Dict]:
         "tool_fail_detail":   td["fail"],
         "skills_used":        skills,
         **dict(zip(("completed", "completed_note"),
-                   fmt_quality(check_quality(all_data, tool_use_cnt)))),
+                   fmt_quality(check_quality(best_data, tool_use_cnt)))),
     }
 
 

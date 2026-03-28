@@ -181,6 +181,7 @@ def write_merged_excel(
     from openpyxl.utils import get_column_letter
 
     _DETAIL_COLS_MERGE = [("source", "来源文件")] + list(az._DETAIL_COLS)
+    header_labels = [label for _, label in _DETAIL_COLS_MERGE]
 
     rows = []
     for s in all_sessions:
@@ -193,6 +194,21 @@ def write_merged_excel(
             else:
                 row[label] = az._sanitize_cell(s.get(key))
         rows.append(row)
+
+    col_widths: Dict[str, int] = {}
+    for label in header_labels:
+        if label == "Q1首问":
+            col_widths[label] = 50
+            continue
+        if label == "来源文件":
+            col_widths[label] = 30
+            continue
+        max_len = len(label)
+        for row in rows:
+            val = row.get(label)
+            if val is not None:
+                max_len = max(max_len, len(str(val)))
+        col_widths[label] = min(max_len + 2, 40)
 
     df_detail = pd.DataFrame(rows)
 
@@ -237,24 +253,34 @@ def write_merged_excel(
 
         hdr_fill = PatternFill(fill_type="solid", fgColor="1F4E79")
         hdr_font = Font(bold=True, color="FFFFFF", size=10)
+        hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        wrap_top_align = Alignment(wrap_text=True, vertical="top")
         for cell in ws1[1]:
             cell.fill      = hdr_fill
             cell.font      = hdr_font
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.alignment = hdr_align
         ws1.row_dimensions[1].height = 30
 
         alt_fill = PatternFill(fill_type="solid", fgColor="EBF3FB")
-        for row_idx in range(2, ws1.max_row + 1, 2):
-            for cell in ws1[row_idx]:
+        for row_idx, row_cells in enumerate(
+            ws1.iter_rows(min_row=2, max_row=ws1.max_row),
+            start=2,
+        ):
+            if row_idx % 2 != 0:
+                continue
+            for cell in row_cells:
                 if cell.fill.fgColor.rgb in ("00000000", "FFFFFFFF", "00FFFFFF"):
                     cell.fill = alt_fill
 
         # 成功率列格式
         for ci, (_, lbl) in enumerate(_DETAIL_COLS_MERGE, 1):
             if lbl == "工具成功率(%)":
-                rate_letter = get_column_letter(ci)
-                for row in range(2, ws1.max_row + 1):
-                    cell = ws1[f"{rate_letter}{row}"]
+                for (cell,) in ws1.iter_rows(
+                    min_row=2,
+                    max_row=ws1.max_row,
+                    min_col=ci,
+                    max_col=ci,
+                ):
                     if cell.value is not None:
                         try:
                             cell.value = float(cell.value) / 100
@@ -262,24 +288,18 @@ def write_merged_excel(
                         except (TypeError, ValueError):
                             pass
             if lbl in ("Q1首问", "来源文件"):
-                col_letter = get_column_letter(ci)
-                for row in range(2, ws1.max_row + 1):
-                    ws1[f"{col_letter}{row}"].alignment = Alignment(wrap_text=True, vertical="top")
+                for (cell,) in ws1.iter_rows(
+                    min_row=2,
+                    max_row=ws1.max_row,
+                    min_col=ci,
+                    max_col=ci,
+                ):
+                    cell.alignment = wrap_top_align
 
         # 列宽
-        for col_idx, col_cells in enumerate(ws1.columns, start=1):
+        for col_idx, label in enumerate(header_labels, start=1):
             col_letter = get_column_letter(col_idx)
-            _, lbl = _DETAIL_COLS_MERGE[col_idx - 1]
-            if lbl == "Q1首问":
-                ws1.column_dimensions[col_letter].width = 50
-            elif lbl == "来源文件":
-                ws1.column_dimensions[col_letter].width = 30
-            else:
-                max_len = max(
-                    (len(str(c.value)) if c.value is not None else 0 for c in col_cells),
-                    default=8,
-                )
-                ws1.column_dimensions[col_letter].width = min(max_len + 2, 40)
+            ws1.column_dimensions[col_letter].width = col_widths[label]
 
         # Sheet2: 分布统计
         ws2 = ew.book.create_sheet("分布统计")
@@ -299,7 +319,7 @@ def write_merged_excel(
                 hc.font = subhdr_font
                 hc.alignment = Alignment(horizontal="center")
             cur_row += 1
-            for _, row in df_s.iterrows():
+            for row in df_s.itertuples(index=False, name=None):
                 for ci, val in enumerate(row, 1):
                     ws2.cell(cur_row, ci, val)
                 cur_row += 1
