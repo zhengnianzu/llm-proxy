@@ -21,17 +21,15 @@ BASE_DIR = Path(__file__).parent.parent
 
 _DEFAULTS: dict = {
     "dirs": {
-        "tasks":      "tasks",
-        "raw_index":  "raw_index",
-        "manifests":  "manifests",
-        "pair_cache": "pair_cache",
-        "views":      "views",
+        "tasks":      "data/tasks",
+        "raw_index":  "data/raw_index",
+        "manifests":  "output/manifests",
+        "pair_cache": "output/pair_cache",
+        "views":      "output/views",
     },
     "web": {
-        "host":          "127.0.0.1",
-        "port":          8081,
-        "templates_dir": "web/templates",
-        "static_dir":    "web/static",
+        "host": "127.0.0.1",
+        "port": 8081,
     },
     "matching": {
         "task_query_field":  "query",
@@ -99,9 +97,5 @@ def reports_dir()    -> Path: return dir_path("reports")
 
 def web_host()          -> str:  return _cfg["web"]["host"]
 def web_port()          -> int:  return int(_cfg["web"]["port"])
-def web_templates_dir() -> Path:
-    rel = _cfg["web"]["templates_dir"]
-    return Path(rel) if Path(rel).is_absolute() else BASE_DIR / rel
-def web_static_dir()    -> Path:
-    rel = _cfg["web"]["static_dir"]
-    return Path(rel) if Path(rel).is_absolute() else BASE_DIR / rel
+def web_templates_dir() -> Path: return BASE_DIR / "web" / "templates"
+def web_static_dir()    -> Path: return BASE_DIR / "web" / "static"

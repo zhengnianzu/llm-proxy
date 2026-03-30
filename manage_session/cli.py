@@ -12,6 +12,7 @@ Commands:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -179,6 +180,7 @@ def main():
         prog="python cli.py",
         description="manage_session — task/index matching system",
     )
+    parser.add_argument("--config", default=None, help="Path to config.yaml file")
     sub = parser.add_subparsers(dest="cmd")
 
     p = sub.add_parser("match", help="Auto-scan and run matching (incremental by default)")
@@ -192,6 +194,11 @@ def main():
     sub.add_parser("clear-cache", help="Clear all pair caches")
 
     args = parser.parse_args()
+
+    if args.config:
+        os.environ["MANAGE_SESSION_CONFIG"] = str(Path(args.config).resolve())
+        from core import config as config_mod
+        config_mod.reload()
 
     dispatch = {
         "match":       cmd_match,

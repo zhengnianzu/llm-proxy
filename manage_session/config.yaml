@@ -2,18 +2,16 @@
 
 # 目录配置
 dirs:
-  tasks: tasks                    # 任务文件目录
-  raw_index: raw_index            # 原始 index 文件目录
-  manifests: manifests            # 清单目录
-  pair_cache: pair_cache          # 匹配缓存目录
-  views: views                    # 视图输出目录
+  tasks: data/tasks               # 任务文件目录
+  raw_index: data/raw_index       # 原始 index 文件目录
+  manifests: output/manifests     # 清单目录（自动维护）
+  pair_cache: output/pair_cache   # 匹配缓存目录（自动维护）
+  views: output/views             # 视图输出目录（自动生成）
 
 # Web UI 配置
 web:
   host: 127.0.0.1
   port: 8081
-  templates_dir: web/templates
-  static_dir: web/static
 
 # 匹配配置
 matching:

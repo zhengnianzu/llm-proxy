@@ -10,29 +10,33 @@ LLM 测试任务与执行轨迹的匹配管理系统。
 
 ```
 manage_session/
-├── tasks/                  # 任务批次文件（NDJSON，每行一个 query）
-├── raw_index/              # 执行轨迹 index 文件
-│   └── <session_name>/
-│       ├── index.json      # JSON 格式 index
-│       └── *.xlsx          # xlsx 格式 index（读取 Q1首问 列）
-├── manifests/              # 元数据缓存（自动维护，勿手动修改）
-│   ├── tasks.json
-│   └── indexes.json
-├── pair_cache/             # task × index 匹配结果缓存（自动维护）
-├── views/                  # 状态视图（自动生成）
-│   ├── batch_status/
-│   └── global_summary.json
+├── data/                       # 输入数据目录
+│   ├── tasks/                  # 任务批次文件（NDJSON，每行一个 query）
+│   └── raw_index/              # 执行轨迹 index 文件
+│       └── <session_name>/
+│           ├── index.json      # JSON 格式 index
+│           └── *.xlsx          # xlsx 格式 index（读取 Q1首问 列）
+├── output/                     # 输出目录（自动生成，勿手动修改）
+│   ├── manifests/              # 元数据清单
+│   │   ├── tasks.json
+│   │   └── indexes.json
+│   ├── pair_cache/             # task × index 匹配结果缓存
+│   │   └── <task_hash>__<index_hash>.json
+│   └── views/                  # 状态视图
+│       ├── batch_status/
+│       │   └── <task_id>.json
+│       └── global_summary.json
 ├── web/
-│   ├── server.py           # FastAPI Web UI
-│   └── templates/          # Jinja2 模板
+│   ├── server.py               # FastAPI Web UI
+│   └── templates/              # Jinja2 模板
 ├── core/
-│   ├── config.py           # 配置加载与路径管理
-│   ├── manifest.py         # 自动扫描与元数据注册
-│   ├── matcher.py          # 精确匹配引擎
-│   ├── cache.py            # 匹配缓存管理
-│   └── views.py            # 状态视图生成
-├── cli.py                  # CLI 入口
-├── config.yaml             # 配置文件
+│   ├── config.py               # 配置加载与路径管理
+│   ├── manifest.py             # 自动扫描与元数据注册
+│   ├── matcher.py              # 精确匹配引擎
+│   ├── cache.py                # 匹配缓存管理
+│   └── views.py                # 状态视图生成
+├── cli.py                      # CLI 入口
+├── config.yaml                 # 配置文件
 └── requirements.txt
 ```
 
@@ -48,13 +52,13 @@ pip install -r requirements.txt
 
 ### 准备数据
 
-将任务文件放入 `tasks/`，将轨迹 index 放入 `raw_index/<session_name>/`：
+将任务文件放入 `data/tasks/`，将轨迹 index 放入 `data/raw_index/<session_name>/`：
 
 ```
-tasks/
+data/tasks/
   260325-7840-blue-linux.json      # NDJSON，每行含 {"query": "...", "topic": "...", ...}
 
-raw_index/
+data/raw_index/
   test_session2/
     index.json                     # JSON 数组，每条含 {"q1": "...", ...}
   another_session/
@@ -167,8 +171,52 @@ MANAGE_SESSION_CONFIG=/path/to/config.yaml python cli.py match
 
 ## 增量匹配原理
 
-1. 扫描 `tasks/` 和 `raw_index/`，对每个文件计算 MD5
-2. 与 `manifests/` 中的记录对比，仅处理新增或变化的文件
-3. 对每对 (task, index) 查找 `pair_cache/`，命中缓存则跳过
+1. 扫描 `data/tasks/` 和 `data/raw_index/`，对每个文件计算 MD5
+2. 与 `output/manifests/` 中的记录对比，仅处理新增或变化的文件
+3. 对每对 (task, index) 查找 `output/pair_cache/`，命中缓存则跳过
 4. 未命中则执行精确匹配（`task.query == index.q1`），结果写入缓存
-5. 更新 `views/` 下的批次状态和全局汇总
+5. 更新 `output/views/` 下的批次状态和全局汇总
+
+---
+
+## 输出文件说明
+
+### `output/views/batch_status/<task_id>.json`
+
+每个 task 批次一个文件，字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| `task_id` | 任务批次 ID |
+| `task_file` | 任务文件相对路径 |
+| `total_tasks` | 任务总条数 |
+| `matched_count` | 已匹配条数 |
+| `unmatched_count` | 未匹配条数 |
+| `completion_rate` | 匹配完成率（0~1） |
+| `matched_indexes` | 各 index 的匹配数量 `{index_id: count}` |
+| `topics` | 任务文件中各 topic 的总条数 |
+| `matched_topics` | 已匹配的 topic 分布（按数量降序） |
+| `unmatched_topics` | 未匹配的 topic 分布（按数量降序） |
+| `unmatched_sample` | 未匹配样本（最多 100 条，含 query/topic/env_name） |
+| `updated_at` | 最后更新时间 |
+
+### `output/views/global_summary.json`
+
+全局汇总，字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| `total_task_batches` | task 批次总数 |
+| `total_tasks` | 所有批次的任务总条数 |
+| `total_index_files` | index 文件总数 |
+| `total_trajectories` | index 中的轨迹总条数 |
+| `total_matched` | 全局已匹配条数 |
+| `total_unmatched_tasks` | 全局未匹配任务数 |
+| `total_unmatched_indexes` | 全局未被命中的轨迹数 |
+| `batches` | 各批次摘要列表 |
+| `indexes` | 各 index 文件摘要列表（含 xlsx report 路径） |
+| `updated_at` | 最后更新时间 |
+
+### `output/pair_cache/<task_hash>__<index_hash>.json`
+
+每对 (task, index) 的匹配结果缓存，文件名由两端 hash 前 16 位组成。文件 hash 变化时对应缓存自动失效。
