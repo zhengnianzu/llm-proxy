@@ -12,19 +12,19 @@ from datetime import datetime
 from core.config import pair_cache_dir
 
 
-def _cache_dir() -> Path:
+def _cache_dir():
     return pair_cache_dir()
 
 
-def _pair_key(task_hash: str, index_hash: str) -> str:
+def _pair_key(task_hash, index_hash):
     return f"{task_hash[:16]}__{index_hash[:16]}"
 
 
-def _cache_path(pair_key: str) -> Path:
+def _cache_path(pair_key):
     return _cache_dir() / f"{pair_key}.json"
 
 
-def get_cache(task_hash: str, index_hash: str) -> dict | None:
+def get_cache(task_hash, index_hash):
     """获取缓存，如果不存在返回 None。"""
     path = _cache_path(_pair_key(task_hash, index_hash))
     if path.exists():
@@ -33,7 +33,7 @@ def get_cache(task_hash: str, index_hash: str) -> dict | None:
     return None
 
 
-def save_cache(result_dict: dict):
+def save_cache(result_dict):
     """保存匹配结果到缓存。"""
     pair_key = result_dict.get("pair_key")
     if not pair_key:
@@ -44,7 +44,7 @@ def save_cache(result_dict: dict):
         json.dump(result_dict, f, ensure_ascii=False, indent=2)
 
 
-def invalidate_by_hash(file_hash: str):
+def invalidate_by_hash(file_hash):
     """
     文件变化时，失效所有包含该 hash 的缓存。
     """
@@ -55,7 +55,7 @@ def invalidate_by_hash(file_hash: str):
             cache_file.unlink()
 
 
-def list_caches() -> list[dict]:
+def list_caches():
     """列出所有缓存文件的元数据。"""
     caches = []
     for cache_file in sorted(_cache_dir().glob("*.json")):

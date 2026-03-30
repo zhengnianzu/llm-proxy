@@ -13,21 +13,21 @@ from pathlib import Path
 from core.config import manifests_dir, tasks_dir, raw_index_dir
 
 
-def _manifests_dir() -> Path:
+def _manifests_dir():
     return manifests_dir()
 
 
-def _tasks_manifest() -> Path:
+def _tasks_manifest():
     return _manifests_dir() / "tasks.json"
 
 
-def _indexes_manifest() -> Path:
+def _indexes_manifest():
     return _manifests_dir() / "indexes.json"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _file_hash(path: Path) -> str:
+def _file_hash(path):
     h = hashlib.md5()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -35,21 +35,21 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def _load_manifest(path: Path) -> dict:
+def _load_manifest(path):
     if path.exists():
         with open(path, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
-def _save_manifest(path: Path, data: dict):
+def _save_manifest(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ── tasks ─────────────────────────────────────────────────────────────────────
 
-def add_task(src_path: str | Path, copy_to_tasks: bool = True) -> dict:
+def add_task(src_path, copy_to_tasks=True):
     """
     注册一个任务文件到 tasks/ 并更新 manifests/tasks.json。
     src_path: 可以是绝对路径。
@@ -90,7 +90,7 @@ def add_task(src_path: str | Path, copy_to_tasks: bool = True) -> dict:
     return entry
 
 
-def _scan_and_register_tasks() -> dict:
+def _scan_and_register_tasks():
     """自动扫描 tasks/ 目录，注册新文件或更新变化文件，返回完整清单。"""
     manifest = _load_manifest(_tasks_manifest())
     changed = False
@@ -121,15 +121,15 @@ def _scan_and_register_tasks() -> dict:
     return manifest
 
 
-def get_all_tasks() -> dict:
+def get_all_tasks():
     return _scan_and_register_tasks()
 
 
-def get_task(task_id: str) -> dict | None:
+def get_task(task_id):
     return get_all_tasks().get(task_id)
 
 
-def _load_task_records(path: Path) -> list[dict]:
+def _load_task_records(path):
     records = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -144,7 +144,7 @@ def _load_task_records(path: Path) -> list[dict]:
     return records
 
 
-def load_task_queries(task_id: str) -> dict[str, dict]:
+def load_task_queries(task_id):
     """Return {query_text: record} for a task."""
     m = get_task(task_id)
     if not m:
@@ -155,7 +155,7 @@ def load_task_queries(task_id: str) -> dict[str, dict]:
 
 # ── indexes ───────────────────────────────────────────────────────────────────
 
-def add_index(src_path: str | Path, index_id: str | None = None) -> dict:
+def add_index(src_path, index_id=None):
     """
     注册一个 index 文件并更新 manifests/indexes.json。
     支持 .json（直接复制到 raw_index/）和 .xlsx（原路径引用，不复制）。
@@ -203,7 +203,7 @@ def add_index(src_path: str | Path, index_id: str | None = None) -> dict:
     return entry
 
 
-def _scan_and_register_indexes() -> dict:
+def _scan_and_register_indexes():
     """
     自动扫描 raw_index/ 目录下的 **/*.json 和 **/*.xlsx 文件，
     注册新文件或更新变化文件，返回完整清单。
@@ -243,15 +243,15 @@ def _scan_and_register_indexes() -> dict:
     return manifest
 
 
-def get_all_indexes() -> dict:
+def get_all_indexes():
     return _scan_and_register_indexes()
 
 
-def get_index(index_id: str) -> dict | None:
+def get_index(index_id):
     return get_all_indexes().get(index_id)
 
 
-def _load_index_entries(path: Path) -> list[dict]:
+def _load_index_entries(path):
     if path.suffix.lower() == ".xlsx":
         return _load_index_from_xlsx(path)
     with open(path, encoding="utf-8") as f:
@@ -259,7 +259,7 @@ def _load_index_entries(path: Path) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def _load_index_from_xlsx(path: Path) -> list[dict]:
+def _load_index_from_xlsx(path):
     """从 xlsx 读取 Q1首问 列，返回 [{q1: ...}, ...] 格式。"""
     try:
         import openpyxl
@@ -289,7 +289,7 @@ def _load_index_from_xlsx(path: Path) -> list[dict]:
     return entries
 
 
-def load_index_q1s(index_id: str) -> dict[str, dict]:
+def load_index_q1s(index_id):
     """Return {q1_text: entry} for an index."""
     m = get_index(index_id)
     if not m:
@@ -300,14 +300,14 @@ def load_index_q1s(index_id: str) -> dict[str, dict]:
 
 # ── utils ─────────────────────────────────────────────────────────────────────
 
-def is_changed(file_path: str | Path, old_hash: str) -> bool:
+def is_changed(file_path, old_hash):
     return _file_hash(Path(file_path)) != old_hash
 
 
-def _count_field(records: list[dict], field: str) -> dict:
+def _count_field(records, field):
     from collections import Counter
     return dict(Counter(r.get(field, "") for r in records).most_common(10))
 
 
-def _now() -> str:
+def _now():
     return datetime.now().isoformat(timespec="seconds")

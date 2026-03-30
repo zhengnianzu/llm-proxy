@@ -50,8 +50,8 @@ def update_batch_status(task_id: str):
     matched_count     = 0
     matched_indexes   = {}  # index_id -> count
     all_unmatched     = []  # 仅记录前 1000 条，避免文件过大
-    matched_topics: dict[str, int] = {}
-    unmatched_topics: dict[str, int] = {}
+    matched_topics = {}
+    unmatched_topics = {}
 
     for cache_file in sorted(pair_cache_dir().glob("*.json")):
         with open(cache_file, encoding="utf-8") as f:

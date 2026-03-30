@@ -5,7 +5,6 @@ core/matcher.py — 匹配引擎
 不做模糊匹配，不同批次天然为 0，符合预期。
 """
 
-from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -17,26 +16,26 @@ class MatchResult:
     task_hash: str
     index_hash: str
 
-    matched: list[dict] = field(default_factory=list)
-    unmatched_tasks: list[dict] = field(default_factory=list)
-    unmatched_indexes: list[dict] = field(default_factory=list)
+    matched: list = field(default_factory=list)
+    unmatched_tasks: list = field(default_factory=list)
+    unmatched_indexes: list = field(default_factory=list)
 
     generated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     # ── computed ──────────────────────────────────────────────
     @property
-    def matched_count(self) -> int:
+    def matched_count(self):
         return len(self.matched)
 
     @property
-    def unmatched_task_count(self) -> int:
+    def unmatched_task_count(self):
         return len(self.unmatched_tasks)
 
     @property
-    def unmatched_index_count(self) -> int:
+    def unmatched_index_count(self):
         return len(self.unmatched_indexes)
 
-    def to_dict(self) -> dict:
+    def to_dict(self):
         return {
             "pair_key": f"{self.task_hash[:8]}__{self.index_hash[:8]}",
             "task_id": self.task_id,
@@ -54,16 +53,12 @@ class MatchResult:
         }
 
 
-def match(
-    task_queries: dict[str, dict],   # {query_text: task_record}
-    index_q1s: dict[str, dict],      # {q1_text:   index_entry}
-    task_id: str,
-    index_id: str,
-    task_hash: str,
-    index_hash: str,
-) -> MatchResult:
+def match(task_queries, index_q1s, task_id, index_id, task_hash, index_hash):
     """
     精确匹配 task.query == index.q1。
+
+    task_queries: {query_text: task_record}
+    index_q1s:    {q1_text: index_entry}
 
     matched 中每条记录:
     {
@@ -79,7 +74,7 @@ def match(
         index_hash=index_hash,
     )
 
-    matched_queries: set[str] = set()
+    matched_queries = set()
 
     for query, task_rec in task_queries.items():
         if query in index_q1s:
