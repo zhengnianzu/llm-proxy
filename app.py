@@ -253,7 +253,7 @@ def _load_index_anthropic():
                 pass
 
 
-def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0):
+def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0, api_key: str = ""):
     """追加一条请求记录到 index.jsonl，并更新内存计数。"""
     global _first_count, _total_count, _valid_count
     entry = {
@@ -265,6 +265,7 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         "valid": valid,
         "tok_in": tok_in,
         "tok_out": tok_out,
+        "api_key": api_key,
     }
     os.makedirs(LOGS_ANTHROPIC, exist_ok=True)
     with open(INDEX_FILE_ANTHROPIC, "a", encoding="utf-8") as f:
@@ -275,7 +276,7 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         _valid_count += 1
 
 
-def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True):
+def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True, api_key: str = ""):
     """追加 OpenAI 请求记录到 index.jsonl。"""
     entry = {
         "ts": ts,
@@ -284,6 +285,7 @@ def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 
         "tok_in": tok_in,
         "tok_out": tok_out,
         "success": success,
+        "api_key": api_key,
     }
     os.makedirs(LOGS_OPENAI, exist_ok=True)
     with open(INDEX_FILE_OPENAI, "a", encoding="utf-8") as f:
@@ -414,7 +416,7 @@ def _should_skip_session_logging(body: Dict[str, Any]) -> bool:
 @app.post("/v1/messages")
 async def anthropic_messages(req: Request):
     """anthropic透传"""
-    await validate_api_key(req)
+    _api_key = await validate_api_key(req)
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -540,7 +542,7 @@ async def anthropic_messages(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (anthropic non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model)
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key)
                 record_validity(False, model)
                 record_request(0, 0, success=False, model=model)
                 return Response(
@@ -552,7 +554,7 @@ async def anthropic_messages(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model)
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key)
                 record_validity(False, model)
                 return JSONResponse(
                     status_code=502,
@@ -569,7 +571,7 @@ async def anthropic_messages(req: Request):
             record_request(tok_in, tok_out, success=r.status_code < 400, model=model)
         except Exception:
             record_request(success=r.status_code < 400, model=model)
-        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out)
+        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, api_key=_api_key)
         record_validity(final_valid, model)
         return Response(
             content=r.content,
@@ -715,7 +717,7 @@ async def anthropic_messages(req: Request):
                     _tok_in = _tok_in or (_u.get("input_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("output_tokens") or 0)
             record_request(_tok_in, _tok_out, success=connection_established, model=model)
-            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model)
+            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, api_key=_api_key)
             record_validity(connection_established, model)
 
 
@@ -730,7 +732,7 @@ async def openai_chat_completions(req: Request):
       - non-stream: upstream JSON pass-through
       - stream: upstream OpenAI SSE pass-through
     """
-    await validate_api_key(req)
+    _api_key = await validate_api_key(req)
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -839,7 +841,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (openai non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_openai(ts, req_path, model=model, success=False)
+                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key)
                 record_request(0, 0, success=False, model=model)
                 return Response(
                     content=r.content,
@@ -850,7 +852,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_openai(ts, req_path, model=model, success=False)
+                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key)
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
@@ -866,7 +868,7 @@ async def openai_chat_completions(req: Request):
             record_request(tok_in, tok_out, success=r.status_code < 400, model=model)
         except Exception:
             record_request(success=r.status_code < 400, model=model)
-        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400)
+        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -966,7 +968,7 @@ async def openai_chat_completions(req: Request):
                     _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
             record_request(_tok_in, _tok_out, success=connection_established, model=model)
-            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established)
+            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key)
 
     return StreamingResponse(sse_passthrough(), media_type="text/event-stream")
 
