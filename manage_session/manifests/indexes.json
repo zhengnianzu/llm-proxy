@@ -1,0 +1,18 @@
+{
+  "test_session2/index.json": {
+    "index_id": "test_session2/index.json",
+    "path": "raw_index/test_session2/index.json",
+    "abs_path": "/home/nianzuzheng/project/LLM_PROXY-PT/manage_session/raw_index/test_session2/index.json",
+    "hash": "329d500f4d8a0ad5e3a89aa74294dad9",
+    "count": 1335,
+    "q1s_sample": [
+      "北京现在的天气怎么样？",
+      "System: [2026-03-11 15:18:53 GMT+8] Exec completed (brisk-ri, code 2) :: onfigur",
+      "分析 ~/E/Personal/Financial_Planning/Balance_Sheets/20231027_PERSONAL_Household_Fi",
+      "搜索上海市内评分 4.5 以上、人均消费 300-500 元、环境安静适合商务对谈的本帮菜餐厅，将结果整理成包含餐厅名、特色菜、地址和联系电话的表格，存为 ~/",
+      "Conversation info (untrusted metadata):\n```json\n{\n  \"message_id\": \"om_x100b54277"
+    ],
+    "added_at": "2026-03-30T14:09:51",
+    "updated_at": "2026-03-30T14:09:51"
+  }
+}

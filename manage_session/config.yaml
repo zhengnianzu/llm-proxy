@@ -1,0 +1,23 @@
+# manage_session 配置文件
+
+# 目录配置
+dirs:
+  tasks: tasks                    # 任务文件目录
+  raw_index: raw_index            # 原始 index 文件目录
+  manifests: manifests            # 清单目录
+  pair_cache: pair_cache          # 匹配缓存目录
+  views: views                    # 视图输出目录
+
+# Web UI 配置
+web:
+  host: 127.0.0.1
+  port: 8081
+  templates_dir: web/templates
+  static_dir: web/static
+
+# 匹配配置
+matching:
+  # 匹配字段：task 中的字段名 vs index 中的查询字段
+  task_query_field: query         # task 中的查询字段
+  index_query_field: q1           # index 中的查询字段
+  match_type: exact               # exact 或 fuzzy（当前仅支持 exact）

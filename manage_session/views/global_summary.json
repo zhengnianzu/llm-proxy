@@ -1,0 +1,41 @@
+{
+  "total_task_batches": 1,
+  "total_tasks": 7840,
+  "total_index_files": 1,
+  "total_trajectories": 1335,
+  "total_matched": 0,
+  "total_unmatched_tasks": 7840,
+  "total_unmatched_indexes": 1335,
+  "batches": [
+    {
+      "task_id": "260325-7840-blue-linux.json",
+      "task_file": "tasks/260325-7840-blue-linux.json",
+      "total_tasks": 7840,
+      "matched_count": 0,
+      "unmatched_count": 7840,
+      "completion_rate": 0.0,
+      "topics": {
+        "知识点梳理": 490,
+        "习题求解": 490,
+        "学习计划": 490,
+        "学术调研": 490,
+        "文献写作": 490,
+        "实验方案设计与实施": 490,
+        "实验数据分析与处理": 490,
+        "科研工具使用": 490,
+        "票务相关": 490,
+        "产品对比": 490
+      },
+      "added_at": "2026-03-30T12:51:06"
+    }
+  ],
+  "indexes": [
+    {
+      "index_id": "test_session2/index.json",
+      "index_file": "raw_index/test_session2/index.json",
+      "count": 1335,
+      "added_at": "2026-03-30T14:09:51"
+    }
+  ],
+  "updated_at": "2026-03-30T14:54:59"
+}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}批次详情 — {{ bv.task_id }}{% endblock %}
+
+{% block content %}
+  <a class="back" href="/">← 返回全局汇总</a>
+
+  <div class="header">
+    <h1>📋 批次详情</h1>
+    <div class="meta">{{ bv.task_id }}</div>
+  </div>
+
+  <div class="card">
+    <h2>📈 关键指标</h2>
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="val">{{ bv.total_tasks }}</div>
+        <div class="lbl">总任务</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ bv.matched_count }}</div>
+        <div class="lbl">已匹配</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ bv.unmatched_count }}</div>
+        <div class="lbl">未匹配</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ "%.1f"|format(bv.completion_rate * 100) }}%</div>
+        <div class="lbl">完成率</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>🔗 匹配来源</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Index ID</th>
+          <th class="r">匹配数</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for idx_id, cnt in bv.matched_indexes.items()|sort(attribute='1', reverse=True) %}
+        <tr>
+          <td>{{ idx_id }}</td>
+          <td class="r">{{ cnt }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="2" style="color:#999;text-align:center">暂无匹配</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>📊 任务分类</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Topic</th>
+          <th class="r">已匹配</th>
+          <th class="r">未匹配</th>
+          <th class="r">合计</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% set all_topics = (bv.matched_topics.keys() | list) + (bv.unmatched_topics.keys() | list) | unique | list %}
+        {% for topic in all_topics | sort %}
+        <tr>
+          <td>{{ topic or "(无)" }}</td>
+          <td class="r">{{ bv.matched_topics.get(topic, 0) }}</td>
+          <td class="r">{{ bv.unmatched_topics.get(topic, 0) }}</td>
+          <td class="r">{{ bv.matched_topics.get(topic, 0) + bv.unmatched_topics.get(topic, 0) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

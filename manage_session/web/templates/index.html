@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Session Manager — 全局汇总{% endblock %}
+
+{% block content %}
+  <div class="header">
+    <h1>📊 Session Manager</h1>
+    <div class="meta">全局汇总 — {{ summary.updated_at }}</div>
+  </div>
+
+  <div class="card">
+    <h2>📈 关键指标</h2>
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="val">{{ summary.total_task_batches }}</div>
+        <div class="lbl">任务批次</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ summary.total_tasks }}</div>
+        <div class="lbl">总任务数</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ summary.total_index_files }}</div>
+        <div class="lbl">Index 文件</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ summary.total_trajectories }}</div>
+        <div class="lbl">总轨迹数</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ summary.total_matched }}</div>
+        <div class="lbl">已匹配</div>
+      </div>
+      <div class="kpi">
+        <div class="val">{{ summary.total_unmatched_tasks }}</div>
+        <div class="lbl">未匹配任务</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📋 任务批次</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>批次 ID</th>
+          <th class="r">总任务</th>
+          <th class="r">已匹配</th>
+          <th class="r">未匹配</th>
+          <th>完成率</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in summary.batches %}
+        <tr>
+          <td><a class="link" href="/batch/{{ b.task_id }}">{{ b.task_id }}</a></td>
+          <td class="r">{{ b.total_tasks }}</td>
+          <td class="r">{{ b.matched_count }}</td>
+          <td class="r">{{ b.unmatched_count }}</td>
+          <td>
+            <div class="rate-bar">
+              <div class="bar-wrap"><div class="bar-fill" style="width: {{ (b.completion_rate * 100)|int }}%"></div></div>
+              <div class="bar-pct">{{ "%.1f"|format(b.completion_rate * 100) }}%</div>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>📁 Index 文件</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Index ID</th>
+          <th class="r">轨迹数</th>
+          <th>添加时间</th>
+          <th>分析报告</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in summary.indexes %}
+        <tr>
+          <td>{{ i.index_id }}</td>
+          <td class="r">{{ i.count }}</td>
+          <td>{{ i.added_at }}</td>
+          <td>
+            {% if i.report_html_path %}
+            <a class="link" href="/report-html/{{ i.index_id }}" target="_blank">查看报告</a>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
