@@ -6,6 +6,8 @@
 每个 bucket: {"ts": "...", "first": N, "valid": N, "rate": 0.xx}
 """
 
+import os
+import json
 import time
 import threading
 from collections import deque
@@ -20,6 +22,40 @@ _RATE_WINDOW = 60  # 有效率保留分钟数
 _rate_buckets: deque = deque(maxlen=_RATE_WINDOW)
 _current_rate_bucket: dict = {}
 
+_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+_RPM_LOG = os.path.join(_LOG_DIR, "rpm.log")
+
+
+def _flush_to_disk(bucket: dict, path: str):
+    """将一个已完成的 bucket 追加写入日志文件。"""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(bucket, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def load_metrics_from_disk():
+    """启动时从 rpm.log 加载历史数据，仅保留窗口内的数据。"""
+    if not os.path.exists(_RPM_LOG):
+        return
+    cutoff_key = time.strftime("%Y-%m-%dT%H:%M", time.localtime(time.time() - _METRICS_WINDOW * 60))
+    try:
+        with open(_RPM_LOG, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    bucket = json.loads(line)
+                except Exception:
+                    continue
+                if bucket.get("ts", "") >= cutoff_key:
+                    _metrics_buckets.append(bucket)
+    except Exception:
+        pass
+
 
 def _bucket_key() -> str:
     return time.strftime("%Y-%m-%dT%H:%M")
@@ -32,7 +68,9 @@ def record_request(input_tokens: int = 0, output_tokens: int = 0, success: bool 
         global _current_bucket
         if _current_bucket.get("ts") != key:
             if _current_bucket:
-                _metrics_buckets.append(dict(_current_bucket))
+                completed = dict(_current_bucket)
+                _metrics_buckets.append(completed)
+                _flush_to_disk(completed, _RPM_LOG)
             _current_bucket = {"ts": key, "rpm": 0, "tpm_in": 0, "tpm_out": 0, "errors": 0, "models": {}}
         _current_bucket["rpm"] += 1
         _current_bucket["tpm_in"] += input_tokens

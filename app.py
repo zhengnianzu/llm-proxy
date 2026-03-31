@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from print_stats_summary import statistic_tokens
 from auth import validate_api_key
-from utils.metrics import record_request, record_validity, get_metrics_snapshot, get_rate_history
+from utils.metrics import record_request, record_validity, get_metrics_snapshot, get_rate_history, load_metrics_from_disk
 from utils.log_routes import register_log_routes
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
@@ -294,6 +294,7 @@ def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 
 
 # 启动时加载历史 index
 _load_index_anthropic()
+load_metrics_from_disk()
 
 
 def _sanitize_messages(messages: Any) -> Any:
