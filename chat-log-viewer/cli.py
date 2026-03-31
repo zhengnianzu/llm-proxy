@@ -82,6 +82,36 @@ def _setup_logging(log_file: Path, log_level: str = "INFO"):
     )
 
 
+def _resolve_log_file(service: str, svc: dict, cfg: dict) -> Path:
+    default_log = svc["default_log"]
+    if service == "server":
+        port = cfg.get("port", 8080)
+        default_log = default_log.with_name(
+            f"{default_log.stem}-port{port}{default_log.suffix}"
+        )
+    elif service == "sync":
+        interval = cfg.get("interval_seconds", 3600)
+        default_log = default_log.with_name(
+            f"{default_log.stem}-interval{interval}{default_log.suffix}"
+        )
+
+    configured = cfg.get("log_file")
+    if not configured:
+        return default_log
+
+    configured_path = Path(configured)
+    configured_text = str(configured_path)
+    default_text = str(svc["default_log"])
+    default_rel_text = str(svc["default_log"].relative_to(BASE_DIR))
+
+    # 如果配置里只是沿用了通用默认值 logs/server.log / logs/sync.log，
+    # 则仍然使用按端口/间隔区分后的动态日志文件名。
+    if configured_text in (default_text, default_rel_text):
+        return default_log
+
+    return BASE_DIR / configured_path
+
+
 def _read_pid(pid_file: Path) -> Optional[int]:
     if pid_file.exists():
         try:
@@ -172,14 +202,7 @@ def cmd_start(service: str, args):
         sys.exit(f"[error] 配置文件不存在: {config_path}")
 
     cfg = _load_config(config_path)
-    default_log = svc["default_log"]
-    if service == "server":
-        port = cfg.get("port", 8080)
-        default_log = default_log.with_name(f"{default_log.stem}-port{port}{default_log.suffix}")
-    elif service == "sync":
-        interval = cfg.get("interval_seconds", 3600)
-        default_log = default_log.with_name(f"{default_log.stem}-interval{interval}{default_log.suffix}")
-    log_file = BASE_DIR / cfg.get("log_file", str(default_log.relative_to(BASE_DIR)))
+    log_file = _resolve_log_file(service, svc, cfg)
     _setup_logging(log_file, cfg.get("log_level", "INFO"))
     logger = logging.getLogger("cli")
 
@@ -257,9 +280,7 @@ def cmd_logs(service: str, args):
     config_path = Path(args.config) if getattr(args, "config", None) else svc["default_cfg"]
     if config_path.exists():
         cfg = _load_config(config_path)
-        log_file = BASE_DIR / cfg.get(
-            "log_file", str(svc["default_log"].relative_to(BASE_DIR))
-        )
+        log_file = _resolve_log_file(service, svc, cfg)
     if not log_file.exists():
         print(f"[info] 日志文件不存在: {log_file}")
         return

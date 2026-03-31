@@ -32,5 +32,5 @@ host: 0.0.0.0
 port: 8080
 
 # ----- 日志参数 -----
-log_file: logs/server.log
+# 不填时自动按端口生成: logs/server-port<port>.log
 log_level: INFO   # DEBUG | INFO | WARNING | ERROR
