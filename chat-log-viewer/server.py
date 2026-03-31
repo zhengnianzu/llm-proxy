@@ -250,12 +250,16 @@ def _parse_file(abs_path: Path, root_dir: Path, dir_key: str, dir_label: str) ->
         res_path = abs_path.with_name(abs_path.name[: -len("-req.json")] + "-res.json")
         if res_path.exists():
             extra = 1
+    try:
+        rel_path = str(abs_path.relative_to(root_dir))
+    except ValueError:
+        rel_path = str(abs_path)
     return {
         "label": label,
         "label_short": label[:120] if label else "(empty)",
         "msg_count": len(messages) + extra,
         "model": data.get("model") or data.get("request", {}).get("model") or "",
-        "rel_path": str(abs_path.relative_to(root_dir)),
+        "rel_path": rel_path,
         "dir_key": dir_key,
         "dir_label": dir_label,
     }
@@ -289,8 +293,9 @@ def _get_req_paths_from_index(root: Path, start_line: int = 0):
                 req_file = entry.get("req_file", "")
                 if not req_file:
                     continue
-                # req_file 是相对于项目根目录的路径（root 的上级目录）
-                abs_path = (root.parent / req_file).resolve()
+                # req_file 可能是绝对路径，也可能是相对于 root.parent 的相对路径
+                rf = Path(req_file)
+                abs_path = rf.resolve() if rf.is_absolute() else (root.parent / req_file).resolve()
                 if abs_path.is_file():
                     paths.append(abs_path)
             except json.JSONDecodeError:
@@ -418,7 +423,10 @@ def api_file(rel_path: str = Query(...), dir: Optional[str] = Query(default=None
     base_dir = _get_session_root_by_key(dir) if has_session_args else _get_root_by_key(dir)
     try:
         abs_path = (base_dir / rel_path).resolve()
-        abs_path.relative_to(base_dir)
+        # 兼容 index.jsonl 中 req_file 指向其他已注册根目录的情况
+        all_roots = ROOT_DIRS + [d for p in ROOT_PARENT_DIRS for d in p.iterdir() if d.is_dir()]
+        if not any(abs_path == r or r in abs_path.parents for r in [base_dir] + all_roots):
+            raise ValueError("path not under any root")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid path")
 
