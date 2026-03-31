@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import List, Optional
 
 import yaml
 
@@ -81,7 +82,7 @@ def _setup_logging(log_file: Path, log_level: str = "INFO"):
     )
 
 
-def _read_pid(pid_file: Path) -> int | None:
+def _read_pid(pid_file: Path) -> Optional[int]:
     if pid_file.exists():
         try:
             return int(pid_file.read_text().strip())
@@ -111,7 +112,7 @@ def _is_running(pid: int) -> bool:
 # 构建启动命令
 # ---------------------------------------------------------------------------
 
-def _build_server_cmd(cfg: dict) -> list[str]:
+def _build_server_cmd(cfg: dict) -> List[str]:
     cmd = [sys.executable, str(BASE_DIR / "server.py")]
     mode = cfg.get("mode", "scan")
     if mode == "scan":
@@ -131,7 +132,7 @@ def _build_server_cmd(cfg: dict) -> list[str]:
     return cmd
 
 
-def _build_sync_cmd(cfg: dict, once: bool = False) -> list[str]:
+def _build_sync_cmd(cfg: dict, once: bool = False) -> List[str]:
     cmd = [sys.executable, str(BASE_DIR / "sync_sessions.py")]
     if cfg.get("src"):
         cmd += ["--src", cfg["src"]]
