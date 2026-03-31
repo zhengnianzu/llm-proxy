@@ -10,8 +10,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$SCRIPT_DIR/app.py"
-PID_FILE="$SCRIPT_DIR/logs/app.pid"
-LOG_FILE="$SCRIPT_DIR/logs/app.log"
+PROXY_PORT_EARLY="${PROXY_PORT:-4000}"
+PID_FILE="$SCRIPT_DIR/logs/app-port${PROXY_PORT_EARLY}.pid"
+LOG_FILE="$SCRIPT_DIR/logs/app-port${PROXY_PORT_EARLY}.log"
 
 # Load env vars from specified file (default: .env)
 # Handles inline comments (KEY=value  # comment) and quoted values

@@ -714,10 +714,11 @@ async def anthropic_messages(req: Request):
             for _c in up_chunks:
                 if isinstance(_c, dict):
                     _u = _c.get("message", {}).get("usage") or _c.get("usage") or {}
-                    _tok_in = _tok_in or (_u.get("input_tokens") or 0)
-                    _tok_out = _tok_out or (_u.get("output_tokens") or 0)
+                    if _u:
+                        _tok_in = (_u.get("input_tokens") or 0) + (_u.get("cache_creation_input_tokens") or 0) + (_u.get("cache_read_input_tokens") or 0)
+                        _tok_out = _u.get("output_tokens") or 0
             record_request(_tok_in, _tok_out, success=connection_established, model=model)
-            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, api_key=_api_key)
+            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, api_key=_api_key)
             record_validity(connection_established, model)
 
 
