@@ -112,6 +112,14 @@ def _resolve_log_file(service: str, svc: dict, cfg: dict) -> Path:
     return BASE_DIR / configured_path
 
 
+def _resolve_pid_file(service: str, svc: dict, cfg: dict) -> Path:
+    default_pid = svc["pid_file"]
+    if service == "server":
+        port = cfg.get("port", 8080)
+        return default_pid.with_name(f"{default_pid.stem}-port{port}{default_pid.suffix}")
+    return default_pid
+
+
 def _read_pid(pid_file: Path) -> Optional[int]:
     if pid_file.exists():
         try:
@@ -203,10 +211,10 @@ def cmd_start(service: str, args):
 
     cfg = _load_config(config_path)
     log_file = _resolve_log_file(service, svc, cfg)
+    pid_file = _resolve_pid_file(service, svc, cfg)
     _setup_logging(log_file, cfg.get("log_level", "INFO"))
     logger = logging.getLogger("cli")
 
-    pid_file = svc["pid_file"]
     pid = _read_pid(pid_file)
     if pid and _is_running(pid):
         logger.info(f"{service} 已在运行 (PID {pid})")
@@ -234,7 +242,9 @@ def cmd_start(service: str, args):
 
 def cmd_stop(service: str, _args):
     svc = SERVICES[service]
-    pid_file = svc["pid_file"]
+    config_path = Path(getattr(_args, "config", svc["default_cfg"]))
+    cfg = _load_config(config_path) if config_path.exists() else {}
+    pid_file = _resolve_pid_file(service, svc, cfg)
     pid = _read_pid(pid_file)
     if pid is None:
         print(f"[info] {service} 未运行（无 PID 文件）")
@@ -263,7 +273,10 @@ def cmd_restart(service: str, args):
 
 def cmd_status(service: str, _args):
     svc = SERVICES[service]
-    pid = _read_pid(svc["pid_file"])
+    config_path = Path(getattr(_args, "config", svc["default_cfg"]))
+    cfg = _load_config(config_path) if config_path.exists() else {}
+    pid_file = _resolve_pid_file(service, svc, cfg)
+    pid = _read_pid(pid_file)
     if pid is None:
         print(f"[status] {service}: stopped（无 PID 文件）")
         return
@@ -271,7 +284,7 @@ def cmd_status(service: str, _args):
         print(f"[status] {service}: running (PID {pid})")
     else:
         print(f"[status] {service}: stopped（PID {pid} 不存在，清理 PID 文件）")
-        _remove_pid(svc["pid_file"])
+        _remove_pid(pid_file)
 
 
 def cmd_logs(service: str, args):
@@ -309,7 +322,9 @@ def _add_service_subparser(sub, service: str, svc: dict):
         p.add_argument("--once", action="store_true", help="单次运行后退出（测试/cron 模式）")
 
     # stop
-    svc_sub.add_parser("stop", help=f"停止 {service}")
+    p = svc_sub.add_parser("stop", help=f"停止 {service}")
+    p.add_argument("--config", "-c", default=str(svc["default_cfg"]),
+                   help=f"配置文件路径 (默认: {svc['default_cfg'].relative_to(BASE_DIR)})")
 
     # restart
     p = svc_sub.add_parser("restart", help=f"重启 {service}")
@@ -319,7 +334,9 @@ def _add_service_subparser(sub, service: str, svc: dict):
         p.add_argument("--once", action="store_true", help="单次运行后退出")
 
     # status
-    svc_sub.add_parser("status", help=f"查看 {service} 运行状态")
+    p = svc_sub.add_parser("status", help=f"查看 {service} 运行状态")
+    p.add_argument("--config", "-c", default=str(svc["default_cfg"]),
+                   help=f"配置文件路径 (默认: {svc['default_cfg'].relative_to(BASE_DIR)})")
 
     # logs
     p = svc_sub.add_parser("logs", help="查看最近日志")

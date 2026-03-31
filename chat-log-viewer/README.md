@@ -8,12 +8,17 @@
 
 ```
 chat-log-viewer/
+├── cli.py                 # 统一管理 CLI：管理 server / sync 的启动、停止、日志查看
 ├── server.py              # 主 Web 服务：浏览原始日志 / 会话目录
 ├── report.py              # 报告汇总服务：展示各 key 的分析报告
 ├── analyze_sessions.py    # CLI：分析会话目录，生成 xlsx/html/md 报告
 ├── export_sessions.py     # CLI：将原始三元组日志转换为会话目录
 ├── merge_reports.py       # CLI：合并多份 session_report.xlsx
 ├── sync_sessions.py       # 守护进程：增量导出 + 上传到 OBS
+├── configs/
+│   ├── server.yaml        # server 服务配置
+│   └── sync_config.yaml   # sync 服务配置
+├── logs/                  # 运行日志和 PID 文件
 ├── utils/
 │   ├── message_utils.py   # 消息解析工具函数
 │   └── triplet_collector.py  # 三元组文件收集 + index.jsonl 读取
@@ -58,6 +63,43 @@ chat-log-viewer/
 ---
 
 ## 各模块功能说明
+
+### cli.py — 服务管理入口
+
+统一管理 `server.py` 和 `sync_sessions.py` 的启动、停止、重启、状态和日志查看。
+
+**用法：**
+
+```bash
+python cli.py server start --config configs/server.yaml
+python cli.py server status --config configs/server.yaml
+python cli.py server logs --config configs/server.yaml --lines 50
+python cli.py server stop --config configs/server.yaml
+
+python cli.py sync start --config configs/sync_config.yaml
+python cli.py sync status --config configs/sync_config.yaml
+python cli.py sync logs --config configs/sync_config.yaml --lines 50
+python cli.py sync stop --config configs/sync_config.yaml
+```
+
+**运行产物规则：**
+
+- `server` 日志文件按端口区分：
+  - `logs/server-port8080.log`
+  - `logs/server-port9000.log`
+- `server` PID 文件也按端口区分：
+  - `logs/server-port8080.pid`
+  - `logs/server-port9000.pid`
+- `sync` 默认使用固定文件：
+  - `logs/sync-interval3600.log`
+  - `logs/sync.pid`
+
+说明：
+
+- 如果 `configs/server.yaml` 中没有显式自定义 `log_file`，则会自动按端口生成日志名。
+- `server stop/status/logs` 建议始终带同一个 `--config`，这样 CLI 才能定位到对应端口实例。
+
+---
 
 ### server.py — 日志浏览服务
 
