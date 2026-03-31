@@ -10,9 +10,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$SCRIPT_DIR/app.py"
-PROXY_PORT_EARLY="${PROXY_PORT:-4000}"
-PID_FILE="$SCRIPT_DIR/logs/app-port${PROXY_PORT_EARLY}.pid"
-LOG_FILE="$SCRIPT_DIR/logs/app-port${PROXY_PORT_EARLY}.log"
 
 # Load env vars from specified file (default: .env)
 # Handles inline comments (KEY=value  # comment) and quoted values
@@ -35,6 +32,9 @@ export ENV_FILE="$ENV_PATH"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-4000}"
+PROXY_PORT_EARLY="${PROXY_PORT}"
+PID_FILE="$SCRIPT_DIR/logs/app-port${PROXY_PORT_EARLY}.pid"
+LOG_FILE="$SCRIPT_DIR/logs/app-port${PROXY_PORT_EARLY}.log"
 
 mkdir -p "$SCRIPT_DIR/logs"
 
