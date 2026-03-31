@@ -7,7 +7,7 @@ logs_anthropic/index.jsonl 格式（每行一条）:
     {"ts": "2026-03-25_15-42-10_366",
      "req_file": "logs_anthropic/2026-03-25_15-42-10_366-req.json",
      ...}
-    req_file 是相对于 logs_anthropic 父目录（即项目根目录）的路径。
+    req_file 仅用于提供 req 文件名，实际定位时使用 src / basename(req_file)。
 
 session_dir/index.jsonl 格式（每行一条，与 index.json 的 entry 结构一致）:
     {"folder": "2026-03-25_15-42-10_366", "q1": "...",
@@ -78,12 +78,11 @@ def collect_triplets_from_index(
         triplets: {ts_prefix: {"req": Path, "headers": Path?, "res": Path?}}
     """
     entries, total = _iter_index_entries(src, start_line)
-    project_root = src.parent  # req_file 相对于项目根目录
 
     triplets: Dict[str, Dict[str, Path]] = {}
     for entry in entries:
         ts = entry["ts"]
-        req_path = (project_root / entry["req_file"]).resolve()
+        req_path = src / Path(entry["req_file"]).name
         if not req_path.is_file():
             continue
         tri: Dict[str, Path] = {"req": req_path}
@@ -96,7 +95,6 @@ def collect_triplets_from_index(
         if res_path.is_file():
             tri["res"] = res_path
         triplets[ts] = tri
-
     return triplets, total
 
 
