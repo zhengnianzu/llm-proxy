@@ -40,6 +40,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
+STATE_FILE = BASE_DIR / ".cli_state.yaml"
 
 # 每个服务的元信息
 SERVICES = {
@@ -67,6 +68,47 @@ SERVICES = {
 def _load_config(config_path: Path) -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f) or {}
+
+
+def _load_state() -> dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        with open(STATE_FILE) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def _save_state(state: dict):
+    with open(STATE_FILE, "w") as f:
+        yaml.safe_dump(state, f, sort_keys=True, allow_unicode=True)
+
+
+def _resolve_config_path(service: str, config_arg: Optional[str] = None) -> Path:
+    if config_arg:
+        return Path(config_arg)
+
+    state = _load_state()
+    saved = (state.get(service) or {}).get("config")
+    if saved:
+        return Path(saved)
+
+    return SERVICES[service]["default_cfg"]
+
+
+def _set_saved_config(service: str, config_path: Path):
+    state = _load_state()
+    svc_state = state.setdefault(service, {})
+    svc_state["config"] = str(config_path.resolve())
+    _save_state(state)
+
+
+def _clear_saved_config(service: str):
+    state = _load_state()
+    if service in state:
+        state.pop(service, None)
+        _save_state(state)
 
 
 def _setup_logging(log_file: Path, log_level: str = "INFO"):
@@ -187,7 +229,7 @@ def _build_sync_cmd(cfg: dict, once: bool = False) -> List[str]:
     if cfg.get("interval_seconds"):
         cmd += ["--interval", str(cfg["interval_seconds"])]
     if cfg.get("upload_workers"):
-        cmd += ["--upload-workers", str(cfg["upload_workers"])]
+        cmd += ["--workers", str(cfg["upload_workers"])]
     if once:
         cmd += ["--once"]
     return cmd
@@ -205,7 +247,7 @@ _CMD_BUILDERS = {
 
 def cmd_start(service: str, args):
     svc = SERVICES[service]
-    config_path = Path(args.config)
+    config_path = _resolve_config_path(service, getattr(args, "config", None))
     if not config_path.exists():
         sys.exit(f"[error] 配置文件不存在: {config_path}")
 
@@ -242,7 +284,7 @@ def cmd_start(service: str, args):
 
 def cmd_stop(service: str, _args):
     svc = SERVICES[service]
-    config_path = Path(getattr(_args, "config", svc["default_cfg"]))
+    config_path = _resolve_config_path(service, getattr(_args, "config", None))
     cfg = _load_config(config_path) if config_path.exists() else {}
     pid_file = _resolve_pid_file(service, svc, cfg)
     pid = _read_pid(pid_file)
@@ -273,7 +315,7 @@ def cmd_restart(service: str, args):
 
 def cmd_status(service: str, _args):
     svc = SERVICES[service]
-    config_path = Path(getattr(_args, "config", svc["default_cfg"]))
+    config_path = _resolve_config_path(service, getattr(_args, "config", None))
     cfg = _load_config(config_path) if config_path.exists() else {}
     pid_file = _resolve_pid_file(service, svc, cfg)
     pid = _read_pid(pid_file)
@@ -290,7 +332,7 @@ def cmd_status(service: str, _args):
 def cmd_logs(service: str, args):
     svc = SERVICES[service]
     log_file = svc["default_log"]
-    config_path = Path(args.config) if getattr(args, "config", None) else svc["default_cfg"]
+    config_path = _resolve_config_path(service, getattr(args, "config", None))
     if config_path.exists():
         cfg = _load_config(config_path)
         log_file = _resolve_log_file(service, svc, cfg)
@@ -305,6 +347,29 @@ def cmd_logs(service: str, args):
     print(result.stdout, end="")
 
 
+def cmd_config(service: str, args):
+    if getattr(args, "clear", False):
+        _clear_saved_config(service)
+        print(f"[config] {service}: 已清除保存的默认配置")
+        print(f"[config] {service}: 当前回退到 {SERVICES[service]['default_cfg']}")
+        return
+
+    path_arg = getattr(args, "path", None)
+    if path_arg:
+        config_path = Path(path_arg)
+        if not config_path.exists():
+            sys.exit(f"[error] 配置文件不存在: {config_path}")
+        _set_saved_config(service, config_path)
+        print(f"[config] {service}: 默认配置已设置为 {config_path.resolve()}")
+        return
+
+    state = _load_state()
+    saved = (state.get(service) or {}).get("config")
+    effective = _resolve_config_path(service, None)
+    print(f"[config] {service}: 当前生效配置 {effective}")
+    print(f"[config] {service}: 已保存配置 {saved or '(无，使用内置默认)'}")
+
+
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
@@ -314,35 +379,40 @@ def _add_service_subparser(sub, service: str, svc: dict):
     svc_p = sub.add_parser(service, help=svc["description"])
     svc_sub = svc_p.add_subparsers(dest="action", required=True)
 
+    config_help = (
+        f"配置文件路径 (默认按顺序取: 已保存配置 -> "
+        f"{svc['default_cfg'].relative_to(BASE_DIR)})"
+    )
+
     # start
     p = svc_sub.add_parser("start", help=f"启动 {service}")
-    p.add_argument("--config", "-c", default=str(svc["default_cfg"]),
-                   help=f"配置文件路径 (默认: {svc['default_cfg'].relative_to(BASE_DIR)})")
+    p.add_argument("--config", "-c", default=None, help=config_help)
     if service == "sync":
         p.add_argument("--once", action="store_true", help="单次运行后退出（测试/cron 模式）")
 
     # stop
     p = svc_sub.add_parser("stop", help=f"停止 {service}")
-    p.add_argument("--config", "-c", default=str(svc["default_cfg"]),
-                   help=f"配置文件路径 (默认: {svc['default_cfg'].relative_to(BASE_DIR)})")
+    p.add_argument("--config", "-c", default=None, help=config_help)
 
     # restart
     p = svc_sub.add_parser("restart", help=f"重启 {service}")
-    p.add_argument("--config", "-c", default=str(svc["default_cfg"]),
-                   help=f"配置文件路径 (默认: {svc['default_cfg'].relative_to(BASE_DIR)})")
+    p.add_argument("--config", "-c", default=None, help=config_help)
     if service == "sync":
         p.add_argument("--once", action="store_true", help="单次运行后退出")
 
     # status
     p = svc_sub.add_parser("status", help=f"查看 {service} 运行状态")
-    p.add_argument("--config", "-c", default=str(svc["default_cfg"]),
-                   help=f"配置文件路径 (默认: {svc['default_cfg'].relative_to(BASE_DIR)})")
+    p.add_argument("--config", "-c", default=None, help=config_help)
 
     # logs
     p = svc_sub.add_parser("logs", help="查看最近日志")
     p.add_argument("--lines", "-n", type=int, default=50, help="显示最后 N 行 (默认 50)")
-    p.add_argument("--config", "-c", default=str(svc["default_cfg"]),
-                   help="配置文件路径（用于读取 log_file 路径）")
+    p.add_argument("--config", "-c", default=None, help=config_help)
+
+    # config
+    p = svc_sub.add_parser("config", help=f"设置或查看 {service} 默认配置")
+    p.add_argument("path", nargs="?", help="要保存为默认值的配置文件路径")
+    p.add_argument("--clear", action="store_true", help="清除已保存的默认配置")
 
 
 def main():
@@ -363,6 +433,7 @@ def main():
         "restart": cmd_restart,
         "status":  cmd_status,
         "logs":    cmd_logs,
+        "config":  cmd_config,
     }
     handler = dispatch.get(args.action)
     if handler:

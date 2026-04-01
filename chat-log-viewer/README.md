@@ -66,11 +66,12 @@ chat-log-viewer/
 
 ### cli.py — 服务管理入口
 
-统一管理 `server.py` 和 `sync_sessions.py` 的启动、停止、重启、状态和日志查看。
+统一管理 `server.py` 和 `sync_sessions.py` 的启动、停止、重启、状态和日志查看。现在同时支持短命令包装：`./server ...` / `./sync ...`。
 
 **用法：**
 
 ```bash
+# 老写法
 python cli.py server start --config configs/server.yaml
 python cli.py server status --config configs/server.yaml
 python cli.py server logs --config configs/server.yaml --lines 50
@@ -80,6 +81,19 @@ python cli.py sync start --config configs/sync_config.yaml
 python cli.py sync status --config configs/sync_config.yaml
 python cli.py sync logs --config configs/sync_config.yaml --lines 50
 python cli.py sync stop --config configs/sync_config.yaml
+
+# 短命令写法：先保存默认配置，后续无需重复传 --config
+./server config configs/server.yaml
+./server start
+./server status
+./server logs -n 100
+./server stop
+
+./sync config configs/sync_config.yaml
+./sync start
+./sync status
+./sync logs -n 100
+./sync stop
 ```
 
 **运行产物规则：**
@@ -97,7 +111,9 @@ python cli.py sync stop --config configs/sync_config.yaml
 说明：
 
 - 如果 `configs/server.yaml` 中没有显式自定义 `log_file`，则会自动按端口生成日志名。
-- `server stop/status/logs` 建议始终带同一个 `--config`，这样 CLI 才能定位到对应端口实例。
+- 可以先执行 `./server config <path>` 或 `./sync config <path>` 保存默认配置，之后 `start/stop/status/logs` 会优先使用已保存配置。
+- 如需临时覆盖，仍可继续传 `--config`。
+- 若希望直接输入 `server` / `sync` 而不是 `./server` / `./sync`，可将仓库目录加入 `PATH`。
 
 ---
 
