@@ -3,6 +3,7 @@ import glob
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 import anthropic
 import httpx
@@ -15,13 +16,13 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 LOG_DIR = ROOT_DIR / "logs_anthropic"
 
 
-def parse_bool(value: str | None, default: bool = False) -> bool:
+def parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def pick_request_file(request_file: str | None) -> Path:
+def pick_request_file(request_file: Optional[str]) -> Path:
     if request_file:
         path = Path(request_file)
         if not path.is_absolute():
