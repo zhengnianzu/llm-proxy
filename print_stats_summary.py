@@ -1,3 +1,10 @@
+"""
+print_stats_summary.py 支持多日志目录参数，并且支持两种写法：
+
+  python print_stats_summary.py -d logs_anthropic logs_session_anthropic
+  python print_stats_summary.py -d logs_anthropic,logs_session_anthropic
+"""
+
 import os
 import sys
 import json
@@ -87,6 +94,52 @@ def _load_index_file(index_path: str) -> Optional[list]:
     return entries
 
 
+def _normalize_dirs(dirs) -> Optional[list[Path]]:
+    """统一处理目录参数，支持 None、字符串、字符串列表。"""
+    if dirs is None:
+        return None
+
+    raw_items: list[str] = []
+    if isinstance(dirs, (str, Path)):
+        raw_items = [str(dirs)]
+    else:
+        for item in dirs:
+            if item is None:
+                continue
+            raw_items.append(str(item))
+
+    normalized: list[Path] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        for part in item.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            key = os.path.normpath(part)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(Path(part))
+    return normalized
+
+
+def _collect_index_files(dirs=None) -> list[Path]:
+    """收集目标日志根目录下已有的 index.jsonl。"""
+    index_files: list[Path] = []
+    search_dirs = _normalize_dirs(dirs)
+    root_dirs = search_dirs or [
+        Path("logs_anthropic"),
+        Path("logs_openai"),
+        Path("logs_session_anthropic"),
+        Path("logs_session_openai"),
+    ]
+    for root in root_dirs:
+        root_index = root / "index.jsonl"
+        if root_index.is_file():
+            index_files.append(root_index)
+    return index_files
+
+
 def _aggregate_index_entries(entries, model_filter, date_start, date_end, status, model_count_data):
     """将 index 条目聚合到 model_count_data 字典中。"""
     for entry in entries:
@@ -136,64 +189,28 @@ def statistic_tokens(model: str = '', date_start: str = '2000-01-01', date_end: 
     :param status: 过滤状态: 全部、成功、失败
     """
     model_count_data = dict()
+    normalized_dirs = _normalize_dirs(dirs)
 
     # ---- 快速路径：index.jsonl ----
-    # 仅在未指定 dirs 时启用（指定 dirs 通常是命令行精确扫描）
-    if dirs is None:
-        anthropic_index = os.path.join("logs_anthropic", "index.jsonl")
-        openai_index    = os.path.join("logs_openai",    "index.jsonl")
-        ant_entries = _load_index_file(anthropic_index)
-        oai_entries = _load_index_file(openai_index)
+    index_files = _collect_index_files(normalized_dirs)
+    if index_files:
+        for index_file in index_files:
+            entries = _load_index_file(str(index_file))
+            if entries is not None:
+                _aggregate_index_entries(entries, model, date_start, date_end, status, model_count_data)
 
-        # 至少一个 index 存在，则走快速路径
-        if ant_entries is not None or oai_entries is not None:
-            if ant_entries is not None:
-                _aggregate_index_entries(ant_entries, model, date_start, date_end, status, model_count_data)
-            if oai_entries is not None:
-                _aggregate_index_entries(oai_entries, model, date_start, date_end, status, model_count_data)
-
-            # session 目录没有 index，仍走扫描
-            session_dirs = ["logs_session_anthropic", "logs_session_openai"]
-            for file in find_files(dirs=[d for d in session_dirs if os.path.isdir(d)]):
-                if not check_date_range(file, date_start, date_end):
-                    continue
-                try:
-                    with open(file, 'r', encoding='utf8') as f:
-                        data = json.load(f)
-                except Exception:
-                    continue
-                _model = find_first_key_value(data, 'model', str)
-                if not isinstance(_model, str):
-                    continue
-                if model and _model.lower() not in model.lower():
-                    continue
-                tok_in  = 0
-                tok_out = 0
-                for key_in in ['input_tokens', 'prompt_tokens']:
-                    v = find_first_key_value(data, key_in, int)
-                    if v:
-                        tok_in = v; break
-                for key_out in ['output_tokens', 'completion_tokens']:
-                    v = find_first_key_value(data, key_out, int)
-                    if v:
-                        tok_out = v; break
-                if _model not in model_count_data:
-                    model_count_data[_model] = {
-                        "success": DataItem(model=_model, date_start=date_start, date_end=date_end, status="success"),
-                        "error":   DataItem(model=_model, date_start=date_start, date_end=date_end, status="error"),
-                    }
-                if status in ["全部", "成功"] and tok_out > 0:
-                    model_count_data[_model]["success"].count += 1
-                    model_count_data[_model]["success"].input_token_num  += tok_in
-                    model_count_data[_model]["success"].output_token_num += tok_out
-                elif status in ["全部", "失败"] and tok_out == 0:
-                    model_count_data[_model]["error"].count += 1
-                    model_count_data[_model]["error"].input_token_num += tok_in
-
+        # 指定目录时，只有“目录本身带 index”的才走快速路径；
+        # 其他目录（例如某个具体 session 子目录）仍需补扫 res 文件。
+        if normalized_dirs is None:
+            return _build_result(model_count_data, date_start, date_end)
+        indexed_dirs = {index_file.parent.resolve() for index_file in index_files}
+        normalized_dirs = [d for d in normalized_dirs if d.resolve() not in indexed_dirs]
+        if not normalized_dirs:
             return _build_result(model_count_data, date_start, date_end)
 
     # ---- 降级路径：扫描所有 res 文件（原始逻辑）----
-    for file in find_files(dirs=dirs):
+    scan_dirs = [str(d) for d in normalized_dirs] if normalized_dirs is not None else None
+    for file in find_files(dirs=scan_dirs):
         if not check_date_range(file, date_start, date_end):
             continue
         try:
@@ -286,7 +303,7 @@ if __name__ == '__main__':
     parser.add_argument("--date_start", "-s", type=str, default="2000-01-01", help="过滤日期-开启，格式YYYY-MM-DD，默认2000-01-01")
     parser.add_argument("--date_end", "-e", type=str, default="9999-12-31", help="过滤日期-结束，格式YYYY-MM-DD，默认9999-12-31")
     parser.add_argument("--status", "-t", type=str, default="全部", help="过滤状态: 全部、成功、失败")
-    parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个），不指定则扫描当前目录下 logs_ 开头的目录")
+    parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个，支持空格分隔或逗号分隔），不指定则扫描当前目录下 logs_ 开头的目录")
     args = parser.parse_args()
 
     # args.date_start = '2026-03-10'

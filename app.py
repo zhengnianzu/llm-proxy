@@ -36,8 +36,7 @@ LOGS_ANTHROPIC = "logs_anthropic"
 LOGS_SESSION_OPENAI = "logs_session_openai"
 LOGS_OPENAI = "logs_openai"
 LOGS_DEBUG = os.path.join("logs", "debug")
-INDEX_FILE_ANTHROPIC = os.path.join(LOGS_ANTHROPIC, "index.jsonl")
-INDEX_FILE_OPENAI    = os.path.join(LOGS_OPENAI,    "index.jsonl")
+INDEX_FILENAME = "index.jsonl"
 
 # 请求计数（启动时从 index.jsonl 加载，运行时在内存中累计）
 _first_count: int = 0   # 首次请求数（每次 endpoint 调用 = 1）
@@ -233,28 +232,57 @@ def _resp_to_obj(r):  # httpx.Response -> dict
     return base
 
 
+def _build_index_path(log_dir: str) -> str:
+    return os.path.join(log_dir, INDEX_FILENAME)
+
+
+def _index_path_for_req_file(req_file: str) -> str:
+    req_path = os.path.normpath(req_file)
+    session_anthropic_root = os.path.normpath(LOGS_SESSION_ANTHROPIC)
+    anthropic_root = os.path.normpath(LOGS_ANTHROPIC)
+    session_openai_root = os.path.normpath(LOGS_SESSION_OPENAI)
+    openai_root = os.path.normpath(LOGS_OPENAI)
+
+    if req_path == session_anthropic_root or req_path.startswith(session_anthropic_root + os.sep):
+        return _build_index_path(LOGS_SESSION_ANTHROPIC)
+    if req_path == anthropic_root or req_path.startswith(anthropic_root + os.sep):
+        return _build_index_path(LOGS_ANTHROPIC)
+    if req_path == session_openai_root or req_path.startswith(session_openai_root + os.sep):
+        return _build_index_path(LOGS_SESSION_OPENAI)
+    if req_path == openai_root or req_path.startswith(openai_root + os.sep):
+        return _build_index_path(LOGS_OPENAI)
+
+    return _build_index_path(os.path.dirname(req_file) or ".")
+
+
+def _iter_existing_index_files(*roots: str):
+    for root in roots:
+        root_index = _build_index_path(root)
+        if os.path.exists(root_index):
+            yield root_index
+
+
 def _load_index_anthropic():
-    """启动时从 index.jsonl 恢复历史计数，避免重启后归零。"""
+    """启动时从 Anthropic 各主日志目录的 index.jsonl 恢复历史计数。"""
     global _first_count, _total_count, _valid_count
-    if not os.path.exists(INDEX_FILE_ANTHROPIC):
-        return
-    with open(INDEX_FILE_ANTHROPIC, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                _first_count += 1
-                _total_count += entry.get("total_attempts", 1)
-                if entry.get("valid"):
-                    _valid_count += 1
-            except json.JSONDecodeError:
-                pass
+    for index_file in _iter_existing_index_files(LOGS_ANTHROPIC, LOGS_SESSION_ANTHROPIC):
+        with open(index_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    _first_count += 1
+                    _total_count += entry.get("total_attempts", 1)
+                    if entry.get("valid"):
+                        _valid_count += 1
+                except json.JSONDecodeError:
+                    pass
 
 
 def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0, api_key: str = ""):
-    """追加一条请求记录到 index.jsonl，并更新内存计数。"""
+    """按日志根目录追加一条 Anthropic 请求记录到 index.jsonl，并更新内存计数。"""
     global _first_count, _total_count, _valid_count
     entry = {
         "ts": ts,
@@ -267,8 +295,9 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         "tok_out": tok_out,
         "api_key": api_key,
     }
-    os.makedirs(LOGS_ANTHROPIC, exist_ok=True)
-    with open(INDEX_FILE_ANTHROPIC, "a", encoding="utf-8") as f:
+    index_file = _index_path_for_req_file(req_file)
+    os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
+    with open(index_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     _first_count += 1
     _total_count += total_attempts
@@ -277,7 +306,7 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
 
 
 def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True, api_key: str = ""):
-    """追加 OpenAI 请求记录到 index.jsonl。"""
+    """按日志根目录追加 OpenAI 请求记录到 index.jsonl。"""
     entry = {
         "ts": ts,
         "req_file": req_file,
@@ -287,8 +316,9 @@ def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 
         "success": success,
         "api_key": api_key,
     }
-    os.makedirs(LOGS_OPENAI, exist_ok=True)
-    with open(INDEX_FILE_OPENAI, "a", encoding="utf-8") as f:
+    index_file = _index_path_for_req_file(req_file)
+    os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
+    with open(index_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
@@ -1008,7 +1038,8 @@ def index_stats():
         "total_count": _total_count,
         "valid_count": _valid_count,
         "success_rate": round(rate, 4),
-        "index_file": INDEX_FILE_ANTHROPIC,
+        "index_file": _build_index_path(LOGS_ANTHROPIC),
+        "session_index_file": _build_index_path(LOGS_SESSION_ANTHROPIC),
     })
 
 
