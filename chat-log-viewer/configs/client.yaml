@@ -1,0 +1,29 @@
+# client.py 配置文件
+# 用法: python client.py --config configs/client.yaml
+#
+# 功能：从 OBS 同步下载 session 数据
+#   1. 下载 OBS 上的 index.jsonl
+#   2. 逐行解析，下载对应的文件夹
+#   3. 支持增量下载（base_output 指定本地已有目录，只下载更新的数据）
+#   4. 支持定时任务（interval 指定后定时轮询）
+
+# OBS 源路径（必填）
+obs_path:  obs://rl-agentdata/zhengnianzu/sessions/20260327/keyxg5l
+
+# 本地输出目录（必填）
+output: ./keyxg5l
+
+# 本地基准目录（可选，用于增量下载）
+# 指定后会扫描该目录找到最新的文件夹日期，只下载更新的数据
+# base_output: ./local_sessions
+
+# 下载脚本路径（可选，默认 obs_download.sh）
+# 脚本签名: <script> <obs_path> <local_path>
+download_script: tools/obs_download.sh
+
+# 并发下载数（可选，默认 4）
+workers: 4
+
+# 定时同步间隔（秒，可选）
+# 不指定则只运行一次，指定后进入守护进程模式定时同步
+interval: 3600

@@ -24,7 +24,7 @@ upload_erase: false
 
 # 上传脚本（可选，不填则使用 obs_utils）
 # 脚本签名: <script> <local_path> <obs_path>
-upload_script: ./obs_upload.sh
+upload_script: tools/obs_upload.sh
 
 # 可选（以下为默认值）
 interval_seconds: 3600   # 同步间隔（秒），默认 1 小时

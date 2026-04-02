@@ -8,20 +8,30 @@
 
 ```
 chat-log-viewer/
-├── cli.py                 # 统一管理 CLI：管理 server / sync 的启动、停止、日志查看
-├── server.py              # 主 Web 服务：浏览原始日志 / 会话目录
+├── src/                   # Python 包：所有核心模块
+│   ├── __init__.py
+│   ├── cli.py             # 统一管理 CLI：管理 server / sync / client 的启动、停止、日志查看
+│   ├── server.py          # 主 Web 服务：浏览原始日志 / 会话目录
+│   ├── client.py          # OBS 下载客户端：从 OBS 增量下载会话目录
+│   ├── sync_sessions.py   # 守护进程：增量导出 + 上传到 OBS
+│   └── utils/
+│       ├── __init__.py
+│       ├── message_utils.py   # 消息解析工具函数
+│       └── triplet_collector.py  # 三元组文件收集 + index.jsonl 读取
+├── cli                    # 可执行脚本：统一 CLI 入口
+├── server                 # 可执行脚本：server 服务快捷入口
+├── sync                   # 可执行脚本：sync 服务快捷入口
+├── client                 # 可执行脚本：client 服务快捷入口
+├── env.sh                 # Shell 环境加载器：提供 server/sync/client/cli 命令函数
 ├── report.py              # 报告汇总服务：展示各 key 的分析报告
 ├── analyze_sessions.py    # CLI：分析会话目录，生成 xlsx/html/md 报告
 ├── export_sessions.py     # CLI：将原始三元组日志转换为会话目录
 ├── merge_reports.py       # CLI：合并多份 session_report.xlsx
-├── sync_sessions.py       # 守护进程：增量导出 + 上传到 OBS
 ├── configs/
 │   ├── server.yaml        # server 服务配置
-│   └── sync_config.yaml   # sync 服务配置
+│   ├── sync_config.yaml   # sync 服务配置
+│   └── client.yaml        # client 服务配置
 ├── logs/                  # 运行日志和 PID 文件
-├── utils/
-│   ├── message_utils.py   # 消息解析工具函数
-│   └── triplet_collector.py  # 三元组文件收集 + index.jsonl 读取
 ├── static/
 │   └── index.html         # 单页前端应用（SPA）
 ├── templates/             # Jinja2 模板（HTML / Markdown 报告）
@@ -64,36 +74,73 @@ chat-log-viewer/
 
 ## 各模块功能说明
 
-### cli.py — 服务管理入口
+### cli — 服务管理入口
 
-统一管理 `server.py` 和 `sync_sessions.py` 的启动、停止、重启、状态和日志查看。现在同时支持短命令包装：`./server ...` / `./sync ...`。
+统一管理 `server`、`sync` 和 `client` 的启动、停止、重启、状态和日志查看。
 
-**用法：**
+**快速开始（推荐）：**
 
 ```bash
-# 老写法
-python cli.py server start --config configs/server.yaml
-python cli.py server status --config configs/server.yaml
-python cli.py server logs --config configs/server.yaml --lines 50
-python cli.py server stop --config configs/server.yaml
+# 1. 加载 shell 环境（在项目根目录执行）
+source env.sh
 
-python cli.py sync start --config configs/sync_config.yaml
-python cli.py sync status --config configs/sync_config.yaml
-python cli.py sync logs --config configs/sync_config.yaml --lines 50
-python cli.py sync stop --config configs/sync_config.yaml
+# 2. 设置默认配置（只需执行一次）
+server config configs/server.yaml
+sync config configs/sync_config.yaml
+client config configs/client.yaml
 
-# 短命令写法：先保存默认配置，后续无需重复传 --config
-./server config configs/server.yaml
+# 3. 使用简化命令管理服务
+server start
+server status
+server logs -n 100
+server stop
+
+sync start
+sync status
+sync logs -n 100
+sync stop
+
+client start
+client status
+client logs -n 100
+client stop
+```
+
+**完整用法：**
+
+```bash
+# 方式 1：使用 shell 函数（需先 source env.sh）
+server start [--config configs/server.yaml]
+server stop
+server restart
+server status
+server logs [--lines 50]
+server config <path>           # 设置默认配置
+server config --clear          # 清除默认配置
+
+sync start [--config configs/sync_config.yaml] [--once]
+sync stop
+sync restart
+sync status
+sync logs [--lines 50]
+sync config <path>
+
+client start [--config configs/client.yaml]
+client stop
+client restart
+client status
+client logs [--lines 50]
+client config <path>
+
+# 方式 2：使用可执行脚本
 ./server start
-./server status
-./server logs -n 100
-./server stop
-
-./sync config configs/sync_config.yaml
 ./sync start
-./sync status
-./sync logs -n 100
-./sync stop
+./client start
+
+# 方式 3：使用 Python 模块
+python3 -m src.cli server start --config configs/server.yaml
+python3 -m src.cli sync start --config configs/sync_config.yaml
+python3 -m src.cli client start --config configs/client.yaml
 ```
 
 **运行产物规则：**
@@ -104,20 +151,34 @@ python cli.py sync stop --config configs/sync_config.yaml
 - `server` PID 文件也按端口区分：
   - `logs/server-port8080.pid`
   - `logs/server-port9000.pid`
-- `sync` 默认使用固定文件：
+- `sync` 日志文件按同步间隔区分：
   - `logs/sync-interval3600.log`
+- `sync` PID 文件：
   - `logs/sync.pid`
+- `client` 日志和 PID 文件：
+  - `logs/client.log`
+  - `logs/client.pid`
 
-说明：
+**配置管理说明：**
 
-- 如果 `configs/server.yaml` 中没有显式自定义 `log_file`，则会自动按端口生成日志名。
-- 可以先执行 `./server config <path>` 或 `./sync config <path>` 保存默认配置，之后 `start/stop/status/logs` 会优先使用已保存配置。
-- 如需临时覆盖，仍可继续传 `--config`。
-- 若希望直接输入 `server` / `sync` 而不是 `./server` / `./sync`，可将仓库目录加入 `PATH`。
+- 使用 `config` 子命令可保存默认配置路径，后续操作无需重复传 `--config`
+- 配置信息保存在 `.cli_state.yaml` 文件中
+- 如需临时覆盖，仍可继续传 `--config` 参数
+- 使用 `config --clear` 可清除已保存的默认配置
+
+**env.sh 说明：**
+
+`env.sh` 提供了便捷的 shell 函数，自动在项目根目录执行命令：
+
+```bash
+source env.sh
+# 之后可直接使用 server、sync、client、cli 命令
+# 无需关心当前工作目录，命令会自动在项目根目录执行
+```
 
 ---
 
-### server.py — 日志浏览服务
+### server — 日志浏览服务
 
 启动 FastAPI Web 服务，提供单页前端界面用于浏览 API 调用日志。
 
@@ -129,21 +190,25 @@ python cli.py sync stop --config configs/sync_config.yaml
 **用法：**
 
 ```bash
-# 扫描模式：指定一个或多个日志目录
-python server.py --dir /path/to/logs
-python server.py --dir /path/a --dir /path/b
+# 推荐：使用 CLI 管理（通过 YAML 配置）
+server config configs/server.yaml
+server start
+
+# 或直接运行 Python 模块
+python3 -m src.server --dir /path/to/logs
+python3 -m src.server --dir /path/a --dir /path/b
 
 # 扫描模式：指定父目录，其所有子目录均作为扫描根
-python server.py --dirs /path/to/parents
+python3 -m src.server --dirs /path/to/parents
 
 # 会话模式：指定预导出的会话目录
-python server.py --session-dir /path/to/session_dir
+python3 -m src.server --session-dir /path/to/session_dir
 
 # 会话模式：指定父目录，其所有子目录均作为会话根
-python server.py --session-dirs /path/to/session_parents
+python3 -m src.server --session-dirs /path/to/session_parents
 
 # 通用参数
-python server.py --dir /path/to/logs --port 9000 --host 127.0.0.1
+python3 -m src.server --dir /path/to/logs --port 9000 --host 127.0.0.1
 ```
 
 **API 端点：**
@@ -286,43 +351,81 @@ python merge_reports.py key1/session_report.xlsx key2/session_report.xlsx --out 
 
 ---
 
-### sync_sessions.py — 云端同步
+### sync — 云端同步（上传）
 
-守护进程模式，支持三种运行模式，将日志增量导出并上传至华为云 OBS。
-
-**三种模式：**
-
-| 模式 | 说明 |
-|------|------|
-| `raw` | 直接上传原始三元组日志到 OBS |
-| `export` | 先导出为会话格式，再上传到 OBS |
-| `upload-only` | 只上传已导出的会话目录（不重新导出）|
+守护进程模式，将本地会话目录增量上传至华为云 OBS。
 
 **用法：**
 
 ```bash
-# 通过 YAML 配置文件运行
-python sync_sessions.py --config sync_config.yaml
+# 推荐：使用 CLI 管理（通过 YAML 配置）
+sync config configs/sync_config.yaml
+sync start
 
-# 通过 CLI 参数运行
-python sync_sessions.py \
-    --mode export \
-    --logs-dir ./logs_anthropic \
-    --out-dir ./sessions \
-    --obs-bucket obs://my-bucket/path \
-    --interval 60
+# 单次运行模式（测试/cron）
+sync start --once
+
+# 或直接运行 Python 模块
+python3 -m src.sync_sessions \
+    --src ./sessions \
+    --session-dir ./sessions \
+    --obs-session obs://bucket/sessions \
+    --interval 3600
 ```
 
-**YAML 配置示例：**
+**YAML 配置示例（configs/sync_config.yaml）：**
 
 ```yaml
-mode: export
-logs_dir: ./logs_anthropic
-out_dir: ./sessions
-obs_bucket: obs://my-bucket/llm-logs
-interval: 60          # 同步间隔（秒）
-erase_after_upload: false  # 上传后是否删除本地文件
+src: ./sessions                    # 本地会话目录
+session_dir: ./sessions            # 会话目录（同 src）
+obs_session: obs://bucket/sessions # OBS 目标路径
+interval_seconds: 3600             # 同步间隔（秒）
+upload_erase: false                # 上传后是否删除本地文件
+upload_script: obsutil             # 上传脚本（obsutil 或自定义）
+upload_workers: 4                  # 并发上传线程数
+log_level: INFO
 ```
+
+**依赖：** 需安装 `obsutil`（见下方安装说明）。
+
+---
+
+### client — OBS 下载客户端
+
+从华为云 OBS 增量下载会话目录到本地，支持守护进程模式。
+
+**用法：**
+
+```bash
+# 推荐：使用 CLI 管理（通过 YAML 配置）
+client config configs/client.yaml
+client start
+
+# 或直接运行 Python 模块
+python3 -m src.client \
+    --obs-path obs://bucket/sessions \
+    --output ./local_sessions \
+    --interval 3600
+```
+
+**YAML 配置示例（configs/client.yaml）：**
+
+```yaml
+obs_path: obs://bucket/sessions    # OBS 源路径
+output: ./local_sessions           # 本地输出目录
+download_script: obsutil           # 下载脚本（obsutil 或自定义）
+workers: 4                         # 并发下载线程数
+interval: 3600                     # 同步间隔（秒）
+log_level: INFO
+```
+
+**工作原理：**
+
+1. 从 OBS 下载 `index.jsonl`（或 `index.json`）获取会话列表
+2. 比对本地已有会话，识别新增或更新的会话
+3. 并发下载新增/更新的会话文件夹
+4. 支持基于 `latest_file` 时间戳的增量同步
+5. 守护进程模式下定期执行同步
 
 **依赖：** 需安装 `obsutil`（见下方安装说明）。
 
@@ -340,7 +443,7 @@ bash update_dir/obsutil/setup.sh
 
 ## 工具函数
 
-### utils/message_utils.py
+### src/utils/message_utils.py
 
 | 函数 | 说明 |
 |------|------|
@@ -350,7 +453,7 @@ bash update_dir/obsutil/setup.sh
 | `count_user_messages(messages)` | 统计用户消息数量 |
 | `parse_response(data)` | 解析响应数据，提取 assistant content |
 
-### utils/triplet_collector.py
+### src/utils/triplet_collector.py
 
 | 函数 | 说明 |
 |------|------|
@@ -375,11 +478,28 @@ pip install fastapi uvicorn[standard] jinja2 pandas openpyxl
 
 ## 典型工作流
 
+### 0. 环境准备
+
+```bash
+# 加载 shell 环境（推荐）
+cd /path/to/chat-log-viewer
+source env.sh
+
+# 设置默认配置
+server config configs/server.yaml
+sync config configs/sync_config.yaml
+client config configs/client.yaml
+```
+
 ### 1. 浏览原始日志
 
 ```bash
-python server.py --dir ./logs_anthropic --port 8080
+# 使用 CLI 管理
+server start
 # 打开 http://localhost:8080
+
+# 或直接运行
+python3 -m src.server --dir ./logs_anthropic --port 8080
 ```
 
 ### 2. 导出并分析会话
@@ -398,7 +518,11 @@ open ./sessions/key1/stat/session_report.html
 ### 3. 浏览会话视图
 
 ```bash
-python server.py --session-dir ./sessions/key1 --port 8080
+# 修改 configs/server.yaml 为会话模式，然后
+server restart
+
+# 或直接运行
+python3 -m src.server --session-dir ./sessions/key1 --port 8080
 ```
 
 ### 4. 合并多 key 报告并查看汇总
@@ -415,5 +539,17 @@ python report.py ./report --port 8081
 ### 5. 开启云端自动同步
 
 ```bash
-python sync_sessions.py --config sync_config.yaml
+# 上传到 OBS
+sync start
+
+# 从 OBS 下载
+client start
+
+# 查看运行状态
+sync status
+client status
+
+# 查看日志
+sync logs -n 100
+client logs -n 100
 ```

@@ -45,14 +45,14 @@ except ImportError:
             print(f"{desc}...")
         return it
 
-from utils.message_utils import (
+from src.utils.message_utils import (
     count_user_messages,
     extract_messages,
     get_first_user_text,
     load_json,
     parse_response,
 )
-from utils.triplet_collector import collect_new_triplets
+from src.utils.triplet_collector import collect_new_triplets
 
 
 def main():
