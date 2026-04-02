@@ -77,7 +77,7 @@ for parent_dir in SESSION_PARENT_DIRS:
 # App
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Chat Log Viewer")
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR = Path(__file__).parent.parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 _cache: Dict[str, List[Dict]] = {}
