@@ -90,8 +90,8 @@ def main() -> None:
     api_key = (os.getenv("ANTHROPIC_API_KEY") or os.getenv("API_KEY") or "sk-1234").strip() or "sk-1234"
     verify_ssl = parse_bool(os.getenv("SSL_VERIFY"), default=False)
 
-    os.environ["no_proxy"] = "127.0.0.1,localhost"
-    os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+    os.environ["no_proxy"] = f"127.0.0.1,localhost,{proxy_host}"
+    os.environ["NO_PROXY"] = f"127.0.0.1,localhost,{proxy_host}"
     disable_warnings(InsecureRequestWarning)
 
     request_path = pick_request_file(args.request_file)
@@ -110,6 +110,7 @@ def main() -> None:
     print(f"request    : {request_path}")
     print(f"model      : {payload.get('model')}")
     print(f"stream     : {payload.get('stream', False)}")
+    print(f"noproxy    : {os.environ["no_proxy"]}")
     print()
 
     response = client.messages.create(**payload)

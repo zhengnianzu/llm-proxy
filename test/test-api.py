@@ -5,19 +5,20 @@ from urllib3 import disable_warnings
 from urllib3.exceptions import InsecureRequestWarning
 import anthropic
 
-os.environ['no_proxy'] = "127.0.0.1"
+base_url='127.0.0.1'
+os.environ['no_proxy'] = f"{base_url}"
 # 创建不经过代理的HTTP客户端
 http_client = httpx.Client(verify=False)
 disable_warnings(InsecureRequestWarning)
-
+print(f"noproxy: {os.environ["no_proxy"]}")
 
 # 1. 初始化客户端 (SDK 会默认读取环境变量 ANTHROPIC_API_KEY)
 client = anthropic.Anthropic(
-    base_url="http://127.0.0.1:4000",
+    base_url=f"http://{base_url}:4000",
     http_client=http_client)
 
-model_name='claude-opus-4-6'
-client.api_key = 'xx'
+model_name='claude-sonnet-4-6'
+client.api_key = 'sk-213'
 
 
 # 1. 定义工具 (Tools Schema)
