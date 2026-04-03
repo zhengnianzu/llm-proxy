@@ -844,8 +844,10 @@ def run_daemon(config: dict, logger: logging.Logger, once: bool = False) -> None
             if obs_raw:
                 logger.info("export+raw: uploading raw triplets to obs_raw first")
                 try:
+                    # export 模式下 raw 只做备份，不删本地文件（export 步骤还需要这些文件）
+                    # erase 统一在 session 上传成功后由 erase_src_triplets 完成
                     raw_ok, new_src_offset = run_raw(
-                        src, obs_raw, src_offset, workers, upload_erase, logger, upload_script
+                        src, obs_raw, src_offset, workers, False, logger, upload_script
                     )
                     # raw 上传后更新 offset，export 用同一 offset
                     src_offset = new_src_offset
@@ -874,12 +876,10 @@ def run_daemon(config: dict, logger: logging.Logger, once: bool = False) -> None
                     # session folder 已上传到 obs_session，可以删除
                     logger.info("upload_erase: removing %d uploaded session folders", len(ok_folders))
                     erase_session_folders(session_dir, ok_folders, logger)
-                    # src 原始文件只有在 obs_raw 已备份的情况下才能删除
-                    if obs_raw:
-                        logger.info("upload_erase: removing src triplets for %d uploaded folders", len(ok_folders))
-                        erase_src_triplets(src, ok_folders, logger)
-                    else:
-                        logger.info("upload_erase: skipping src erase — obs_raw not configured (no raw backup)")
+
+                    # session 上传成功后，删除 src 中对应的原始三元组文件
+                    logger.info("upload_erase: removing src triplets for %d uploaded folders", len(ok_folders))
+                    erase_src_triplets(src, ok_folders, logger)
             else:
                 logger.info("No changes — skipping session upload")
 
