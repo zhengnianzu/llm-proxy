@@ -735,6 +735,13 @@ def run_raw(
 
     logger.info("raw upload summary: %d/%d triplets fully OK", ok_count, len(triplets))
 
+    # 上传 index.jsonl
+    ok, msg = upload_index_jsonl(src, obs_raw, upload_script)
+    if ok:
+        logger.info("index.jsonl upload OK")
+    else:
+        logger.error("index.jsonl upload FAIL: %s", msg)
+
     if upload_erase and uploaded_files:
         logger.info("upload_erase: removing %d uploaded files from src", len(uploaded_files))
         deleted = 0

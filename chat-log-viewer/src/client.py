@@ -3,16 +3,16 @@ client.py — OBS 同步下载客户端
 
 功能：
   1. 从 OBS 目录下载 index.jsonl 文件
-  2. 逐行解析 index.jsonl，下载对应的文件夹或文件
-  3. 支持增量下载：通过 --base-output 参数指定本地已有目录，只下载最新日期之后的数据
+  2. 解析 index.jsonl 的新增行，下载对应的 session folder
+  3. 支持增量下载：通过本地状态（.client_state.json / .last_sync_ts）记录已处理的 index.jsonl 行偏移
   4. 支持定时任务：通过 --interval 参数定时轮询执行同步下载
   5. 支持 YAML 配置文件
 
 用法：
-    # 全量下载
+    # 初次全量（从 index.jsonl 第 1 行开始处理）
     python client.py --obs-path obs://bucket/sessions/ --output ./local_sessions
 
-    # 增量下载（基于本地已有数据）
+    # 增量下载（从 base-output 的 index.jsonl 最后一行开始继续）
     python client.py --obs-path obs://bucket/sessions/ --output ./local_sessions --base-output ./local_sessions
 
     # 定时增量同步（每隔 3600 秒）
@@ -24,7 +24,7 @@ client.py — OBS 同步下载客户端
 配置文件示例 (configs/client.yaml):
     obs_path: obs://bucket/sessions/
     output: ./local_sessions
-    base_output: ./local_sessions      # 可选，指定后启用增量下载
+    base_output: ./local_sessions      # 可选：存在时用其 index.jsonl 初始化增量状态（从最后一行继续）
     download_script: ./obs_download.sh # 可选，默认 obs_download.sh
     workers: 4                         # 可选，默认 4
     interval: 3600                     # 可选，指定后启用定时任务
@@ -35,6 +35,7 @@ client.py — OBS 同步下载客户端
 import argparse
 import json
 import logging
+import re
 import signal
 import subprocess
 import sys
@@ -229,26 +230,24 @@ def parse_index_json(index_path: Path) -> List[dict]:
 # Incremental filtering
 # ---------------------------------------------------------------------------
 
+_FOLDER_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})")
+
+
 def extract_date_from_folder(folder_name: str) -> Optional[datetime]:
-    """从文件夹名称提取日期时间，格式 2026-03-25_15-42-10_366。"""
+    """从文件夹名称提取日期时间，格式 2026-03-25_15-42-10_366（末尾毫秒可选）。"""
+    m = _FOLDER_TS_RE.match(folder_name)
+    if not m:
+        return None
     try:
-        parts = folder_name.split("_")
-        if len(parts) >= 3:
-            date_str = f"{parts[0]}_{parts[1]}_{parts[2]}"
-            return datetime.strptime(date_str, "%Y-%m-%d_%H-%M-%S")
-    except (ValueError, IndexError):
-        pass
-    return None
+        return datetime.strptime(f"{m.group(1)}_{m.group(2)}", "%Y-%m-%d_%H-%M-%S")
+    except ValueError:
+        return None
 
 
 def extract_date_from_latest_file(latest_file: str) -> Optional[datetime]:
     """从 latest_file 字段提取日期时间，格式 2026-03-25_15-42-10_366.json。"""
-    try:
-        name = latest_file.replace(".json", "")
-        return extract_date_from_folder(name)
-    except Exception:
-        pass
-    return None
+    name = latest_file.rsplit(".", 1)[0]  # 去掉扩展名
+    return extract_date_from_folder(name)
 
 
 def get_latest_date_from_local_index(base_output: Path) -> Optional[datetime]:
@@ -488,9 +487,12 @@ def sync_once(
     logger.info("Saved index.json to %s", output / "index.json")
 
     # Step 6: 更新时间戳（本次处理的最新日期）
-    if new_entries:
+    # 这里必须以“本次实际下载过的条目”为准，否则会把 cutoff 直接推进到 OBS 全量最新，
+    # 导致中间漏下载；同时也避免每轮都变成“全量下载”。
+    if success > 0:
+        downloaded_entries = [e for e in new_entries if e.get("folder") in set(folders_to_download)]
         max_date = None
-        for e in new_entries:
+        for e in downloaded_entries:
             dt = None
             if "latest_file" in e:
                 dt = extract_date_from_latest_file(e["latest_file"])
@@ -500,6 +502,8 @@ def sync_once(
                 max_date = dt
         if max_date:
             write_last_sync_ts(output, max_date)
+    else:
+        logger.info("No successful downloads in this cycle; not updating last sync timestamp")
 
     logger.info("Sync completed: %d downloaded, %d failed", success, failed)
 
