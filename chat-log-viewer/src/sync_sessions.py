@@ -306,7 +306,7 @@ def run_export(
 
     if not new_prefixes:
         logger.info("No new triplets — nothing to do")
-        return 0, 0, [], cutoff, new_index_line_offset
+        return 0, 0, [], cutoff, new_index_line_offset, {}
 
     logger.info("New triplets: %d (index_line_offset: %d→%d)",
                 len(new_prefixes), index_line_offset, new_index_line_offset)
@@ -409,6 +409,11 @@ def run_export(
     results: Dict[str, List] = {s["folder_prefix"]: [] for s in active_sessions}
     exported_files = 0
     changed_folders_set: set = set()
+    # folder_prefix -> 本次导出涉及的 triplet prefix 列表（用于 erase_src_triplets）
+    folder_to_prefixes: Dict[str, List[str]] = {s["folder_prefix"]: [] for s in active_sessions}
+    for s in active_sessions:
+        for prefix, _tri in s["items"]:
+            folder_to_prefixes[s["folder_prefix"]].append(prefix)
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = {executor.submit(_export_one, task): task for task in all_items}
@@ -467,7 +472,7 @@ def run_export(
     new_cutoff = max(new_prefixes) if new_prefixes else cutoff
     changed_folders = sorted(changed_folders_set)
 
-    return exported_files, len(changed_folders), changed_folders, new_cutoff, new_index_line_offset
+    return exported_files, len(changed_folders), changed_folders, new_cutoff, new_index_line_offset, folder_to_prefixes
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +862,7 @@ def run_daemon(config: dict, logger: logging.Logger, once: bool = False) -> None
 
             # 2) export + session 上传
             try:
-                exported, updated, changed, new_cutoff, new_src_offset = run_export(
+                exported, updated, changed, new_cutoff, new_src_offset, folder_to_prefixes = run_export(
                     src, session_dir, cutoff, src_offset, logger
                 )
             except Exception:
@@ -878,8 +883,20 @@ def run_daemon(config: dict, logger: logging.Logger, once: bool = False) -> None
                     erase_session_folders(session_dir, ok_folders, logger)
 
                     # session 上传成功后，删除 src 中对应的原始三元组文件
-                    logger.info("upload_erase: removing src triplets for %d uploaded folders", len(ok_folders))
-                    erase_src_triplets(src, ok_folders, logger)
+                    # 注意：ok_folders 是 session folder 名，不一定等于 triplet prefix。
+                    # 需要映射到本轮实际导出的 triplet prefixes 才能准确删除。
+                    prefixes_to_erase: List[str] = []
+                    for folder in ok_folders:
+                        prefixes_to_erase.extend(folder_to_prefixes.get(folder, []))
+
+                    logger.info(
+                        "upload_erase: removing src triplets for %d uploaded folders (prefixes=%d)",
+                        len(ok_folders), len(prefixes_to_erase),
+                    )
+                    if prefixes_to_erase:
+                        erase_src_triplets(src, prefixes_to_erase, logger)
+                    else:
+                        logger.info("upload_erase: no src prefixes to erase for this cycle")
             else:
                 logger.info("No changes — skipping session upload")
 
