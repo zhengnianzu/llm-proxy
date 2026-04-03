@@ -858,12 +858,10 @@ def run_daemon(config: dict, logger: logging.Logger, once: bool = False) -> None
                 try:
                     # export 模式下 raw 只做备份，不删本地文件（export 步骤还需要这些文件）
                     # erase 统一在 session 上传成功后由 erase_src_triplets 完成
-                    raw_ok, new_src_offset = run_raw(
+                    # 注意：不更新 src_offset，让 run_export 使用原始 offset 处理相同数据
+                    raw_ok, _ = run_raw(
                         src, obs_raw, src_offset, workers, False, logger, upload_script
                     )
-                    # raw 上传后更新 offset，export 用同一 offset
-                    src_offset = new_src_offset
-                    save_state(state_dir, cutoff, src_offset, mode="export")
                 except Exception:
                     logger.exception("run_raw (in export mode) failed — continuing with export")
 
