@@ -186,11 +186,21 @@ def download_index_file(obs_path: str, filename: str, download_script: str, outp
     return local_path
 
 
-def parse_index_jsonl(index_path: Path) -> List[dict]:
-    """解析 index.jsonl，返回所有条目，去重保留每个 folder 最后一条（最新状态）。"""
+def parse_index_jsonl(index_path: Path, line_offset: int = 0) -> Tuple[List[dict], int]:
+    """
+    解析 index.jsonl，从 line_offset 行开始读取新增行。
+    去重保留每个 folder 最后一条（最新状态）。
+
+    Returns:
+        (entries, total_lines)
+    """
     seen: dict = {}
+    total_lines = 0
     with open(index_path, "r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, 1):
+            total_lines = line_no
+            if line_no <= line_offset:
+                continue
             line = line.strip()
             if not line:
                 continue
@@ -204,8 +214,9 @@ def parse_index_jsonl(index_path: Path) -> List[dict]:
                 logger.warning("Line %d invalid JSON: %s", line_no, e)
 
     entries = list(seen.values())
-    logger.info("Parsed %d unique entries from index.jsonl", len(entries))
-    return entries
+    logger.info("Parsed %d unique entries from index.jsonl (offset=%d, total_lines=%d)",
+                len(entries), line_offset, total_lines)
+    return entries, total_lines
 
 
 def parse_index_json(index_path: Path) -> List[dict]:
@@ -251,50 +262,42 @@ def extract_date_from_latest_file(latest_file: str) -> Optional[datetime]:
 
 
 def get_latest_date_from_local_index(base_output: Path) -> Optional[datetime]:
-    """
-    从本地已有的 index.jsonl 或 index.json 中提取最新日期。
-    优先读 index.jsonl，失败则尝试 index.json。
-    """
-    index_json = base_output / "index.json"
+    """从本地 index.jsonl 的最后一行提取 latest_file 日期。"""
     index_jsonl = base_output / "index.jsonl"
 
-    entries = []
-
-    # 优先读 index.jsonl
-    if index_jsonl.exists():
-        try:
-            entries = parse_index_jsonl(index_jsonl)
-            logger.info("Read %d entries from local %s", len(entries), index_jsonl)
-        except Exception as e:
-            logger.warning("Failed to read local index.jsonl: %s", e)
-
-    # fallback 到 index.json
-    if not entries and index_json.exists():
-        try:
-            entries = parse_index_json(index_json)
-            logger.info("Read %d entries from local %s", len(entries), index_json)
-        except Exception as e:
-            logger.warning("Failed to read local index.jsonl: %s", e)
-
-    if not entries:
-        logger.info("No local index found in base_output, will do full download")
+    if not index_jsonl.exists():
+        logger.info("No local index.jsonl found in base_output")
         return None
 
-    # 从所有 entry 中找最新日期
-    latest_date = None
-    for e in entries:
-        folder_date = extract_date_from_folder(e.get("folder", ""))
-        if not folder_date and "latest_file" in e:
-            folder_date = extract_date_from_latest_file(e["latest_file"])
-        if folder_date and (latest_date is None or folder_date > latest_date):
-            latest_date = folder_date
+    try:
+        # 读取最后一行
+        last_line = None
+        with open(index_jsonl, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    last_line = line
 
-    if latest_date:
-        logger.info("Latest date from local index: %s", latest_date.isoformat())
-    else:
-        logger.info("No valid dates found in local index")
+        if not last_line:
+            logger.info("index.jsonl is empty")
+            return None
 
-    return latest_date
+        entry = json.loads(last_line)
+        latest_file = entry.get("latest_file")
+        if not latest_file:
+            logger.warning("Last entry missing latest_file field")
+            return None
+
+        latest_date = extract_date_from_latest_file(latest_file)
+        if latest_date:
+            logger.info("Latest date from local index.jsonl: %s", latest_date.isoformat())
+        else:
+            logger.warning("Could not extract date from latest_file: %s", latest_file)
+
+        return latest_date
+    except Exception as e:
+        logger.warning("Failed to read local index.jsonl: %s", e)
+        return None
 
 
 def filter_entries_by_date(entries: List[dict], cutoff_date: Optional[datetime]) -> List[dict]:
@@ -318,33 +321,42 @@ def filter_entries_by_date(entries: List[dict], cutoff_date: Optional[datetime])
     return filtered
 
 
-_TS_FILE = ".last_sync_ts"
-_TS_FMT = "%Y-%m-%dT%H:%M:%S"
+_STATE_FILE = ".client_state.json"
 
 
-def read_last_sync_ts(output: Path) -> Optional[datetime]:
-    """读取上次同步成功时保存的 cutoff 时间戳。"""
-    ts_file = output / _TS_FILE
-    if not ts_file.exists():
-        return None
+def read_sync_state(output: Path) -> dict:
+    """读取上次同步状态（行偏移 + 最新日期）。"""
+    state_file = output / _STATE_FILE
+    if not state_file.exists():
+        return {"index_line_offset": 0, "latest_date": None}
     try:
-        text = ts_file.read_text(encoding="utf-8").strip()
-        dt = datetime.strptime(text, _TS_FMT)
-        logger.info("Loaded last sync timestamp: %s", dt.isoformat())
-        return dt
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        offset = state.get("index_line_offset", 0)
+        latest_date_str = state.get("latest_date")
+        latest_date = datetime.fromisoformat(latest_date_str) if latest_date_str else None
+        logger.info("Loaded sync state: offset=%d, latest_date=%s", offset, latest_date_str or "None")
+        return {"index_line_offset": offset, "latest_date": latest_date}
     except Exception as e:
-        logger.warning("Failed to read %s: %s", ts_file, e)
-        return None
+        logger.warning("Failed to read %s: %s", state_file, e)
+        return {"index_line_offset": 0, "latest_date": None}
 
 
-def write_last_sync_ts(output: Path, ts: datetime) -> None:
-    """将 cutoff 时间戳写入文件，供下次增量使用。"""
-    ts_file = output / _TS_FILE
+def write_sync_state(output: Path, offset: int, latest_date: Optional[datetime]) -> None:
+    """保存同步状态（行偏移 + 最新日期）。"""
+    state_file = output / _STATE_FILE
+    state = {
+        "index_line_offset": offset,
+        "latest_date": latest_date.isoformat() if latest_date else None,
+    }
     try:
-        ts_file.write_text(ts.strftime(_TS_FMT), encoding="utf-8")
-        logger.info("Saved last sync timestamp: %s", ts.isoformat())
+        tmp = output / (_STATE_FILE + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        tmp.replace(state_file)
+        logger.info("Saved sync state: offset=%d, latest_date=%s", offset, state["latest_date"] or "None")
     except Exception as e:
-        logger.warning("Failed to write %s: %s", ts_file, e)
+        logger.warning("Failed to write %s: %s", state_file, e)
 
 
 # ---------------------------------------------------------------------------
@@ -411,68 +423,58 @@ def sync_once(
     """
     执行一次完整的同步。
 
-    增量策略（统一基于时间戳）：
-    1. 优先读取 output/.last_sync_ts 作为 cutoff（上次同步成功的最新日期）
-    2. 如果不存在且指定了 base_output，则从 base_output/index.jsonl 或 index.json 提取最新日期
-    3. 下载 OBS 上的 index（优先 jsonl，fallback json），过滤出日期晚于 cutoff 的 folder
-    4. 下载完成后，将本次处理的最新日期写入 output/.last_sync_ts
+    增量策略（基于行偏移 + 时间戳）：
+    1. 读取 output/.client_state.json 获取上次的 index_line_offset 和 latest_date
+    2. 下载 OBS 上的 index.jsonl，从 line_offset 开始读取新增行
+    3. 对新增条目，按 latest_file 日期过滤（晚于 latest_date）
+    4. 下载过滤后的 folders
+    5. 更新 state：新的 line_offset 和本次下载的最新日期
     """
     output.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: 确定增量 cutoff 时间戳
-    cutoff_date: Optional[datetime] = None
+    # Step 1: 读取上次同步状态
+    state = read_sync_state(output)
+    line_offset = state["index_line_offset"]
+    cutoff_date = state["latest_date"]
 
-    # 优先读取 output/.last_sync_ts
-    cutoff_date = read_last_sync_ts(output)
-
-    # fallback: 从 base_output 的本地 index 提取
-    if cutoff_date is None and base_output:
+    # fallback: 如果 state 为空且指定了 base_output，从 base_output 初始化
+    if line_offset == 0 and cutoff_date is None and base_output:
         cutoff_date = get_latest_date_from_local_index(base_output)
+        if cutoff_date:
+            logger.info("Initialized cutoff_date from base_output: %s", cutoff_date.isoformat())
 
     if cutoff_date:
-        logger.info("Incremental mode: cutoff date = %s", cutoff_date.isoformat())
+        logger.info("Incremental mode: line_offset=%d, cutoff_date=%s", line_offset, cutoff_date.isoformat())
     else:
-        logger.info("Full download mode (no cutoff date)")
+        logger.info("Full download mode: line_offset=%d (no cutoff date)", line_offset)
 
-    # Step 2: 下载 OBS 上的最新 index（优先 jsonl）
+    # Step 2: 下载 OBS 上的最新 index.jsonl
     index_path = download_index_file(obs_path, "index.jsonl", download_script, output)
     new_entries = []
+    total_lines = line_offset
 
     if index_path:
         try:
-            new_entries = parse_index_jsonl(index_path)
-            logger.info("Downloaded and parsed index.jsonl: %d entries", len(new_entries))
+            new_entries, total_lines = parse_index_jsonl(index_path, line_offset)
+            logger.info("Downloaded and parsed index.jsonl: %d new entries", len(new_entries))
         except Exception as e:
             logger.warning("Failed to parse index.jsonl: %s", e)
 
-    # fallback 到 index.json
     if not new_entries:
-        logger.warning("index.jsonl unavailable or empty, falling back to index.json")
-        index_json_path = download_index_file(obs_path, "index.json", download_script, output)
-        if not index_json_path:
-            logger.error("Both index.jsonl and index.json failed — skipping sync cycle")
-            return
-
-        try:
-            new_entries = parse_index_json(index_json_path)
-            logger.info("Downloaded and parsed index.json: %d entries", len(new_entries))
-        except Exception as e:
-            logger.error("Failed to parse index.json: %s", e)
-            return
-
-    if not new_entries:
-        logger.warning("No entries found in index")
+        logger.info("No new entries to download (offset=%d, total_lines=%d)", line_offset, total_lines)
+        # 即使没有新条目，也更新 line_offset
+        write_sync_state(output, total_lines, cutoff_date)
         return
 
-    # Step 3: 增量过滤
+    # Step 3: 按日期过滤（只下载 latest_file 日期晚于 cutoff_date 的）
     if cutoff_date:
         filtered_entries = filter_entries_by_date(new_entries, cutoff_date)
         if not filtered_entries:
-            logger.info("No new entries to download (all up-to-date)")
+            logger.info("No new entries after date filtering (all up-to-date)")
+            write_sync_state(output, total_lines, cutoff_date)
             return
         folders_to_download = [e["folder"] for e in filtered_entries]
     else:
-        # 全量下载
         folders_to_download = [e["folder"] for e in new_entries]
         logger.info("Full download mode: %d folders", len(folders_to_download))
 
@@ -481,29 +483,52 @@ def sync_once(
         obs_path, folders_to_download, output, download_script, workers
     )
 
-    # Step 5: 保存新 index 到本地
+    # Step 5: 保存新 index 到本地（合并所有条目）
+    # 需要读取完整的 index.jsonl 来生成 index.json
+    all_entries_dict = {}
+    if index_path and index_path.exists():
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if "folder" in entry:
+                            all_entries_dict[entry["folder"]] = entry
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as e:
+            logger.warning("Failed to read full index.jsonl for index.json generation: %s", e)
+
     with open(output / "index.json", "w", encoding="utf-8") as f:
-        json.dump(new_entries, f, ensure_ascii=False, indent=2)
+        json.dump(list(all_entries_dict.values()), f, ensure_ascii=False, indent=2)
     logger.info("Saved index.json to %s", output / "index.json")
 
-    # Step 6: 更新时间戳（本次处理的最新日期）
-    # 这里必须以“本次实际下载过的条目”为准，否则会把 cutoff 直接推进到 OBS 全量最新，
-    # 导致中间漏下载；同时也避免每轮都变成“全量下载”。
+    # Step 6: 更新同步状态
     if success > 0:
         downloaded_entries = [e for e in new_entries if e.get("folder") in set(folders_to_download)]
-        max_date = None
+        logger.debug("Downloaded entries count: %d", len(downloaded_entries))
+        max_date = cutoff_date  # 保留旧的 cutoff_date 作为基准
         for e in downloaded_entries:
             dt = None
             if "latest_file" in e:
                 dt = extract_date_from_latest_file(e["latest_file"])
             elif "folder" in e:
                 dt = extract_date_from_folder(e["folder"])
+            logger.debug("Entry %s -> date %s", e.get("folder"), dt)
             if dt and (max_date is None or dt > max_date):
                 max_date = dt
+        logger.info("Max date from downloaded entries: %s", max_date)
         if max_date:
-            write_last_sync_ts(output, max_date)
+            write_sync_state(output, total_lines, max_date)
+        else:
+            logger.warning("Could not extract max_date from downloaded entries; updating offset only")
+            write_sync_state(output, total_lines, cutoff_date)
     else:
-        logger.info("No successful downloads in this cycle; not updating last sync timestamp")
+        logger.info("No successful downloads in this cycle; updating offset only")
+        write_sync_state(output, total_lines, cutoff_date)
 
     logger.info("Sync completed: %d downloaded, %d failed", success, failed)
 
