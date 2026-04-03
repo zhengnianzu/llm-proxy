@@ -370,8 +370,7 @@ def download_folder(
     download_script: str,
 ) -> Tuple[str, bool, str]:
     obs_folder = obs_base.rstrip("/") + "/" + folder_name + "/"
-    local_folder = output_dir / folder_name
-    ok, msg = download_file(obs_folder, local_folder, download_script, timeout=300)
+    ok, msg = download_file(obs_folder, output_dir, download_script, timeout=300)
     return folder_name, ok, msg
 
 
