@@ -48,10 +48,116 @@ NO_PROXY=localhost,127.0.0.1,*.huawei.com,*.local,*.lan,10.70.85.106
 pip install -r requirements.txt
 ```
 
-## 启动
+## 启动与管理
+
+推荐使用根目录下的 CLI，而不是手动执行 `bash server.sh start .env`。
+
+先给 CLI 执行权限：
 
 ```shell
-python app.py
+chmod +x app
+```
+
+### 1. 配置默认 env
+
+```shell
+./app config .env
+```
+
+这会把当前默认使用的环境文件写入 `.cli_state.yaml` 的 `source_env` 字段。
+
+查看当前配置：
+
+```shell
+./app config
+```
+
+### 2. 启动 / 停止 / 重启
+
+```shell
+./app start
+./app stop
+./app restart
+```
+
+这些命令默认作用于当前 `source_env`。
+
+### 3. 指定某个 env 操作
+
+```shell
+./app start --env .env.test
+./app stop --env .env.test
+./app restart --env .env.prod
+./app logs --env .env.prod -f
+```
+
+### 4. 查看日志
+
+```shell
+./app logs
+./app logs -f
+./app logs --env .env.test -n 200
+```
+
+### 5. 查看服务状态
+
+```shell
+./app status
+./app list
+```
+
+`status` 会显示当前默认 `source_env`，并列出所有已记录服务。  
+`list` 会直接列出 `.cli_state.yaml` 中记录的所有 env 服务。
+
+## 多个 .env 同时运行
+
+CLI 支持多个 `.env` 同时启动，只要它们的 `PROXY_PORT` 不冲突。
+
+例如：
+
+```shell
+./app start --env .env
+./app start --env .env.test
+./app start --env .env.prod
+```
+
+每个 env 都会单独记录到 `.cli_state.yaml` 的 `services` 中，字段包括：
+
+```text
+env_path
+pid
+host
+port
+pid_file
+log_file
+started_at
+```
+
+典型状态示例：
+
+```yaml
+source_env: .env
+services:
+  .env:
+    pid: 1234
+    host: 127.0.0.1
+    port: 4000
+    pid_file: logs/app-port4000.pid
+    log_file: logs/app-port4000.log
+  .env.test:
+    pid: 2345
+    host: 127.0.0.1
+    port: 4001
+    pid_file: logs/app-port4001.pid
+    log_file: logs/app-port4001.log
+```
+
+说明：
+
+```text
+1. 不同 env 本质上是不同的 app.py 进程
+2. CLI 按 env 文件区分服务
+3. stop / restart / logs 可通过 --env 精确作用到某个服务
 ```
 
 ## 测试
@@ -88,5 +194,10 @@ status: 过滤状态: 全部、成功、失败
 ## 多轮对话可视化
 
 ```text
-在代理服务启动后，访问 http://127.0.0.1:4000/chat_viewer
+在代理服务启动后，访问：
+
+- 监控总览: `http://127.0.0.1:4000/`
+- 查询统计: `http://127.0.0.1:4000/query`
+- 对话历史记录: `http://127.0.0.1:4000/history`
+- 失败历史记录: `http://127.0.0.1:4000/failures`
 ```
