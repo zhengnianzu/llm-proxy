@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from print_stats_summary import statistic_tokens
 from auth import validate_api_key
 from utils.metrics import record_request, record_validity, get_metrics_snapshot, get_rate_history, load_metrics_from_disk
+from utils.log_paths import build_index_path, get_log_dir
 from utils.log_routes import register_log_routes
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
@@ -31,12 +32,11 @@ TRUST_ENV = os.getenv("TRUST_ENV", "true").lower() == "true"
 # 全局默认：重试次数（不从环境变量读取）
 MAX_RETRIES = 20
 
-LOGS_SESSION_ANTHROPIC = "logs_session_anthropic"
-LOGS_ANTHROPIC = "logs_anthropic"
-LOGS_SESSION_OPENAI = "logs_session_openai"
-LOGS_OPENAI = "logs_openai"
+LOGS_SESSION_ANTHROPIC = get_log_dir("logs_session_anthropic")
+LOGS_ANTHROPIC = get_log_dir("logs_anthropic")
+LOGS_SESSION_OPENAI = get_log_dir("logs_session_openai")
+LOGS_OPENAI = get_log_dir("logs_openai")
 LOGS_DEBUG = os.path.join("logs", "debug")
-INDEX_FILENAME = "index.jsonl"
 
 # 请求计数（启动时从 index.jsonl 加载，运行时在内存中累计）
 _first_count: int = 0   # 首次请求数（每次 endpoint 调用 = 1）
@@ -233,7 +233,7 @@ def _resp_to_obj(r):  # httpx.Response -> dict
 
 
 def _build_index_path(log_dir: str) -> str:
-    return os.path.join(log_dir, INDEX_FILENAME)
+    return build_index_path(log_dir)
 
 
 def _index_path_for_req_file(req_file: str) -> str:

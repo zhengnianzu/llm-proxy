@@ -12,11 +12,16 @@ from collections import OrderedDict
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-LOGS_ANTHROPIC = "logs_anthropic"
-LOGS_OPENAI = "logs_openai"
+from utils.log_paths import get_log_dir
 
 
 def register_log_routes(app: FastAPI) -> None:
+
+    def anthropic_log_dir() -> str:
+        return get_log_dir("logs_anthropic")
+
+    def openai_log_dir() -> str:
+        return get_log_dir("logs_openai")
 
     # ------------------------------------------------------------------ #
     #  Anthropic                                                           #
@@ -25,7 +30,7 @@ def register_log_routes(app: FastAPI) -> None:
     @app.get("/logs/anthropic/list")
     def logs_anthropic_list(min_messages: int = 10):
         result = []
-        pattern = os.path.join(LOGS_ANTHROPIC, "*-req.json")
+        pattern = os.path.join(anthropic_log_dir(), "*-req.json")
         for path in sorted(glob.glob(pattern), reverse=True):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -46,7 +51,7 @@ def register_log_routes(app: FastAPI) -> None:
     def logs_anthropic_file(filename: str):
         if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
-        path = os.path.join(LOGS_ANTHROPIC, filename)
+        path = os.path.join(anthropic_log_dir(), filename)
         if not os.path.isfile(path):
             return JSONResponse({"error": "file not found"}, status_code=404)
         with open(path, "r", encoding="utf-8") as f:
@@ -84,7 +89,7 @@ def register_log_routes(app: FastAPI) -> None:
                 c = "|".join(b.get("text") or b.get("id") or str(b)[:200] for b in c if isinstance(b, dict))
             return str(c)
 
-        req_files = sorted(glob.glob(os.path.join(LOGS_ANTHROPIC, "*-req.json")))
+        req_files = sorted(glob.glob(os.path.join(anthropic_log_dir(), "*-req.json")))
         entries = []
         for path in req_files:
             m = ts_pat.search(os.path.basename(path))
@@ -152,7 +157,7 @@ def register_log_routes(app: FastAPI) -> None:
     @app.get("/logs/openai/list")
     def logs_openai_list(min_messages: int = 10):
         result = []
-        pattern = os.path.join(LOGS_OPENAI, "*-req.json")
+        pattern = os.path.join(openai_log_dir(), "*-req.json")
         for path in sorted(glob.glob(pattern), reverse=True):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -173,7 +178,7 @@ def register_log_routes(app: FastAPI) -> None:
     def logs_openai_file(filename: str):
         if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
-        path = os.path.join(LOGS_OPENAI, filename)
+        path = os.path.join(openai_log_dir(), filename)
         if not os.path.isfile(path):
             return JSONResponse({"error": "file not found"}, status_code=404)
         with open(path, "r", encoding="utf-8") as f:
@@ -211,7 +216,7 @@ def register_log_routes(app: FastAPI) -> None:
                 pass
             return None
 
-        req_files = sorted(glob.glob(os.path.join(LOGS_OPENAI, "*-req.json")))
+        req_files = sorted(glob.glob(os.path.join(openai_log_dir(), "*-req.json")))
         entries = []
         for path in req_files:
             m = ts_pat.search(os.path.basename(path))

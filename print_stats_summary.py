@@ -14,6 +14,8 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 import pandas as pd
 
+from utils.log_paths import INDEX_FILENAME
+
 
 def check_date_range(file: Path, date_start: str, date_end: str):
     """判断日志是否符合筛选日期"""
@@ -128,13 +130,11 @@ def _collect_index_files(dirs=None) -> list[Path]:
     index_files: list[Path] = []
     search_dirs = _normalize_dirs(dirs)
     root_dirs = search_dirs or [
-        Path("logs_anthropic"),
-        Path("logs_openai"),
-        Path("logs_session_anthropic"),
-        Path("logs_session_openai"),
+        Path(d) for d in os.listdir()
+        if os.path.isdir(d) and d.startswith("logs_")
     ]
     for root in root_dirs:
-        root_index = root / "index.jsonl"
+        root_index = root / INDEX_FILENAME
         if root_index.is_file():
             index_files.append(root_index)
     return index_files
@@ -299,11 +299,11 @@ API 调用统计摘要
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个，支持空格分隔或逗号分隔），不指定则扫描当前目录下 logs_ 开头的目录")
     parser.add_argument("--model", "-m", type=str, default="", help="过滤模型，忽略大小写，多个模型用,拼接")
     parser.add_argument("--date_start", "-s", type=str, default="2000-01-01", help="过滤日期-开启，格式YYYY-MM-DD，默认2000-01-01")
     parser.add_argument("--date_end", "-e", type=str, default="9999-12-31", help="过滤日期-结束，格式YYYY-MM-DD，默认9999-12-31")
     parser.add_argument("--status", "-t", type=str, default="全部", help="过滤状态: 全部、成功、失败")
-    parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个，支持空格分隔或逗号分隔），不指定则扫描当前目录下 logs_ 开头的目录")
     args = parser.parse_args()
 
     # args.date_start = '2026-03-10'
