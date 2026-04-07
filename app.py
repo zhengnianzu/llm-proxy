@@ -6,6 +6,7 @@ import glob
 import httpx
 import asyncio
 import logging
+from pathlib import Path
 
 from datetime import datetime
 from dotenv import load_dotenv
@@ -1010,12 +1011,22 @@ async def openai_chat_completions(req: Request):
 
 @app.get("/")
 async def index_statistic():
-    return FileResponse(path="templates/statistic.html")
+    return FileResponse(path="templates/dashboard.html")
+
+
+@app.get("/query")
+async def query_page():
+    return FileResponse(path="templates/query.html")
 
 
 @app.get("/history")
 async def chat_viewer():
     return FileResponse(path="templates/chat-viewer.html")
+
+
+@app.get("/failures")
+async def failure_viewer():
+    return FileResponse(path="templates/failures.html")
 
 @app.get("/statistic")
 def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部'):
@@ -1024,9 +1035,14 @@ def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = 
 
 
 @app.get("/metrics/realtime")
-def metrics_realtime():
-    """返回最近 120 分钟的 RPM/TPM 数据"""
-    return JSONResponse(get_metrics_snapshot())
+def metrics_realtime(hours: int = 2):
+    """返回最近 N 小时的 RPM/TPM 数据，默认 2 小时。"""
+    safe_hours = max(1, min(hours, 24))
+    snapshot = get_metrics_snapshot()
+    keep = safe_hours * 60
+    if len(snapshot) > keep:
+        snapshot = snapshot[-keep:]
+    return JSONResponse(snapshot)
 
 
 @app.get("/metrics/index-stats")
@@ -1044,9 +1060,80 @@ def index_stats():
 
 
 @app.get("/metrics/rate-history")
-def rate_history():
-    """返回最近 60 分钟的有效率时序数据。"""
-    return JSONResponse(get_rate_history())
+def rate_history(hours: int = 2):
+    """返回最近 N 小时的有效率时序数据。"""
+    safe_hours = max(1, min(hours, 24))
+    history = get_rate_history()
+    keep = safe_hours * 60
+    if len(history) > keep:
+        history = history[-keep:]
+    return JSONResponse(history)
+
+
+@app.get("/logs/debug/list")
+def logs_debug_list(limit: int = 200, keyword: str = ""):
+    root = Path(LOGS_DEBUG)
+    if not root.exists():
+        return JSONResponse([])
+
+    safe_limit = max(1, min(limit, 1000))
+    keyword_lower = keyword.strip().lower()
+    items = []
+    pattern = re.compile(r"(?P<ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_attempt(?P<attempt>\d+)_(?P<payload>.+)\.txt$")
+
+    for path in sorted(root.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True):
+        name = path.name
+        match = pattern.match(name)
+        model = ""
+        reason = ""
+        attempt = 0
+        created_at = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        if match:
+            try:
+                created_at = datetime.strptime(match.group("ts"), "%Y-%m-%d_%H-%M-%S").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+            attempt = int(match.group("attempt"))
+            payload = match.group("payload")
+            if "_" in payload:
+                model, reason = payload.rsplit("_", 1)
+            else:
+                model = payload
+
+        if keyword_lower and keyword_lower not in name.lower() and keyword_lower not in model.lower() and keyword_lower not in reason.lower():
+            continue
+
+        items.append({
+            "filename": name,
+            "created_at": created_at,
+            "attempt": attempt,
+            "model": model,
+            "reason": reason,
+            "size": path.stat().st_size,
+        })
+        if len(items) >= safe_limit:
+            break
+
+    return JSONResponse(items)
+
+
+@app.get("/logs/debug/file")
+def logs_debug_file(filename: str):
+    if "/" in filename or "\\" in filename or ".." in filename or not filename.endswith(".txt"):
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+    path = Path(LOGS_DEBUG) / filename
+    if not path.is_file():
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception as ex:
+        return JSONResponse({"error": f"read failed: {ex}"}, status_code=500)
+    return JSONResponse({
+        "filename": filename,
+        "content": content,
+        "size": path.stat().st_size,
+        "updated_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+    })
 
 
 register_log_routes(app)

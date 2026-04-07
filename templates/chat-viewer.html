@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Viewer</title>
+    <title>服务代理监控系统 - 对话历史记录</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -15,6 +15,26 @@
             display: flex;
             flex-direction: column;
         }
+        .topbar {
+            background: linear-gradient(135deg, #0f172a, #1d4ed8);
+            color: #fff;
+            padding: 18px 20px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .brand-title { font-size: 28px; font-weight: 700; margin: 0; }
+        .brand-subtitle { color: rgba(255,255,255,.8); font-size: 13px; margin-top: 4px; }
+        .nav-pills-wrap { display: flex; gap: 10px; flex-wrap: wrap; }
+        .nav-pill {
+            display: inline-flex; align-items: center; justify-content: center;
+            padding: 8px 14px; border-radius: 999px; text-decoration: none;
+            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 13px;
+            border: 1px solid rgba(255,255,255,.14);
+        }
+        .nav-pill.active { background: #fff; color: #0f172a; }
 
         /* ========= Header ========= */
         .header {
@@ -268,8 +288,21 @@
 </head>
 <body>
 
+<div class="topbar">
+    <div>
+        <h1 class="brand-title">服务代理监控系统</h1>
+        <div class="brand-subtitle">浏览 Anthropic / OpenAI 对话历史记录</div>
+    </div>
+    <div class="nav-pills-wrap">
+        <a class="nav-pill" href="/">监控总览</a>
+        <a class="nav-pill" href="/query">查询统计</a>
+        <a class="nav-pill active" href="/history">对话历史记录</a>
+        <a class="nav-pill" href="/failures">失败历史记录</a>
+    </div>
+</div>
+
 <div class="header">
-    <h1>💬 Chat Viewer</h1>
+    <h1>对话历史记录</h1>
     <div class="header-right">
         <span class="min-msg-label">文件夹</span>
         <select class="folder-select" id="folderSelect" onchange="loadFileList()">
