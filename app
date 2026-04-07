@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_FILE = BASE_DIR / "app.py"
@@ -126,7 +127,7 @@ def get_api_key_suffix(env_values: dict) -> str:
     return first[-4:]
 
 
-def resolve_env_path(source_env: str | None) -> Path:
+def resolve_env_path(source_env: Optional[str]) -> Path:
     env_name = source_env or DEFAULT_ENV
     env_path = Path(env_name)
     if not env_path.is_absolute():
@@ -156,7 +157,7 @@ def get_selected_env(args: argparse.Namespace, state: dict) -> str:
     return args.env_file or state.get("source_env") or DEFAULT_ENV
 
 
-def is_pid_running(pid: int | None) -> bool:
+def is_pid_running(pid: Optional[int]) -> bool:
     if not pid:
         return False
     try:
@@ -166,7 +167,7 @@ def is_pid_running(pid: int | None) -> bool:
         return False
 
 
-def read_pid(path: Path) -> int | None:
+def read_pid(path: Path) -> Optional[int]:
     try:
         return int(path.read_text(encoding="utf-8").strip())
     except Exception:
