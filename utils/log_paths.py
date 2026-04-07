@@ -28,7 +28,19 @@ def get_upstream_key_prefix() -> str:
     return prefix or "nokey"
 
 
+def get_log_task_tag() -> str:
+    raw = (os.getenv("LOG_TASK_TAG") or "").strip()
+    if not raw:
+        return ""
+    tag = re.sub(r"[^A-Za-z0-9_-]", "-", raw)
+    tag = re.sub(r"-+", "-", tag).strip("-_")
+    return tag
+
+
 def get_log_dir(base_name: str) -> str:
+    task_tag = get_log_task_tag()
+    if task_tag:
+        return f"{base_name}_{task_tag}_{get_upstream_key_prefix()}_{STARTUP_DATE_TAG}"
     return f"{base_name}_{get_upstream_key_prefix()}_{STARTUP_DATE_TAG}"
 
 

@@ -42,6 +42,35 @@ HTTPS_PROXY=http://华为账号:华为密码@proxyhk.huawei.com:8080
 NO_PROXY=localhost,127.0.0.1,*.huawei.com,*.local,*.lan,10.70.85.106
 ```
 
+如果你想让日志目录能区分不同 `.env` 启动的实例，不需要手动配置额外变量。
+使用 `./app start --env .env.xxx` 时，CLI 会自动把 env 文件名转换成启动时环境变量 `LOG_TASK_TAG`。
+
+例如：
+
+```text
+./app start --env .env.prod
+```
+
+会自动生成类似：
+
+```text
+LOG_TASK_TAG=env-prod
+```
+
+因此日志目录会从：
+
+```text
+logs_anthropic_wy92_260407
+```
+
+变成：
+
+```text
+logs_anthropic_env-prod_wy92_260407
+```
+
+如果不是通过 `./app` CLI 启动，而是直接 `python app.py`，那就不会自动带这个标记，目录名仍保持原样。
+
 ## 环境
 
 ```shell

@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+import re
 
 BASE_DIR = Path(__file__).resolve().parent
 APP_FILE = BASE_DIR / "app.py"
@@ -153,6 +154,13 @@ def get_service_key(env_path: Path) -> str:
         return str(env_path)
 
 
+def get_service_slug(service_key: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", service_key)
+    slug = slug.replace("/", "-").replace("\\", "-").replace(".", "-")
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "default"
+
+
 def get_selected_env(args: argparse.Namespace, state: dict) -> str:
     return args.env_file or state.get("source_env") or DEFAULT_ENV
 
@@ -217,8 +225,11 @@ def cmd_start(args: argparse.Namespace) -> int:
     api_key_suffix = get_api_key_suffix(env_values)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
     services = state.setdefault("services", {})
     service = services.setdefault(service_key, {})
+    pid_file = LOG_DIR / f"app-{service_slug}-port{port}.pid"
+    log_file = LOG_DIR / f"app-{service_slug}-port{port}.log"
 
     pid = read_pid(pid_file)
     if is_pid_running(pid):
@@ -229,6 +240,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     child_env = os.environ.copy()
     child_env.update(env_values)
     child_env["ENV_FILE"] = str(env_path)
+    child_env["LOG_TASK_TAG"] = service_slug
 
     with log_file.open("ab") as log_fp:
         proc = subprocess.Popen(
@@ -269,9 +281,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
     state["source_env"] = get_selected_env(args, state)
     env_path = resolve_env_path(state["source_env"])
     service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
     service = (state.get("services") or {}).get(service_key, {})
     pid = service.get("pid")
     pid_file = service.get("pid_file")
+    if not pid_file and service.get("port"):
+        pid_file = os.path.relpath(LOG_DIR / f"app-{service_slug}-port{service.get('port')}.pid", BASE_DIR)
     if pid_file:
         pid_from_file = read_pid(BASE_DIR / pid_file)
         if pid_from_file:
@@ -318,9 +333,14 @@ def cmd_logs(args: argparse.Namespace) -> int:
     state["source_env"] = get_selected_env(args, state)
     env_path = resolve_env_path(state["source_env"])
     service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
     service = (state.get("services") or {}).get(service_key, {})
     log_file_rel = service.get("log_file")
-    log_file = BASE_DIR / log_file_rel if log_file_rel else state_runtime(state)[5]
+    if log_file_rel:
+        log_file = BASE_DIR / log_file_rel
+    else:
+        _, _, _, port, _, _ = state_runtime(state)
+        log_file = LOG_DIR / f"app-{service_slug}-port{port}.log"
 
     if not log_file.exists():
         eprint(f"[app] log file not found: {log_file}")
