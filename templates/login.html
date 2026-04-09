@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录监控后台</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --bg-1: #0f172a;
+            --bg-2: #172554;
+            --panel: rgba(255, 255, 255, 0.96);
+            --text: #0f172a;
+            --muted: #64748b;
+            --accent: #2563eb;
+            --danger-bg: #fef2f2;
+            --danger-border: #fecaca;
+            --danger-text: #b91c1c;
+        }
+        body {
+            min-height: 100vh;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background:
+                radial-gradient(circle at top left, rgba(96, 165, 250, 0.35), transparent 32%),
+                radial-gradient(circle at bottom right, rgba(45, 212, 191, 0.28), transparent 28%),
+                linear-gradient(135deg, var(--bg-1), var(--bg-2));
+            color: var(--text);
+        }
+        .login-shell {
+            width: min(92vw, 920px);
+            display: grid;
+            grid-template-columns: 1.1fr 0.9fr;
+            overflow: hidden;
+            border-radius: 28px;
+            background: rgba(15, 23, 42, 0.18);
+            box-shadow: 0 28px 90px rgba(15, 23, 42, 0.35);
+            backdrop-filter: blur(10px);
+        }
+        .login-copy {
+            padding: 44px 40px;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            background: linear-gradient(180deg, rgba(37, 99, 235, 0.18), rgba(15, 23, 42, 0.08));
+        }
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.76);
+        }
+        .eyebrow::before {
+            content: "";
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: #38bdf8;
+            box-shadow: 0 0 18px rgba(56, 189, 248, 0.72);
+        }
+        .headline {
+            margin: 18px 0 12px;
+            font-size: clamp(2rem, 4vw, 3.2rem);
+            line-height: 1.02;
+            font-weight: 700;
+        }
+        .copy {
+            max-width: 22rem;
+            color: rgba(255, 255, 255, 0.78);
+            font-size: 1rem;
+            line-height: 1.7;
+        }
+        .login-panel {
+            padding: 36px 32px;
+            background: var(--panel);
+        }
+        .panel-title {
+            font-size: 1.55rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .panel-subtitle {
+            color: var(--muted);
+            margin-bottom: 24px;
+            font-size: 0.95rem;
+        }
+        .form-label {
+            font-size: 0.84rem;
+            color: #334155;
+            font-weight: 600;
+        }
+        .form-control {
+            border-radius: 14px;
+            min-height: 48px;
+            border-color: #dbe3f0;
+        }
+        .form-control:focus {
+            border-color: #93c5fd;
+            box-shadow: 0 0 0 0.25rem rgba(37, 99, 235, 0.12);
+        }
+        .btn-login {
+            width: 100%;
+            min-height: 48px;
+            border: 0;
+            border-radius: 14px;
+            font-weight: 700;
+            color: #fff;
+            background: linear-gradient(135deg, #2563eb, #0891b2);
+            box-shadow: 0 14px 30px rgba(37, 99, 235, 0.22);
+        }
+        .error-box {
+            margin-bottom: 18px;
+            padding: 12px 14px;
+            border-radius: 14px;
+            background: var(--danger-bg);
+            border: 1px solid var(--danger-border);
+            color: var(--danger-text);
+            font-size: 0.92rem;
+        }
+        .tips {
+            margin-top: 14px;
+            color: var(--muted);
+            font-size: 0.88rem;
+            line-height: 1.65;
+        }
+        @media (max-width: 860px) {
+            .login-shell {
+                grid-template-columns: 1fr;
+            }
+            .login-copy {
+                padding: 32px 28px 20px;
+            }
+            .login-panel {
+                padding: 28px;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="login-shell">
+    <section class="login-copy">
+        <div>
+            <div class="eyebrow">Monitor Access</div>
+            <h1 class="headline">监控平台登录</h1>
+            <p class="copy">请输入账号和密码继续访问监控后台。</p>
+        </div>
+    </section>
+
+    <section class="login-panel">
+        <div class="panel-title">监控后台登录</div>
+        <div class="panel-subtitle">通过 Session Cookie 维持登录状态，不影响现有 API Key 代理接口。</div>
+
+        {% if error %}
+        <div class="error-box">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="/login">
+            <input type="hidden" name="next" value="{{ next_path }}">
+
+            <div class="mb-3">
+                <label class="form-label" for="username">用户名</label>
+                <input id="username" name="username" type="text" class="form-control" autocomplete="username" required autofocus>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label" for="password">密码</label>
+                <input id="password" name="password" type="password" class="form-control" autocomplete="current-password" required>
+            </div>
+
+            <button type="submit" class="btn btn-login">登录</button>
+        </form>
+
+        <div class="tips">
+            建议同时设置 `MONITOR_COOKIE_SECURE=true` 并通过 HTTPS/反向代理暴露服务。
+        </div>
+    </section>
+</div>
+</body>
+</html>

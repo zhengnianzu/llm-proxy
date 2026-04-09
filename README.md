@@ -35,6 +35,16 @@ SSL_VERIFY=false
 BAN_EXPLORE=false
 BAN_STREAM=false
 
+# 监控后台登录保护
+# 配置这两个值后，会保护 /、/query、/history、/failures、/statistic、/metrics/*、/logs/*
+MONITOR_USERNAME=admin
+MONITOR_PASSWORD=请改成强密码
+
+# Session Cookie 配置
+MONITOR_SESSION_SECRET=请改成一串随机长字符串
+MONITOR_COOKIE_SECURE=false
+MONITOR_SESSION_MAX_AGE=43200
+
 # 代理相关
 TRUST_ENV=true  # 为true时使用下面全局环境变量，密码特殊字符记得转码
 HTTP_PROXY=http://华为账号:华为密码@proxyhk.huawei.com:8080
@@ -70,6 +80,42 @@ logs_anthropic_env-prod_wy92_260407
 ```
 
 如果不是通过 `./app` CLI 启动，而是直接 `python app.py`，那就不会自动带这个标记，目录名仍保持原样。
+
+### 监控后台登录保护
+
+如果这个服务会被外网或其他人访问，建议开启监控后台登录保护。
+
+启用方式：
+
+```text
+MONITOR_USERNAME=你的用户名
+MONITOR_PASSWORD=你的密码
+MONITOR_SESSION_SECRET=随机长字符串
+```
+
+启用后：
+
+```text
+1. 访问 /、/query、/history、/failures 会先跳转到 /login
+2. /statistic、/metrics/*、/logs/*、/docs、/redoc、/openapi.json 也会被保护
+3. /v1/messages 和 /chat/completions 仍然继续使用原来的 API_KEY 鉴权，不受这套网页登录影响
+```
+
+可选配置：
+
+```text
+MONITOR_COOKIE_SECURE=true      # 通过 HTTPS 暴露时建议开启
+MONITOR_SESSION_MAX_AGE=43200   # 登录态有效期，单位秒，默认 12 小时
+MONITOR_AUTH_ENABLED=true       # 显式开启；默认情况下只要配置了用户名和密码就会自动开启
+```
+
+安全建议：
+
+```text
+1. 不要只依赖登录页，最好同时加 Nginx/Caddy 反向代理和 HTTPS
+2. 对公网暴露时，建议再配 IP 白名单
+3. MONITOR_SESSION_SECRET 不要和弱口令一起使用，更不要直接提交到仓库
+```
 
 ## 环境
 
@@ -229,4 +275,8 @@ status: 过滤状态: 全部、成功、失败
 - 查询统计: `http://127.0.0.1:4000/query`
 - 对话历史记录: `http://127.0.0.1:4000/history`
 - 失败历史记录: `http://127.0.0.1:4000/failures`
+
+如果开启了监控后台登录保护，上面这些页面会先跳转到：
+
+- 登录页: `http://127.0.0.1:4000/login`
 ```

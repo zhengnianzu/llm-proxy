@@ -4,17 +4,22 @@ import json
 import time
 import glob
 import httpx
+import hmac
 import asyncio
 import logging
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Any, Dict, List, Optional, AsyncIterator
 from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
 from print_stats_summary import statistic_tokens
 from auth import validate_api_key
@@ -33,6 +38,26 @@ TRUST_ENV = os.getenv("TRUST_ENV", "true").lower() == "true"
 # 全局默认：重试次数（不从环境变量读取）
 MAX_RETRIES = 20
 
+MONITOR_AUTH_EXACT_PATHS = {
+    "/",
+    "/query",
+    "/history",
+    "/failures",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+}
+MONITOR_AUTH_PREFIX_PATHS = (
+    "/statistic",
+    "/metrics",
+    "/logs",
+)
+MONITOR_AUTH_PUBLIC_PATHS = {
+    "/hi",
+    "/login",
+    "/logout",
+}
+
 LOGS_SESSION_ANTHROPIC = get_log_dir("logs_session_anthropic")
 LOGS_ANTHROPIC = get_log_dir("logs_anthropic")
 LOGS_SESSION_OPENAI = get_log_dir("logs_session_openai")
@@ -46,7 +71,39 @@ _valid_count: int = 0   # 有效响应数（获得有效 Anthropic 内容的首�
 
 app = FastAPI(title="Anthropic+OpenAI Proxy (FastAPI)")
 
+class MonitorAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not _is_monitor_auth_enabled() or not _is_monitor_path(request.url.path):
+            return await call_next(request)
+
+        if _is_monitor_authenticated(request):
+            return await call_next(request)
+
+        if request.url.path in MONITOR_AUTH_EXACT_PATHS:
+            next_path = _normalize_next_path(request.url.path)
+            if request.url.query:
+                next_path = f"{next_path}?{request.url.query}"
+            return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
+
+        return JSONResponse(
+            {"detail": "Monitor login required"},
+            status_code=401,
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+app.add_middleware(MonitorAuthMiddleware)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("MONITOR_SESSION_SECRET") or os.getenv("API_KEY") or "change-this-monitor-session-secret",
+    session_cookie="monitor_session",
+    same_site="lax",
+    https_only=os.getenv("MONITOR_COOKIE_SECURE", "false").lower() == "true",
+    max_age=max(300, int(os.getenv("MONITOR_SESSION_MAX_AGE", "43200"))),
+)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 # templates = Jinja2Templates(directory="api/templates")
 
@@ -58,6 +115,48 @@ async def get_x_auth_token(request) -> str:
             ack = ack.split('Bearer ')[1].strip()
             return ack
     return ''
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_monitor_auth_enabled() -> bool:
+    explicit = os.getenv("MONITOR_AUTH_ENABLED")
+    if explicit is not None:
+        return _env_enabled("MONITOR_AUTH_ENABLED")
+    return bool(os.getenv("MONITOR_USERNAME", "").strip() and os.getenv("MONITOR_PASSWORD", "").strip())
+
+
+def _is_monitor_login_valid(username: str, password: str) -> bool:
+    expected_user = os.getenv("MONITOR_USERNAME", "").strip()
+    expected_password = os.getenv("MONITOR_PASSWORD", "")
+    if not expected_user or not expected_password:
+        return False
+    return hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)
+
+
+def _normalize_next_path(next_path: str) -> str:
+    if not next_path or not next_path.startswith("/") or next_path.startswith("//"):
+        return "/"
+    if next_path in {"/login", "/logout"}:
+        return "/"
+    return next_path
+
+
+def _is_monitor_path(path: str) -> bool:
+    if path in MONITOR_AUTH_PUBLIC_PATHS or path.startswith("/static/"):
+        return False
+    if path in MONITOR_AUTH_EXACT_PATHS:
+        return True
+    return any(path == prefix or path.startswith(prefix + "/") for prefix in MONITOR_AUTH_PREFIX_PATHS)
+
+
+def _is_monitor_authenticated(request: Request) -> bool:
+    return bool(request.session.get("monitor_authenticated"))
 
 
 def _resolve_model_name(raw_model: Any) -> str:
@@ -199,6 +298,58 @@ def _has_valid_sse_content(chunks: list) -> bool:
 @app.get("/hi")
 async def health():
     return {"LLM_PROXY": "hello !!!"}
+
+
+@app.get("/login")
+async def monitor_login_page(request: Request, next: str = "/"):
+    if not _is_monitor_auth_enabled():
+        return RedirectResponse(url="/", status_code=303)
+    if _is_monitor_authenticated(request):
+        return RedirectResponse(url=_normalize_next_path(next), status_code=303)
+    return templates.TemplateResponse(
+        "login.html",
+        {
+            "request": request,
+            "next_path": _normalize_next_path(next),
+            "error": "",
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/login")
+async def monitor_login_submit(request: Request):
+    if not _is_monitor_auth_enabled():
+        return RedirectResponse(url="/", status_code=303)
+
+    body_bytes = await request.body()
+    form = parse_qs(body_bytes.decode("utf-8"), keep_blank_values=True)
+    username = (form.get("username", [""])[0]).strip()
+    password = form.get("password", [""])[0]
+    next_path = _normalize_next_path(form.get("next", ["/"])[0])
+
+    if _is_monitor_login_valid(username, password):
+        request.session.clear()
+        request.session["monitor_authenticated"] = True
+        request.session["monitor_user"] = username
+        return RedirectResponse(url=next_path, status_code=303)
+
+    return templates.TemplateResponse(
+        "login.html",
+        {
+            "request": request,
+            "next_path": next_path,
+            "error": "用户名或密码错误",
+        },
+        status_code=401,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/logout")
+async def monitor_logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
 
 
 # ---------- Anthropic Messages ----------
