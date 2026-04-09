@@ -6,3 +6,5 @@ anthropic
 dotenv
 uvicorn
 openai
+jinja2
+itsdangerous

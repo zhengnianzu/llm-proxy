@@ -31,7 +31,7 @@ from utils.metrics import (
     load_metrics_from_disk,
     get_metrics_storage_info,
 )
-from utils.log_paths import build_index_path, get_log_dir
+from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix
 from utils.log_routes import register_log_routes
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
@@ -69,7 +69,24 @@ LOGS_SESSION_ANTHROPIC = get_log_dir("logs_session_anthropic")
 LOGS_ANTHROPIC = get_log_dir("logs_anthropic")
 LOGS_SESSION_OPENAI = get_log_dir("logs_session_openai")
 LOGS_OPENAI = get_log_dir("logs_openai")
-LOGS_DEBUG = os.path.join("logs", "debug")
+
+
+def _build_debug_dir() -> str:
+    parts = []
+    task_tag = get_log_task_tag()
+    if task_tag:
+        parts.append(task_tag)
+    port = (os.getenv("PROXY_PORT") or "").strip()
+    if port:
+        parts.append(f"port{port}")
+    upstream = get_upstream_key_prefix()
+    if upstream:
+        parts.append(upstream)
+    suffix = "-".join(parts) if parts else "default"
+    return os.path.join("logs", f"debug-{suffix}")
+
+
+LOGS_DEBUG = _build_debug_dir()
 
 # 请求计数（启动时从 index.jsonl 加载，运行时在内存中累计）
 _first_count: int = 0   # 首次请求数（每次 endpoint 调用 = 1）
@@ -1215,6 +1232,7 @@ def index_stats():
         "success_rate": round(rate, 4),
         "index_file": _build_index_path(LOGS_ANTHROPIC),
         "session_index_file": _build_index_path(LOGS_SESSION_ANTHROPIC),
+        "debug_dir": LOGS_DEBUG,
         "rpm_log": metrics_info["rpm_log"],
         "rate_log": metrics_info["rate_log"],
         "metrics_window_minutes": metrics_info["metrics_window_minutes"],
