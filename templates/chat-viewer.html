@@ -315,6 +315,7 @@
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="10" min="1" />
         <button class="btn btn-green" onclick="loadFileList()">刷新列表</button>
+        <button class="btn btn-green" onclick="refreshIncremental()">增量刷新</button>
         <div class="upload-wrapper">
             <input type="file" id="fileInput" accept=".json" />
             <label for="fileInput" class="btn btn-indigo">上传本地文件</label>
@@ -355,16 +356,20 @@ const chatPanel    = document.getElementById('chatPanel');
 const sidebarTitle = document.getElementById('sidebarTitle');
 let activeItem = null;
 let aggChains = [];   // cache for aggregate mode
+let activeSelection = null;
 
 function currentFolder() {
     return document.getElementById('folderSelect').value;
 }
 
-async function loadFileList() {
+async function loadFileList(options = {}) {
+    const preserveSelection = !!options.preserveSelection;
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
+    const previousSelection = preserveSelection ? activeSelection : null;
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     activeItem = null;
+    if (!preserveSelection) activeSelection = null;
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg') {
         // ---- 聚合模式 ----
@@ -379,6 +384,7 @@ async function loadFileList() {
                 return;
             }
             fileListEl.innerHTML = '';
+            let restored = false;
             aggChains.forEach((chain, idx) => {
                 const el = document.createElement('div');
                 el.className = 'file-item';
@@ -424,7 +430,14 @@ async function loadFileList() {
                 `;
                 el.addEventListener('click', () => selectAggChain(idx, el));
                 fileListEl.appendChild(el);
+                if (previousSelection && previousSelection.type === 'agg' && previousSelection.folder === folder && previousSelection.chainId === chain.chain_id) {
+                    restored = true;
+                    selectAggChain(idx, el, { silentLoading: true });
+                }
             });
+            if (previousSelection && !restored) {
+                activeSelection = null;
+            }
         } catch(e) {
             fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
         }
@@ -441,6 +454,7 @@ async function loadFileList() {
                 return;
             }
             fileListEl.innerHTML = '';
+            let restored = false;
             files.forEach(item => {
                 const el = document.createElement('div');
                 el.className = 'file-item';
@@ -451,26 +465,41 @@ async function loadFileList() {
                 `;
                 el.addEventListener('click', () => selectFile(item.filename, el, apiFolder));
                 fileListEl.appendChild(el);
+                if (previousSelection && previousSelection.type === 'file' && previousSelection.folder === apiFolder && previousSelection.filename === item.filename) {
+                    restored = true;
+                    selectFile(item.filename, el, apiFolder, { silentLoading: true });
+                }
             });
+            if (previousSelection && !restored) {
+                activeSelection = null;
+            }
         } catch(e) {
             fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
         }
     }
 }
 
-function selectAggChain(idx, el) {
+function refreshIncremental() {
+    loadFileList({ preserveSelection: true });
+}
+
+function selectAggChain(idx, el, options = {}) {
     if (activeItem) activeItem.classList.remove('active');
     el.classList.add('active');
     activeItem = el;
     const chain = aggChains[idx];
+    activeSelection = { type: 'agg', folder: currentFolder(), chainId: chain.chain_id };
     renderMessages(chain, `聚合链 #${chain.chain_id}  (${chain.file_count} 个文件)`);
 }
 
-async function selectFile(filename, el, folder) {
+async function selectFile(filename, el, folder, options = {}) {
     if (activeItem) activeItem.classList.remove('active');
     el.classList.add('active');
     activeItem = el;
-    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+    activeSelection = { type: 'file', folder, filename };
+    if (!options.silentLoading) {
+        chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+    }
     try {
         const res = await fetch(`/logs/${folder}/file?filename=${encodeURIComponent(filename)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -489,6 +518,7 @@ document.getElementById('fileInput').addEventListener('change', function(e) {
         try {
             renderMessages(JSON.parse(ev.target.result), file.name);
             if (activeItem) { activeItem.classList.remove('active'); activeItem = null; }
+            activeSelection = null;
         } catch(err) { showError('JSON 解析失败：' + err.message); }
     };
     reader.onerror = () => showError('文件读取失败');
