@@ -23,7 +23,14 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from print_stats_summary import statistic_tokens
 from auth import validate_api_key
-from utils.metrics import record_request, record_validity, get_metrics_snapshot, get_rate_history, load_metrics_from_disk
+from utils.metrics import (
+    record_request,
+    record_validity,
+    get_metrics_snapshot,
+    get_rate_history,
+    load_metrics_from_disk,
+    get_metrics_storage_info,
+)
 from utils.log_paths import build_index_path, get_log_dir
 from utils.log_routes import register_log_routes
 
@@ -1200,6 +1207,7 @@ def metrics_realtime(hours: int = 2):
 def index_stats():
     """返回 Anthropic 请求的首次/总体/有效次数及成功率。"""
     rate = (_valid_count / _total_count) if _total_count > 0 else 0.0
+    metrics_info = get_metrics_storage_info()
     return JSONResponse({
         "first_count": _first_count,
         "total_count": _total_count,
@@ -1207,6 +1215,10 @@ def index_stats():
         "success_rate": round(rate, 4),
         "index_file": _build_index_path(LOGS_ANTHROPIC),
         "session_index_file": _build_index_path(LOGS_SESSION_ANTHROPIC),
+        "rpm_log": metrics_info["rpm_log"],
+        "rate_log": metrics_info["rate_log"],
+        "metrics_window_minutes": metrics_info["metrics_window_minutes"],
+        "rate_window_minutes": metrics_info["rate_window_minutes"],
     })
 
 

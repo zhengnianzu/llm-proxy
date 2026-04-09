@@ -1,8 +1,8 @@
 """
-实时指标：内存环形缓冲，保留最近 120 分钟的每分钟数据
+实时指标：内存环形缓冲，默认保留最近 24 小时的每分钟数据
 每个 bucket: {"ts": "2026-03-19T10:05", "rpm": N, "tpm_in": N, "tpm_out": N, "errors": N}
 
-有效率时序：独立环形缓冲，保留最近 60 分钟的每分钟有效率数据
+有效率时序：独立环形缓冲，默认保留最近 24 小时的每分钟有效率数据
 每个 bucket: {"ts": "...", "first": N, "valid": N, "rate": 0.xx}
 """
 
@@ -12,18 +12,40 @@ import time
 import threading
 from collections import deque
 
+from utils.log_paths import get_log_task_tag, get_upstream_key_prefix
+
 _METRICS_LOCK = threading.Lock()
-_METRICS_WINDOW = 120  # 保留分钟数
+_MAX_UI_HOURS = 24
+_DEFAULT_WINDOW = _MAX_UI_HOURS * 60
+_METRICS_WINDOW = max(int(os.getenv("METRICS_WINDOW_MINUTES", str(_DEFAULT_WINDOW))), _DEFAULT_WINDOW)
 
 _metrics_buckets: deque = deque(maxlen=_METRICS_WINDOW)
 _current_bucket: dict = {}
 
-_RATE_WINDOW = 60  # 有效率保留分钟数
+_RATE_WINDOW = max(int(os.getenv("RATE_WINDOW_MINUTES", str(_DEFAULT_WINDOW))), _DEFAULT_WINDOW)
 _rate_buckets: deque = deque(maxlen=_RATE_WINDOW)
 _current_rate_bucket: dict = {}
 
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
-_RPM_LOG = os.path.join(_LOG_DIR, "rpm.log")
+
+
+def _service_metrics_suffix() -> str:
+    parts = []
+    task_tag = get_log_task_tag()
+    if task_tag:
+        parts.append(task_tag)
+    port = (os.getenv("PROXY_PORT") or "").strip()
+    if port:
+        parts.append(f"port{port}")
+    upstream = get_upstream_key_prefix()
+    if upstream:
+        parts.append(upstream)
+    return "-".join(parts) if parts else "default"
+
+
+_SERVICE_SUFFIX = _service_metrics_suffix()
+_RPM_LOG = os.path.join(_LOG_DIR, f"rpm-{_SERVICE_SUFFIX}.log")
+_RATE_LOG = os.path.join(_LOG_DIR, f"rate-{_SERVICE_SUFFIX}.log")
 
 
 def _flush_to_disk(bucket: dict, path: str):
@@ -36,13 +58,12 @@ def _flush_to_disk(bucket: dict, path: str):
         pass
 
 
-def load_metrics_from_disk():
-    """启动时从 rpm.log 加载历史数据，仅保留窗口内的数据。"""
-    if not os.path.exists(_RPM_LOG):
+def _load_buckets_from_disk(path: str, window: int, target: deque):
+    if not os.path.exists(path):
         return
-    cutoff_key = time.strftime("%Y-%m-%dT%H:%M", time.localtime(time.time() - _METRICS_WINDOW * 60))
+    cutoff_key = time.strftime("%Y-%m-%dT%H:%M", time.localtime(time.time() - window * 60))
     try:
-        with open(_RPM_LOG, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -52,9 +73,15 @@ def load_metrics_from_disk():
                 except Exception:
                     continue
                 if bucket.get("ts", "") >= cutoff_key:
-                    _metrics_buckets.append(bucket)
+                    target.append(bucket)
     except Exception:
         pass
+
+
+def load_metrics_from_disk():
+    """启动时从当前服务自己的 metrics 文件加载历史数据，仅保留窗口内的数据。"""
+    _load_buckets_from_disk(_RPM_LOG, _METRICS_WINDOW, _metrics_buckets)
+    _load_buckets_from_disk(_RATE_LOG, _RATE_WINDOW, _rate_buckets)
 
 
 def _bucket_key() -> str:
@@ -91,7 +118,9 @@ def record_validity(valid: bool, model: str = ""):
         global _current_rate_bucket
         if _current_rate_bucket.get("ts") != key:
             if _current_rate_bucket:
-                _rate_buckets.append(dict(_current_rate_bucket))
+                completed = dict(_current_rate_bucket)
+                _rate_buckets.append(completed)
+                _flush_to_disk(completed, _RATE_LOG)
             _current_rate_bucket = {"ts": key, "first": 0, "valid": 0, "rate": 0.0, "models": {}}
         _current_rate_bucket["first"] += 1
         if valid:
@@ -115,9 +144,19 @@ def get_metrics_snapshot() -> list:
 
 
 def get_rate_history() -> list:
-    """返回最近 60 分钟的有效率时序快照"""
+    """返回有效率时序快照。"""
     with _METRICS_LOCK:
         result = list(_rate_buckets)
         if _current_rate_bucket:
             result.append(dict(_current_rate_bucket))
     return result
+
+
+def get_metrics_storage_info() -> dict:
+    return {
+        "rpm_log": _RPM_LOG,
+        "rate_log": _RATE_LOG,
+        "service_suffix": _SERVICE_SUFFIX,
+        "metrics_window_minutes": _METRICS_WINDOW,
+        "rate_window_minutes": _RATE_WINDOW,
+    }
