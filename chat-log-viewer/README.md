@@ -84,53 +84,62 @@ chat-log-viewer/
 # 1. 加载 shell 环境（在项目根目录执行）
 source env.sh
 
-# 2. 设置默认配置（只需执行一次）
-server config configs/server.yaml
-sync config configs/sync_config.yaml
-client config configs/client.yaml
+# 2. 注册默认实例（只需执行一次）
+server config configs/server.yaml --name main
+sync config configs/sync_config.yaml --name sync-main
+client config configs/client.yaml --name client-main
 
 # 3. 使用简化命令管理服务
 server start
 server status
 server logs -n 100
-server stop
+server list
 
 sync start
 sync status
 sync logs -n 100
-sync stop
+sync list
 
 client start
 client status
 client logs -n 100
-client stop
+client list
+
+# 4. 全局查看所有实例
+cli list
 ```
 
 **完整用法：**
 
 ```bash
 # 方式 1：使用 shell 函数（需先 source env.sh）
-server start [--config configs/server.yaml]
-server stop
-server restart
-server status
-server logs [--lines 50]
-server config <path>           # 设置默认配置
-server config --clear          # 清除默认配置
+server start [--config configs/server.yaml] [--name main]
+server stop [--config ... | --name main]
+server restart [--config ... | --name main]
+server status [--config ... | --name main]
+server logs [--lines 50] [--follow] [--config ... | --name main]
+server list [--running]
+server config <path> [--name main]    # 注册/更新实例，并设为默认
+server config --clear                 # 清除默认实例
+server config --clear --name main     # 删除实例记录
 
-sync start [--config configs/sync_config.yaml] [--once]
-sync stop
-sync restart
-sync status
-sync logs [--lines 50]
-sync config <path>
+sync start [--config configs/sync_config.yaml] [--name sync-main] [--once]
+sync stop [--config ... | --name sync-main]
+sync restart [--config ... | --name sync-main]
+sync status [--config ... | --name sync-main]
+sync logs [--lines 50] [--follow] [--config ... | --name sync-main]
+sync list [--running]
+sync config <path> [--name sync-main]
 
-client start [--config configs/client.yaml]
-client stop
-client restart
-client status
-client logs [--lines 50]
-client config <path>
+client start [--config configs/client.yaml] [--name client-main]
+client stop [--config ... | --name client-main]
+client restart [--config ... | --name client-main]
+client status [--config ... | --name client-main]
+client logs [--lines 50] [--follow] [--config ... | --name client-main]
+client list [--running]
+client config <path> [--name client-main]
+
+cli list [--service server|sync|client] [--running]
 
 # 方式 2：使用可执行脚本
 ./server start
@@ -141,30 +150,30 @@ client config <path>
 python3 -m src.cli server start --config configs/server.yaml
 python3 -m src.cli sync start --config configs/sync_config.yaml
 python3 -m src.cli client start --config configs/client.yaml
+python3 -m src.cli list --running
 ```
 
 **运行产物规则：**
 
-- `server` 日志文件按端口区分：
-  - `logs/server-port8080.log`
-  - `logs/server-port9000.log`
-- `server` PID 文件也按端口区分：
-  - `logs/server-port8080.pid`
-  - `logs/server-port9000.pid`
-- `sync` 日志文件按同步间隔区分：
-  - `logs/sync-interval3600.log`
-- `sync` PID 文件：
-  - `logs/sync.pid`
-- `client` 日志和 PID 文件：
-  - `logs/client.log`
-  - `logs/client.pid`
+- 每个实例都有独立 PID 和日志文件，文件名带实例标识。
+- `server` 默认形态：
+  - `logs/server-<instance>-port8080.pid`
+  - `logs/server-<instance>-port8080.log`
+- `sync` 默认形态：
+  - `logs/sync-<instance>-export-interval3600.pid`
+  - `logs/sync-<instance>-export-interval3600.log`
+- `client` 默认形态：
+  - `logs/client-<instance>-once.pid`
+  - `logs/client-<instance>-once.log`
 
 **配置管理说明：**
 
-- 使用 `config` 子命令可保存默认配置路径，后续操作无需重复传 `--config`
-- 配置信息保存在 `.cli_state.yaml` 文件中
-- 如需临时覆盖，仍可继续传 `--config` 参数
-- 使用 `config --clear` 可清除已保存的默认配置
+- 使用 `config <path> [--name ...]` 可注册实例并保存为默认实例。
+- 实例主键默认是配置文件路径，`--name` 只是便于查找和操作。
+- CLI 状态保存在 `.cli_state.yaml`，里面会记录各服务的多个实例。
+- 不传 `--config`/`--name` 时，`start/stop/status/logs` 默认作用于该服务的默认实例。
+- `list` 可快速查看当前登记的实例和运行中的 PID。
+- `sync`/`client` 会拦截明显冲突的输出目录，避免两个实例同时写同一目录。
 
 **env.sh 说明：**
 
