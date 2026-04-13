@@ -284,6 +284,8 @@ def _build_sync_cmd(cfg: dict, once: bool = False) -> List[str]:
 
 def _build_client_cmd(cfg: dict) -> List[str]:
     cmd = [sys.executable, "-m", "src.client"]
+    if cfg.get("mode"):
+        cmd += ["--mode", cfg["mode"]]
     if cfg.get("obs_path"):
         cmd += ["--obs-path", cfg["obs_path"]]
     if cfg.get("output"):

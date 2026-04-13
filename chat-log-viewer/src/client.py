@@ -3,7 +3,7 @@ client.py — OBS 同步下载客户端
 
 功能：
   1. 从 OBS 目录下载 index.jsonl 文件
-  2. 解析 index.jsonl 的新增行，下载对应的 session folder
+  2. 解析 index.jsonl 的新增行，下载对应的 session folder 或 raw 文件
   3. 支持增量下载：通过本地状态（.client_state.json / .last_sync_ts）记录已处理的 index.jsonl 行偏移
   4. 支持定时任务：通过 --interval 参数定时轮询执行同步下载
   5. 支持 YAML 配置文件
@@ -22,6 +22,7 @@ client.py — OBS 同步下载客户端
     python client.py --config configs/client.yaml
 
 配置文件示例 (configs/client.yaml):
+    mode: session                    # session | raw
     obs_path: obs://bucket/sessions/
     output: ./local_sessions
     base_output: ./local_sessions      # 可选：存在时用其 index.jsonl 初始化增量状态（从最后一行继续）
@@ -43,7 +44,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     import yaml
@@ -59,6 +60,7 @@ except ImportError:
 DEFAULT_DOWNLOAD_SCRIPT = "obs_download.sh"
 DEFAULT_WORKERS = 4
 DEFAULT_CONFIG = "configs/client.yaml"
+DEFAULT_MODE = "session"
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 
@@ -95,12 +97,14 @@ def load_yaml_config(config_path: Path) -> dict:
 def build_config(args: argparse.Namespace) -> dict:
     """合并配置文件与命令行参数，命令行优先。"""
     # 先从配置文件加载
-    config_path = Path(args.config) if args.config else Path(__file__).parent / DEFAULT_CONFIG
+    config_path = Path(args.config) if args.config else Path(__file__).resolve().parent.parent / DEFAULT_CONFIG
     cfg = load_yaml_config(config_path)
     if args.config and not config_path.exists():
         sys.exit(f"[error] Config file not found: {args.config}")
 
     # 命令行参数覆盖配置文件（仅当命令行有显式指定时）
+    if args.mode:
+        cfg["mode"] = args.mode
     if args.obs_path:
         cfg["obs_path"] = args.obs_path
     if args.output:
@@ -115,6 +119,7 @@ def build_config(args: argparse.Namespace) -> dict:
         cfg["interval"] = args.interval
 
     # 填充默认值
+    cfg.setdefault("mode", DEFAULT_MODE)
     cfg.setdefault("download_script", DEFAULT_DOWNLOAD_SCRIPT)
     cfg.setdefault("workers", DEFAULT_WORKERS)
     cfg.setdefault("interval", None)
@@ -125,6 +130,11 @@ def build_config(args: argparse.Namespace) -> dict:
         sys.exit("[error] obs_path is required (--obs-path or config: obs_path)")
     if not cfg.get("output"):
         sys.exit("[error] output is required (--output or config: output)")
+
+    mode = str(cfg["mode"]).strip().lower()
+    if mode not in {"session", "raw"}:
+        sys.exit(f"[error] mode must be session or raw: {cfg['mode']}")
+    cfg["mode"] = mode
 
     # 规范化 obs_path
     obs_path = cfg["obs_path"]
@@ -186,10 +196,43 @@ def download_index_file(obs_path: str, filename: str, download_script: str, outp
     return local_path
 
 
-def parse_index_jsonl(index_path: Path, line_offset: int = 0) -> Tuple[List[dict], int]:
+def _entry_key(entry: dict, mode: str) -> Optional[str]:
+    if mode == "session":
+        return entry.get("folder")
+    for key in ("req_file", "path", "file", "rel_path"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _raw_family_targets(raw_key: str) -> List[Tuple[str, str, bool]]:
+    normalized = raw_key.strip("/")
+    path = Path(normalized)
+    name = path.name
+    if name.endswith("-req.json"):
+        prefix = name[:-len("-req.json")]
+    elif name.endswith(".json"):
+        prefix = name[:-len(".json")]
+    else:
+        prefix = name
+
+    parent = "" if str(path.parent) == "." else str(path.parent).strip("/")
+
+    def _remote(filename: str) -> str:
+        return f"{parent}/{filename}" if parent else filename
+
+    return [
+        (_remote(f"{prefix}-req.json"), f"{prefix}-req.json", False),
+        (_remote(f"{prefix}-headers.json"), f"{prefix}-headers.json", False),
+        (_remote(f"{prefix}-res.json"), f"{prefix}-res.json", True),
+    ]
+
+
+def parse_index_jsonl(index_path: Path, mode: str, line_offset: int = 0) -> Tuple[List[dict], int]:
     """
     解析 index.jsonl，从 line_offset 行开始读取新增行。
-    去重保留每个 folder 最后一条（最新状态）。
+    去重保留每个资源键最后一条（最新状态）。
 
     Returns:
         (entries, total_lines)
@@ -206,10 +249,12 @@ def parse_index_jsonl(index_path: Path, line_offset: int = 0) -> Tuple[List[dict
                 continue
             try:
                 entry = json.loads(line)
-                if "folder" not in entry:
-                    logger.warning("Line %d missing 'folder' field, skipping", line_no)
+                key = _entry_key(entry, mode)
+                if not key:
+                    missing_field = "folder" if mode == "session" else "req_file/path/file/rel_path"
+                    logger.warning("Line %d missing '%s' field, skipping", line_no, missing_field)
                     continue
-                seen[entry["folder"]] = entry
+                seen[key] = entry
             except json.JSONDecodeError as e:
                 logger.warning("Line %d invalid JSON: %s", line_no, e)
 
@@ -261,7 +306,7 @@ def extract_date_from_latest_file(latest_file: str) -> Optional[datetime]:
     return extract_date_from_folder(name)
 
 
-def get_latest_date_from_local_index(base_output: Path) -> Optional[datetime]:
+def get_latest_date_from_local_index(base_output: Path, mode: str) -> Optional[datetime]:
     """从本地 index.jsonl 的最后一行提取 latest_file 日期。"""
     index_jsonl = base_output / "index.jsonl"
 
@@ -283,16 +328,11 @@ def get_latest_date_from_local_index(base_output: Path) -> Optional[datetime]:
             return None
 
         entry = json.loads(last_line)
-        latest_file = entry.get("latest_file")
-        if not latest_file:
-            logger.warning("Last entry missing latest_file field")
-            return None
-
-        latest_date = extract_date_from_latest_file(latest_file)
+        latest_date = extract_entry_date(entry, mode)
         if latest_date:
             logger.info("Latest date from local index.jsonl: %s", latest_date.isoformat())
         else:
-            logger.warning("Could not extract date from latest_file: %s", latest_file)
+            logger.warning("Could not extract date from last index entry")
 
         return latest_date
     except Exception as e:
@@ -300,20 +340,43 @@ def get_latest_date_from_local_index(base_output: Path) -> Optional[datetime]:
         return None
 
 
-def filter_entries_by_date(entries: List[dict], cutoff_date: Optional[datetime]) -> List[dict]:
+def extract_date_from_raw_entry(entry: dict) -> Optional[datetime]:
+    for key in ("req_file", "path", "file", "rel_path", "latest_file"):
+        raw_value = entry.get(key)
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            continue
+        name = Path(raw_value).name
+        stem = name.rsplit(".", 1)[0]
+        dt = extract_date_from_folder(stem)
+        if dt:
+            return dt
+    return None
+
+
+def extract_entry_date(entry: dict, mode: str) -> Optional[datetime]:
+    if mode == "session":
+        folder_date = extract_date_from_folder(entry.get("folder", ""))
+        if folder_date:
+            return folder_date
+        latest_file = entry.get("latest_file")
+        if isinstance(latest_file, str) and latest_file:
+            return extract_date_from_latest_file(latest_file)
+        return None
+    return extract_date_from_raw_entry(entry)
+
+
+def filter_entries_by_date(entries: List[dict], cutoff_date: Optional[datetime], mode: str) -> List[dict]:
     """
     过滤出日期晚于 cutoff_date 的条目。
-    优先从 folder 名称提取日期，如果失败则尝试从 latest_file 提取。
+    根据 mode 从 entry 中提取日期。
     """
     if cutoff_date is None:
         return entries
 
     filtered = []
     for e in entries:
-        folder_date = extract_date_from_folder(e.get("folder", ""))
-        if not folder_date and "latest_file" in e:
-            folder_date = extract_date_from_latest_file(e["latest_file"])
-        if folder_date and folder_date > cutoff_date:
+        entry_date = extract_entry_date(e, mode)
+        if entry_date and entry_date > cutoff_date:
             filtered.append(e)
 
     logger.info("Filtered %d/%d entries (after %s)",
@@ -360,49 +423,58 @@ def write_sync_state(output: Path, offset: int, latest_date: Optional[datetime])
 
 
 # ---------------------------------------------------------------------------
-# Download folders
+# Download targets
 # ---------------------------------------------------------------------------
 
-def download_folder(
+def download_target(
     obs_base: str,
-    folder_name: str,
+    remote_name: str,
+    local_name: str,
     output_dir: Path,
     download_script: str,
-) -> Tuple[str, bool, str]:
-    obs_folder = obs_base.rstrip("/") + "/" + folder_name + "/"
-    ok, msg = download_file(obs_folder, output_dir, download_script, timeout=300)
-    return folder_name, ok, msg
+) -> Tuple[str, bool, str, Path]:
+    normalized_remote = remote_name.strip("/")
+    obs_target = obs_base.rstrip("/") + "/" + normalized_remote
+    local_target = output_dir / local_name
+    ok, msg = download_file(obs_target, local_target, download_script, timeout=300)
+    return normalized_remote, ok, msg, local_target
 
 
-def download_folders_parallel(
+def download_targets_parallel(
+    mode: str,
     obs_base: str,
-    folders: List[str],
+    targets: List[Tuple[str, str, bool]],
     output_dir: Path,
     download_script: str,
     workers: int,
 ) -> Tuple[int, int]:
-    """并发下载多个文件夹，返回 (success_count, fail_count)。"""
-    if not folders:
-        logger.info("No folders to download")
+    """并发下载多个目标（目录或文件），返回 (success_count, fail_count)。"""
+    if not targets:
+        logger.info("No targets to download")
         return 0, 0
 
-    logger.info("Starting download of %d folders (workers=%d)", len(folders), workers)
+    logger.info("Starting download of %d targets (workers=%d)", len(targets), workers)
     success_count = 0
     fail_count = 0
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(download_folder, obs_base, folder, output_dir, download_script): folder
-            for folder in folders
+            executor.submit(download_target, obs_base, remote_name, local_name, output_dir, download_script):
+            (remote_name, local_name, optional)
+            for remote_name, local_name, optional in targets
         }
         for future in as_completed(futures):
-            folder_name, ok, msg = future.result()
+            target_name, ok, msg, _local_target = future.result()
+            _remote_name, local_name, optional = futures[future]
             if ok:
-                logger.info("✓ %s", folder_name)
+                logger.info("✓ %s -> %s", target_name, local_name)
                 success_count += 1
             else:
-                logger.error("✗ %s — %s", folder_name, msg)
-                fail_count += 1
+                if mode == "raw" and optional:
+                    logger.warning("~ %s missing, skipped: %s", target_name, msg)
+                else:
+                    logger.error("✗ %s — %s", target_name, msg)
+                    fail_count += 1
 
     logger.info("Download summary: %d success, %d failed", success_count, fail_count)
     return success_count, fail_count
@@ -413,6 +485,7 @@ def download_folders_parallel(
 # ---------------------------------------------------------------------------
 
 def sync_once(
+    mode: str,
     obs_path: str,
     output: Path,
     base_output: Optional[Path],
@@ -425,8 +498,8 @@ def sync_once(
     增量策略（基于行偏移 + 时间戳）：
     1. 读取 output/.client_state.json 获取上次的 index_line_offset 和 latest_date
     2. 下载 OBS 上的 index.jsonl，从 line_offset 开始读取新增行
-    3. 对新增条目，按 latest_file 日期过滤（晚于 latest_date）
-    4. 下载过滤后的 folders
+    3. 对新增条目按 mode 提取时间并过滤
+    4. 下载过滤后的目标
     5. 更新 state：新的 line_offset 和本次下载的最新日期
     """
     output.mkdir(parents=True, exist_ok=True)
@@ -438,7 +511,7 @@ def sync_once(
 
     # fallback: 如果 state 为空且指定了 base_output，从 base_output 初始化
     if line_offset == 0 and cutoff_date is None and base_output:
-        cutoff_date = get_latest_date_from_local_index(base_output)
+        cutoff_date = get_latest_date_from_local_index(base_output, mode)
         if cutoff_date:
             logger.info("Initialized cutoff_date from base_output: %s", cutoff_date.isoformat())
 
@@ -454,7 +527,7 @@ def sync_once(
 
     if index_path:
         try:
-            new_entries, total_lines = parse_index_jsonl(index_path, line_offset)
+            new_entries, total_lines = parse_index_jsonl(index_path, mode, line_offset)
             logger.info("Downloaded and parsed index.jsonl: %d new entries", len(new_entries))
         except Exception as e:
             logger.warning("Failed to parse index.jsonl: %s", e)
@@ -465,21 +538,34 @@ def sync_once(
         write_sync_state(output, total_lines, cutoff_date)
         return
 
-    # Step 3: 按日期过滤（只下载 latest_file 日期晚于 cutoff_date 的）
+    # Step 3: 按日期过滤
     if cutoff_date:
-        filtered_entries = filter_entries_by_date(new_entries, cutoff_date)
+        filtered_entries = filter_entries_by_date(new_entries, cutoff_date, mode)
         if not filtered_entries:
             logger.info("No new entries after date filtering (all up-to-date)")
             write_sync_state(output, total_lines, cutoff_date)
             return
-        folders_to_download = [e["folder"] for e in filtered_entries]
+        entries_to_download = filtered_entries
     else:
-        folders_to_download = [e["folder"] for e in new_entries]
-        logger.info("Full download mode: %d folders", len(folders_to_download))
+        entries_to_download = new_entries
+        logger.info("Full download mode: %d entries", len(entries_to_download))
 
-    # Step 4: 并发下载 folders
-    success, failed = download_folders_parallel(
-        obs_path, folders_to_download, output, download_script, workers
+    target_specs: List[Tuple[str, str, bool]] = []
+    entry_keys_to_download: List[str] = []
+    for entry in entries_to_download:
+        entry_key = _entry_key(entry, mode)
+        if not entry_key:
+            continue
+        entry_keys_to_download.append(entry_key)
+        if mode == "session":
+            normalized = entry_key.strip("/")
+            target_specs.append((normalized, normalized, False))
+        else:
+            target_specs.extend(_raw_family_targets(entry_key))
+
+    # Step 4: 并发下载目标
+    success, failed = download_targets_parallel(
+        mode, obs_path, target_specs, output, download_script, workers
     )
 
     # Step 5: 保存新 index 到本地（合并所有条目）
@@ -494,8 +580,9 @@ def sync_once(
                         continue
                     try:
                         entry = json.loads(line)
-                        if "folder" in entry:
-                            all_entries_dict[entry["folder"]] = entry
+                        key = _entry_key(entry, mode)
+                        if key:
+                            all_entries_dict[key] = entry
                     except json.JSONDecodeError:
                         pass
         except Exception as e:
@@ -507,16 +594,13 @@ def sync_once(
 
     # Step 6: 更新同步状态
     if success > 0:
-        downloaded_entries = [e for e in new_entries if e.get("folder") in set(folders_to_download)]
+        target_set = set(entry_keys_to_download)
+        downloaded_entries = [e for e in new_entries if _entry_key(e, mode) in target_set]
         logger.debug("Downloaded entries count: %d", len(downloaded_entries))
         max_date = cutoff_date  # 保留旧的 cutoff_date 作为基准
         for e in downloaded_entries:
-            dt = None
-            if "latest_file" in e:
-                dt = extract_date_from_latest_file(e["latest_file"])
-            elif "folder" in e:
-                dt = extract_date_from_folder(e["folder"])
-            logger.debug("Entry %s -> date %s", e.get("folder"), dt)
+            dt = extract_entry_date(e, mode)
+            logger.debug("Entry %s -> date %s", _entry_key(e, mode), dt)
             if dt and (max_date is None or dt > max_date):
                 max_date = dt
         logger.info("Max date from downloaded entries: %s", max_date)
@@ -553,6 +637,7 @@ def _interruptible_sleep(seconds: int) -> None:
 
 
 def run_daemon(cfg: dict) -> None:
+    mode: str = cfg["mode"]
     obs_path: str = cfg["obs_path"]
     output: Path = Path(cfg["output"]).resolve()
     base_output: Optional[Path] = Path(cfg["base_output"]).resolve() if cfg.get("base_output") else None
@@ -564,6 +649,7 @@ def run_daemon(cfg: dict) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
 
     logger.info("OBS sync download starting")
+    logger.info("  index_mode:      %s", mode)
     logger.info("  obs_path:        %s", obs_path)
     logger.info("  output:          %s", output)
     logger.info("  base_output:     %s", base_output or "None")
@@ -577,7 +663,7 @@ def run_daemon(cfg: dict) -> None:
     while not _shutdown_requested:
         logger.info("--- Sync cycle start ---")
         try:
-            sync_once(obs_path, output, base_output, download_script, workers)
+            sync_once(mode, obs_path, output, base_output, download_script, workers)
         except KeyboardInterrupt:
             logger.info("Interrupted by user (Ctrl+C)")
             break
@@ -604,6 +690,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config", "-c", default=None,
         help=f"YAML config file path (default: {DEFAULT_CONFIG} next to script)",
+    )
+    parser.add_argument(
+        "--mode", choices=["session", "raw"], default=None,
+        help="Index mode: session downloads folders, raw downloads files",
     )
     parser.add_argument(
         "--obs-path", default=None,

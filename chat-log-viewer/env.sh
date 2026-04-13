@@ -42,11 +42,11 @@ export -f server sync client cli
 # 为 tools/ 下的 .sh 脚本和 obsutil 添加执行权限
 if [ -d "$_CHAT_DIR/tools" ]; then
     chmod +x "$_CHAT_DIR/tools"/*.sh 2>/dev/null || true
-    chmod +x "$_CHAT_DIR/tools/obsutil" 2>/dev/null || true
+    chmod +x "$_CHAT_DIR/tools/obsutil/obsutil" 2>/dev/null || true
 fi
 
 echo "[chat-log-viewer] 已加载，可用命令："
 echo "  server  — 管理 server 服务 (start/stop/restart/status/logs)"
 echo "  sync    — 管理 sync 服务   (start/stop/restart/status/logs)"
 echo "  cli     — 统一管理入口"
-echo "  client  — OBS 下载客户端"
+echo "  client  — 管理 client 服务 (start/stop/restart/status/logs)"
