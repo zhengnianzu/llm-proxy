@@ -813,8 +813,8 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
     rows = [
         {label: (
             "" if key == "q1"
-            else _fmt_skill_dict(s.get(key)) if key == "skills_used"
-            else _fmt_tool_dict(s.get(key)) if isinstance(s.get(key), dict)
+            else _sanitize_cell(_fmt_skill_dict(s.get(key))) if key == "skills_used"
+            else _sanitize_cell(_fmt_tool_dict(s.get(key))) if isinstance(s.get(key), dict)
             else _sanitize_cell(s.get(key))
         )
          for key, label in _DETAIL_COLS}

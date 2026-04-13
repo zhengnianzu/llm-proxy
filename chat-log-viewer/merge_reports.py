@@ -188,9 +188,9 @@ def write_merged_excel(
         row: Dict = {}
         for key, label in _DETAIL_COLS_MERGE:
             if key == "source":
-                row[label] = source_map.get(s.get("session", ""), "")
+                row[label] = az._sanitize_cell(source_map.get(s.get("session", ""), ""))
             elif key == "tool_use_detail":
-                row[label] = az._fmt_tool_dict(s.get(key))
+                row[label] = az._sanitize_cell(az._fmt_tool_dict(s.get(key)))
             else:
                 row[label] = az._sanitize_cell(s.get(key))
         rows.append(row)
