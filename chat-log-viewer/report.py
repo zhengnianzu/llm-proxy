@@ -57,16 +57,31 @@ def _import_module(name: str) -> object:
 
 
 # ---------------------------------------------------------------------------
-# 从 xlsx 提取关键指标
+# 读取 sessions 数据
+# ---------------------------------------------------------------------------
+
+def load_sessions(key_dir: Path, mr, az) -> List[Dict]:
+    """优先读取分析缓存，缺失时回退到 session_report.xlsx。"""
+    cache_path = key_dir / "session_analysis.json"
+    if cache_path.is_file():
+        try:
+            return az.load_analysis_cache(cache_path)
+        except Exception as e:
+            print(f"[warn] 无法读取 {cache_path}，回退到 xlsx: {e}", file=sys.stderr)
+
+    xlsx_path = key_dir / "session_report.xlsx"
+    if xlsx_path.is_file():
+        return mr.load_xlsx(xlsx_path)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# 从 session 数据提取关键指标
 # ---------------------------------------------------------------------------
 
 def load_key_stats(key_dir: Path, mr, az) -> Optional[Dict]:
-    """读取 key_dir 下的 session_report.xlsx，返回汇总指标字典。"""
-    xlsx_path = key_dir / "session_report.xlsx"
-    if not xlsx_path.is_file():
-        return None
-
-    sessions = mr.load_xlsx(xlsx_path)
+    """读取 key_dir 下的 sessions 数据，返回汇总指标字典。"""
+    sessions = load_sessions(key_dir, mr, az)
     if not sessions:
         return None
 
@@ -106,11 +121,10 @@ def scan_report_dir(report_dir: Path, mr, az) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def build_overview_html(report_dir: Path, keys: List[Dict], mr, az) -> None:
-    """用所有 key 的 xlsx 合并生成 report_dir/overview.html。"""
+    """用所有 key 的 sessions 数据合并生成 report_dir/overview.html。"""
     all_sessions = []
     for k in keys:
-        xlsx_path = report_dir / k["key"] / "session_report.xlsx"
-        sessions = mr.load_xlsx(xlsx_path)
+        sessions = load_sessions(report_dir / k["key"], mr, az)
         for s in sessions:
             s["_source"] = k["key"]
         all_sessions.extend(sessions)

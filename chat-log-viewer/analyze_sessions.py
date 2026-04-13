@@ -1049,14 +1049,17 @@ def main() -> None:
     if not session_dir.is_dir():
         parser.error(f"目录不存在: {session_dir}")
 
-    stat_dir = Path(args.out).resolve() if args.out else session_dir / "stat"
-    stat_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(args.out).resolve() if args.out else session_dir / "stat"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[info] 扫描目录: {session_dir}", file=sys.stderr)
-    folders = sorted(f for f in session_dir.iterdir() if f.is_dir() and f.name != "stat")
+    folders = sorted(
+        f for f in session_dir.iterdir()
+        if f.is_dir() and f.resolve() != output_dir
+    )
     print(f"[info] 发现 {len(folders)} 个 session 文件夹", file=sys.stderr)
 
-    analysis_cache_path = stat_dir / "session_analysis.json"
+    analysis_cache_path = output_dir / "session_analysis.json"
     sessions: List[Dict]
     if analysis_cache_path.exists() and not args.recompute:
         sessions = load_analysis_cache(analysis_cache_path)
@@ -1077,15 +1080,15 @@ def main() -> None:
     stats = compute_stats(sessions)
     ctx   = build_context(sessions, stats)
 
-    xlsx_path = stat_dir / "session_report.xlsx"
+    xlsx_path = output_dir / "session_report.xlsx"
     write_excel(sessions, stats, xlsx_path)
     print(f"[done] Excel    → {xlsx_path}", file=sys.stderr)
 
-    html_path = stat_dir / "session_report.html"
+    html_path = output_dir / "session_report.html"
     render_report("report.html.j2", ctx, html_path)
     print(f"[done] HTML     → {html_path}", file=sys.stderr)
 
-    md_path = stat_dir / "session_report.md"
+    md_path = output_dir / "session_report.md"
     render_report("report.md.j2", ctx, md_path)
     print(f"[done] Markdown → {md_path}", file=sys.stderr)
 
