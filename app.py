@@ -32,7 +32,7 @@ from utils.metrics import (
     get_metrics_storage_info,
 )
 from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix
-from utils.log_routes import register_log_routes
+from utils.log_routes import get_recent_index_limit, register_log_routes
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
 
@@ -1195,8 +1195,14 @@ async def query_page():
 
 
 @app.get("/history")
-async def chat_viewer():
-    return FileResponse(path="templates/chat-viewer.html")
+async def chat_viewer(request: Request):
+    return templates.TemplateResponse(
+        "chat-viewer.html",
+        {
+            "request": request,
+            "recent_index_limit": get_recent_index_limit(),
+        },
+    )
 
 
 @app.get("/failures")

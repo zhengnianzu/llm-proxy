@@ -50,6 +50,13 @@
         }
         .header h1 { font-size: 17px; font-weight: 600; color: #1a202c; white-space: nowrap; }
         .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .header-meta {
+            padding: 8px 20px;
+            border-bottom: 1px solid #e5e7eb;
+            background: #fffbeb;
+            color: #92400e;
+            font-size: 13px;
+        }
         .min-msg-label { font-size: 13px; color: #6b7280; white-space: nowrap; }
         .min-msg-input {
             width: 60px; padding: 5px 8px;
@@ -321,6 +328,9 @@
             <label for="fileInput" class="btn btn-indigo">上传本地文件</label>
         </div>
     </div>
+</div>
+<div class="header-meta">
+    当前仅展示最近 {{ recent_index_limit }} 条索引记录，用于保证大体量日志下的加载速度。
 </div>
 
 <div class="main">

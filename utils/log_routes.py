@@ -1,9 +1,8 @@
 """
 /logs/* 路由：列表、聚合、单文件读取（Anthropic + OpenAI）
-优先使用 index.jsonl 做增量刷新；缺失时降级为目录扫描。
+优先使用 index.jsonl 的最近窗口；缺失时降级为目录扫描。
 """
 
-import glob
 import json
 import os
 import re as _re
@@ -19,6 +18,17 @@ from utils.log_paths import build_index_path, get_log_dir
 
 _CACHE_LOCK = threading.Lock()
 _LOG_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_RECENT_INDEX_LIMIT_DEFAULT = 1000
+_RECENT_INDEX_LIMIT_MAX = 5000
+
+
+def get_recent_index_limit() -> int:
+    raw = os.getenv("LOG_RECENT_INDEX_LIMIT", str(_RECENT_INDEX_LIMIT_DEFAULT)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = _RECENT_INDEX_LIMIT_DEFAULT
+    return max(1, min(value, _RECENT_INDEX_LIMIT_MAX))
 
 
 def _resolve_req_path(root: Path, req_file: str) -> Optional[Path]:
@@ -54,26 +64,42 @@ def _format_time(ts: str) -> str:
     return ts.replace("_", " ", 1).replace("_", ".").replace("-", ":") if ts else ""
 
 
-def _index_entries(index_path: Path, root: Path, start_line: int = 0) -> Tuple[List[Dict[str, Any]], int]:
+def _tail_index_entries(index_path: Path, root: Path, limit: int) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+
+    try:
+        with index_path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            if pos <= 0:
+                return []
+
+            buffer = b""
+            needed_newlines = limit + 1
+            chunk_size = 64 * 1024
+            while pos > 0 and buffer.count(b"\n") < needed_newlines:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                buffer = f.read(read_size) + buffer
+    except OSError:
+        return []
+
     rows: List[Dict[str, Any]] = []
-    total = 0
-    with index_path.open("r", encoding="utf-8") as f:
-        for i, raw in enumerate(f):
-            total += 1
-            if i < start_line:
-                continue
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            req_path = _resolve_req_path(root, str(entry.get("req_file", "")))
-            if req_path is None:
-                continue
-            rows.append({"entry": entry, "req_path": req_path})
-    return rows, total
+    for raw in buffer.splitlines()[-limit:]:
+        line = raw.decode("utf-8", errors="ignore").strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        req_path = _resolve_req_path(root, str(entry.get("req_file", "")))
+        if req_path is None:
+            continue
+        rows.append({"entry": entry, "req_path": req_path})
+    return rows
 
 
 def _collect_req_files(root: Path) -> List[Path]:
@@ -242,9 +268,12 @@ def _refresh_state(kind: str, root_dir: str) -> None:
         state["line_count"] = 0
 
     if index_path.is_file():
-        start_line = state["line_count"] if state["initialized"] else 0
-        rows, total_lines = _index_entries(index_path, root, start_line=start_line)
-        state["line_count"] = total_lines
+        # For very large index.jsonl files, only keep a recent working set so
+        # the history page stays responsive.
+        state["list_items"].clear()
+        state["agg_chains"].clear()
+        state["scanned"].clear()
+        rows = _tail_index_entries(index_path, root, get_recent_index_limit())
         for row in rows:
             _process_req_row(kind, state, row["req_path"], row["entry"])
     else:
