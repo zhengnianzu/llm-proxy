@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import yaml
 
@@ -59,7 +59,7 @@ def _relpath(path: Path) -> str:
         return str(path.resolve())
 
 
-def _display_path(path: Path | str) -> str:
+def _display_path(path: Union[Path, str]) -> str:
     path_obj = Path(path)
     try:
         return os.path.relpath(path_obj.resolve(), BASE_DIR)
