@@ -401,7 +401,7 @@ log_level: INFO
 
 ### client — OBS 下载客户端
 
-从华为云 OBS 增量下载会话目录到本地，支持守护进程模式。
+从华为云 OBS 增量下载 session 目录或 raw 文件到本地，支持守护进程模式。
 
 **用法：**
 
@@ -412,29 +412,45 @@ client start
 
 # 或直接运行 Python 模块
 python3 -m src.client \
-    --obs-path obs://bucket/sessions \
-    --output ./local_sessions \
-    --interval 3600
+    --mode raw \
+    --obs-path obs://bucket/sessions/ \
+    --output ./local_sessions
 ```
 
 **YAML 配置示例（configs/client.yaml）：**
 
 ```yaml
-obs_path: obs://bucket/sessions    # OBS 源路径
+mode: raw                          # session | raw，默认 session
+obs_path: obs://bucket/sessions/   # OBS 源路径，必须以 obs:// 开头
 output: ./local_sessions           # 本地输出目录
-download_script: obsutil           # 下载脚本（obsutil 或自定义）
-workers: 4                         # 并发下载线程数
-interval: 3600                     # 同步间隔（秒）
-log_level: INFO
+base_output: ./local_sessions      # 可选：用已有输出目录的 index 状态做增量同步
+download_script: tools/obs_download.sh  # 可选，默认 obs_download.sh
+workers: 4                         # 可选，默认 4
+interval: 10                       # 可选；不填则只执行一次
 ```
+
+**字段说明：**
+
+1. `mode`
+   `session` 模式按索引里的 `folder` 字段下载整个 session 目录；`raw` 模式按 `req_file/path/file/rel_path` 下载对应原始请求族文件。
+2. `obs_path`
+   OBS 根路径，代码会自动补齐结尾 `/`。
+3. `output`
+   本地输出目录，下载结果和本地状态文件都会写到这里。
+4. `base_output`
+   可选。指定后会使用该目录已有的 index 状态作为增量起点，只处理后续新增内容。
+5. `download_script`
+   下载脚本签名为 `<script> <obs_path> <local_path>`；当前仓库默认脚本是 `tools/obs_download.sh`。
+6. `interval`
+   不设置时只执行一次；设置后按秒轮询。
 
 **工作原理：**
 
-1. 从 OBS 下载 `index.jsonl`（或 `index.json`）获取会话列表
-2. 比对本地已有会话，识别新增或更新的会话
-3. 并发下载新增/更新的会话文件夹
-4. 支持基于 `latest_file` 时间戳的增量同步
-5. 守护进程模式下定期执行同步
+1. 从 OBS 下载 `index.jsonl`；失败时回退尝试 `index.json`
+2. 根据 `mode` 解析索引，提取待下载目标
+3. 基于本地状态文件做增量同步，避免重复处理旧索引行
+4. 并发下载新增目标
+5. 设置 `interval` 时循环执行同步
 
 **依赖：** 需安装 `obsutil`（见下方安装说明）。
 
