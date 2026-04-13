@@ -724,14 +724,20 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
 
 # openpyxl 非法字符（ASCII 控制字符）过滤
 _ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_EXCEL_CELL_MAX_LEN = 32767
 _Q1_MAX_LEN = 2000
 
 
-def _sanitize_cell(val: Any) -> Any:
-    """去除 Excel 非法控制字符。"""
+def _sanitize_cell(val: Any, max_len: int = _EXCEL_CELL_MAX_LEN) -> Any:
+    """清理 Excel 非法字符，并将字符串截断到单元格允许的最大长度。"""
     if not isinstance(val, str):
         return val
-    return _ILLEGAL_CHARS_RE.sub("", val)
+    cleaned = _ILLEGAL_CHARS_RE.sub("", val)
+    if len(cleaned) > max_len:
+        if max_len <= 1:
+            return cleaned[:max_len]
+        return cleaned[: max_len - 1] + "…"
+    return cleaned
 
 
 def _fmt_tool_dict(d: Any) -> str:
@@ -802,7 +808,7 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
 
     # ── 构建详情 DataFrame（Q1 列先置空，后续单独写入）────────────────────────
     _q1_label = next(label for key, label in _DETAIL_COLS if key == "q1")
-    q1_vals   = [_sanitize_cell(s.get("q1")) for s in sessions]
+    q1_vals   = [_sanitize_cell(s.get("q1"), max_len=_Q1_MAX_LEN) for s in sessions]
 
     rows = [
         {label: (
@@ -891,8 +897,6 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
         q1_letter = get_column_letter(q1_col_idx)
         for row_idx, val in enumerate(q1_vals, start=2):
             cell = ws1[f"{q1_letter}{row_idx}"]
-            if val and len(val) > _Q1_MAX_LEN:
-                val = val[:_Q1_MAX_LEN] + "…"
             try:
                 cell.value = val
             except IllegalCharacterError:
@@ -944,7 +948,7 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
             # 数据行
             for _, row in df_s.iterrows():
                 for ci, val in enumerate(row, 1):
-                    ws2.cell(cur_row, ci, val)
+                    ws2.cell(cur_row, ci, _sanitize_cell(val))
                 cur_row += 1
 
             cur_row += 2  # 空行分隔
@@ -968,7 +972,7 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
 
         row_idx = 2
         for skill_name, count in sorted(global_skills.items(), key=lambda x: (-x[1], x[0])):
-            ws3.cell(row_idx, 1, skill_name)
+            ws3.cell(row_idx, 1, _sanitize_cell(skill_name))
             ws3.cell(row_idx, 2, count)
             ws3.cell(row_idx, 2).alignment = Alignment(horizontal="center")
             row_idx += 1
@@ -995,6 +999,30 @@ def render_report(template_name: str, context: Dict, output_path: Path) -> None:
     output_path.write_text(env.get_template(template_name).render(**context), encoding="utf-8")
 
 
+def save_analysis_cache(sessions: List[Dict], path: Path) -> None:
+    """保存分析中间结果，避免导出失败时重新扫描全部 session。"""
+    payload = {
+        "version": 1,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "session_count": len(sessions),
+        "sessions": sessions,
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_analysis_cache(path: Path) -> List[Dict]:
+    """加载分析中间结果。"""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("sessions"), list):
+        return payload["sessions"]
+    if isinstance(payload, list):
+        return payload
+    raise ValueError(f"缓存格式不正确: {path}")
+
+
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
@@ -1013,6 +1041,8 @@ def main() -> None:
                         help="session 根目录（各 session 文件夹所在目录）")
     parser.add_argument("--out", "-o", default=None, metavar="OUTPUT_DIR",
                         help="输出目录，默认为 <SESSION_DIR>/stat")
+    parser.add_argument("--recompute", action="store_true",
+                        help="忽略已有分析缓存，重新扫描全部 session")
     args = parser.parse_args()
 
     session_dir = Path(args.session_dir).resolve()
@@ -1026,14 +1056,23 @@ def main() -> None:
     folders = sorted(f for f in session_dir.iterdir() if f.is_dir() and f.name != "stat")
     print(f"[info] 发现 {len(folders)} 个 session 文件夹", file=sys.stderr)
 
-    sessions: List[Dict] = []
-    with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(analyze_session, f): f for f in folders}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="解析 session", unit="个"):
-            r = future.result()
-            if r:
-                sessions.append(r)
-    print(f"[info] 成功解析 {len(sessions)} 个 session", file=sys.stderr)
+    analysis_cache_path = stat_dir / "session_analysis.json"
+    sessions: List[Dict]
+    if analysis_cache_path.exists() and not args.recompute:
+        sessions = load_analysis_cache(analysis_cache_path)
+        print(f"[info] 复用分析缓存: {analysis_cache_path}", file=sys.stderr)
+        print(f"[info] 缓存中包含 {len(sessions)} 个 session", file=sys.stderr)
+    else:
+        sessions = []
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(analyze_session, f): f for f in folders}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="解析 session", unit="个"):
+                r = future.result()
+                if r:
+                    sessions.append(r)
+        print(f"[info] 成功解析 {len(sessions)} 个 session", file=sys.stderr)
+        save_analysis_cache(sessions, analysis_cache_path)
+        print(f"[done] 分析缓存 → {analysis_cache_path}", file=sys.stderr)
 
     stats = compute_stats(sessions)
     ctx   = build_context(sessions, stats)
