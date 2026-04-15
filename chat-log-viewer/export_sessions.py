@@ -61,25 +61,31 @@ def format_stage_seconds(seconds: float) -> str:
     return f"{seconds:.2f}s"
 
 
-def preload_request(task: Tuple[str, dict]) -> Tuple[str, dict, Optional[dict], Optional[str], Optional[int]]:
+def preload_request(task: Tuple[str, dict]) -> Tuple[str, dict, Optional[str], Optional[int]]:
     prefix, tri = task
     try:
         req_data = load_json(tri["req"])
     except Exception as e:
         print(f"[warn] 读取 req 失败 {prefix}: {e}")
-        return prefix, tri, None, None, None
+        return prefix, tri, None, None
 
     messages = extract_messages(req_data)
     if not messages:
-        return prefix, tri, None, None, None
+        return prefix, tri, None, None
 
     q1 = get_first_user_text(messages)
     user_count = count_user_messages(messages)
-    return prefix, tri, req_data, q1, user_count
+    return prefix, tri, q1, user_count
 
 
-def export_one_file(task: Tuple[Path, str, str, dict, dict]) -> Tuple[str, str, Optional[dict]]:
-    out, folder_prefix, prefix, tri, req_data = task
+def export_one_file(task: Tuple[Path, str, str, dict, bool]) -> Tuple[str, str, int, str, bool]:
+    out, folder_prefix, prefix, tri, pretty_json = task
+
+    try:
+        req_data = load_json(tri["req"])
+    except Exception as e:
+        print(f"[warn] 读取 req 失败 {prefix}: {e}")
+        return folder_prefix, f"{prefix}.json", -1, "", False
 
     merged = dict(req_data)
     if "headers" in tri:
@@ -102,8 +108,15 @@ def export_one_file(task: Tuple[Path, str, str, dict, dict]) -> Tuple[str, str, 
 
     out_file = out / folder_prefix / f"{prefix}.json"
     with open(out_file, "w", encoding="utf-8") as fh:
-        json.dump(merged, fh, ensure_ascii=False, indent=2)
-    return folder_prefix, f"{prefix}.json", merged
+        if pretty_json:
+            json.dump(merged, fh, ensure_ascii=False, indent=2)
+        else:
+            json.dump(merged, fh, ensure_ascii=False, separators=(",", ":"))
+    messages = extract_messages(merged) or []
+    has_response = bool((merged.get("response") or {}).get("content"))
+    msg_count = len(messages) + (1 if has_response else 0)
+    model = merged.get("model", "")
+    return folder_prefix, f"{prefix}.json", msg_count, model, True
 
 
 def main():
@@ -112,6 +125,10 @@ def main():
     parser.add_argument("--out", "-o", required=True, help="输出目录")
     parser.add_argument("--base-output", "-b", default=None,
                         help="上次的输出目录（增量模式），含 index.json")
+    parser.add_argument("--worker-num", type=int, default=(os.cpu_count() or 1),
+                        help="并行 worker 数，默认使用 CPU 核心数")
+    parser.add_argument("--pretty-json", action="store_true",
+                        help="输出格式化 JSON；默认使用紧凑 JSON 以减少导出耗时")
     args = parser.parse_args()
 
     src = Path(args.src).resolve()
@@ -172,6 +189,8 @@ def main():
             sessions.append(session)
             latest_session_by_q1[q1] = session
 
+    worker_num = max(1, args.worker_num)
+
     preload_start = time.perf_counter()
     preload_tasks: List[Tuple[str, dict]] = [
         (prefix, new_triplets[prefix])
@@ -179,31 +198,30 @@ def main():
         if "req" in new_triplets[prefix]
     ]
 
-    preloaded: List[Tuple[str, dict, dict, str, int]] = []
+    preloaded: List[Tuple[str, dict, str, int]] = []
     skipped = len(new_prefixes) - len(preload_tasks)
-    max_workers = os.cpu_count() or 1
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ProcessPoolExecutor(max_workers=worker_num) as executor:
         futures = {executor.submit(preload_request, task): task for task in preload_tasks}
         with tqdm(total=len(preload_tasks), desc="预解析请求", unit="req") as bar:
             for future in as_completed(futures):
-                prefix, tri, req_data, q1, user_count = future.result()
+                prefix, tri, q1, user_count = future.result()
                 bar.update(1)
-                if req_data is None or q1 is None or user_count is None:
+                if q1 is None or user_count is None:
                     skipped += 1
                     continue
-                preloaded.append((prefix, tri, req_data, q1, user_count))
+                preloaded.append((prefix, tri, q1, user_count))
     preload_elapsed = time.perf_counter() - preload_start
 
     group_start = time.perf_counter()
     preloaded.sort(key=lambda item: item[0])
 
-    for prefix, tri, req_data, q1, user_count in preloaded:
+    for prefix, tri, q1, user_count in preloaded:
 
         if user_count <= 1:
             session = {
                 "folder_prefix": prefix,
                 "q1": q1,
-                "items": [(prefix, tri, req_data)],
+                "items": [(prefix, tri)],
                 "from_base": False,
             }
             sessions.append(session)
@@ -214,7 +232,7 @@ def main():
                 session = {"folder_prefix": prefix, "q1": q1, "items": [], "from_base": False}
                 sessions.append(session)
                 latest_session_by_q1[q1] = session
-            session["items"].append((prefix, tri, req_data))
+            session["items"].append((prefix, tri))
     group_elapsed = time.perf_counter() - group_start
 
     print(f"[info] 共 {len(sessions)} 个 session，跳过 {skipped} 个三元组")
@@ -223,26 +241,26 @@ def main():
     export_start = time.perf_counter()
     active_sessions = [s for s in sessions if s.get("items")]
     index_entries: List[dict] = []
-    all_items: List[Tuple[Path, str, str, dict, dict]] = [
-        (out, s["folder_prefix"], prefix, tri, req_data)
+    all_items: List[Tuple[Path, str, str, dict, bool]] = [
+        (out, s["folder_prefix"], prefix, tri, args.pretty_json)
         for s in active_sessions
-        for prefix, tri, req_data in sorted(s["items"], key=lambda x: x[0])
+        for prefix, tri in sorted(s["items"], key=lambda x: x[0])
     ]
 
     for s in active_sessions:
         (out / s["folder_prefix"]).mkdir(parents=True, exist_ok=True)
 
-    results: Dict[str, List[Tuple[str, dict]]] = {s["folder_prefix"]: [] for s in active_sessions}
+    results: Dict[str, List[Tuple[str, int, str]]] = {s["folder_prefix"]: [] for s in active_sessions}
     exported_files = 0
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ProcessPoolExecutor(max_workers=worker_num) as executor:
         futures = {executor.submit(export_one_file, task): task for task in all_items}
         with tqdm(total=len(all_items), desc="导出文件", unit="file") as bar:
             for future in as_completed(futures):
-                folder_prefix, filename, merged = future.result()
+                folder_prefix, filename, msg_count, model, ok = future.result()
                 bar.update(1)
-                if merged is not None:
-                    results[folder_prefix].append((filename, merged))
+                if ok:
+                    results[folder_prefix].append((filename, msg_count, model))
                     exported_files += 1
     export_elapsed = time.perf_counter() - export_start
 
@@ -260,14 +278,11 @@ def main():
                     best_model = e.get("model", "")
                     break
 
-        for filename, merged in results[session["folder_prefix"]]:
-            messages = extract_messages(merged) or []
-            has_response = bool((merged.get("response") or {}).get("content"))
-            msg_count = len(messages) + (1 if has_response else 0)
+        for filename, msg_count, model in results[session["folder_prefix"]]:
             if msg_count > best_msg_count:
                 best_msg_count = msg_count
                 best_file = filename
-                best_model = merged.get("model", "")
+                best_model = model
 
         if best_file:
             index_entries.append({
