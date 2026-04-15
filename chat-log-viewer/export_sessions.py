@@ -33,19 +33,32 @@ import json
 import os
 import sys
 import time
+import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from tqdm import tqdm
 except ImportError:
-    def tqdm(it, **kwargs):
-        desc = kwargs.get("desc", "")
-        total = kwargs.get("total", None)
-        if desc:
-            print(f"{desc}...")
-        return it
+    class _SimpleTqdm:
+        def __init__(self, *args, **kwargs):
+            desc = kwargs.get("desc", "")
+            if desc:
+                print(f"{desc}...")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, n: int = 1) -> None:
+            return None
+
+    def tqdm(*args, **kwargs):
+        return _SimpleTqdm(*args, **kwargs)
 
 from src.utils.message_utils import (
     count_user_messages,
@@ -76,6 +89,113 @@ def preload_request(task: Tuple[str, dict]) -> Tuple[str, dict, Optional[str], O
     q1 = get_first_user_text(messages)
     user_count = count_user_messages(messages)
     return prefix, tri, q1, user_count
+
+
+def build_triplet_from_index_entry(src: Path, entry: dict) -> Optional[Tuple[str, dict]]:
+    ts = entry.get("ts")
+    req_file = entry.get("req_file")
+    if not ts or not req_file:
+        return None
+
+    req_path = src / Path(req_file).name
+    if not req_path.is_file():
+        return None
+
+    tri: Dict[str, Path] = {"req": req_path}
+    parent = req_path.parent
+    headers_path = parent / f"{ts}-headers.json"
+    res_path = parent / f"{ts}-res.json"
+    if headers_path.is_file():
+        tri["headers"] = headers_path
+    if res_path.is_file():
+        tri["res"] = res_path
+    return ts, tri
+
+
+def stream_preload_requests(
+    src: Path,
+    cutoff_ts: Optional[str],
+    worker_num: int,
+    queue_size: int = 1024,
+) -> Tuple[List[Tuple[str, dict, str, int]], int]:
+    """
+    单线程顺序读取 index.jsonl，将有效任务放入有界队列，
+    由多个 worker 并行读取 req.json 并提取分组信息。
+    """
+    index_path = src / "index.jsonl"
+    task_queue: Queue[Optional[Tuple[str, dict]]] = Queue(maxsize=max(1, queue_size))
+    preloaded: List[Tuple[str, dict, str, int]] = []
+    preloaded_lock = threading.Lock()
+    skipped = 0
+    skipped_lock = threading.Lock()
+    stop_token: Optional[Tuple[str, dict]] = None
+
+    def add_skipped() -> None:
+        nonlocal skipped
+        with skipped_lock:
+            skipped += 1
+
+    def worker() -> None:
+        while True:
+            try:
+                task = task_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            if task is stop_token:
+                task_queue.task_done()
+                break
+
+            prefix, tri = task
+            try:
+                result = preload_request((prefix, tri))
+                _, tri2, q1, user_count = result
+                if q1 is None or user_count is None:
+                    add_skipped()
+                else:
+                    with preloaded_lock:
+                        preloaded.append((prefix, tri2, q1, user_count))
+            finally:
+                task_queue.task_done()
+
+    threads = [
+        threading.Thread(target=worker, name=f"preload-worker-{i}", daemon=True)
+        for i in range(max(1, worker_num))
+    ]
+    for thread in threads:
+        thread.start()
+
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            with tqdm(desc="预解析请求", unit="req") as bar:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        add_skipped()
+                        continue
+
+                    task = build_triplet_from_index_entry(src, entry)
+                    if task is None:
+                        add_skipped()
+                        continue
+
+                    prefix, tri = task
+                    if cutoff_ts and prefix <= cutoff_ts:
+                        continue
+
+                    task_queue.put((prefix, tri))
+                    bar.update(1)
+    finally:
+        for _ in threads:
+            task_queue.put(stop_token)
+        task_queue.join()
+        for thread in threads:
+            thread.join()
+
+    return preloaded, skipped
 
 
 def export_one_file(task: Tuple[Path, str, str, dict, bool]) -> Tuple[str, str, int, str, bool]:
@@ -162,7 +282,31 @@ def main():
 
     # ── 收集三元组并过滤 ─────────────────────────────────────────
     collect_start = time.perf_counter()
-    new_triplets, new_prefixes, _ = collect_new_triplets(src, cutoff)
+    index_path = src / "index.jsonl"
+    worker_num = max(1, args.worker_num)
+    if index_path.exists():
+        preloaded, skipped = stream_preload_requests(src, cutoff, worker_num)
+        new_prefixes = [prefix for prefix, _, _, _ in preloaded]
+        new_triplets = {prefix: tri for prefix, tri, _, _ in preloaded}
+    else:
+        new_triplets, new_prefixes, _ = collect_new_triplets(src, cutoff)
+        preload_tasks: List[Tuple[str, dict]] = [
+            (prefix, new_triplets[prefix])
+            for prefix in new_prefixes
+            if "req" in new_triplets[prefix]
+        ]
+        preloaded = []
+        skipped = len(new_prefixes) - len(preload_tasks)
+        with ProcessPoolExecutor(max_workers=worker_num) as executor:
+            futures = {executor.submit(preload_request, task): task for task in preload_tasks}
+            with tqdm(total=len(preload_tasks), desc="预解析请求", unit="req") as bar:
+                for future in as_completed(futures):
+                    prefix, tri, q1, user_count = future.result()
+                    bar.update(1)
+                    if q1 is None or user_count is None:
+                        skipped += 1
+                        continue
+                    preloaded.append((prefix, tri, q1, user_count))
     collect_elapsed = time.perf_counter() - collect_start
 
     if not new_triplets and not base_index:
@@ -189,28 +333,7 @@ def main():
             sessions.append(session)
             latest_session_by_q1[q1] = session
 
-    worker_num = max(1, args.worker_num)
-
-    preload_start = time.perf_counter()
-    preload_tasks: List[Tuple[str, dict]] = [
-        (prefix, new_triplets[prefix])
-        for prefix in new_prefixes
-        if "req" in new_triplets[prefix]
-    ]
-
-    preloaded: List[Tuple[str, dict, str, int]] = []
-    skipped = len(new_prefixes) - len(preload_tasks)
-    with ProcessPoolExecutor(max_workers=worker_num) as executor:
-        futures = {executor.submit(preload_request, task): task for task in preload_tasks}
-        with tqdm(total=len(preload_tasks), desc="预解析请求", unit="req") as bar:
-            for future in as_completed(futures):
-                prefix, tri, q1, user_count = future.result()
-                bar.update(1)
-                if q1 is None or user_count is None:
-                    skipped += 1
-                    continue
-                preloaded.append((prefix, tri, q1, user_count))
-    preload_elapsed = time.perf_counter() - preload_start
+    preload_elapsed = collect_elapsed
 
     group_start = time.perf_counter()
     preloaded.sort(key=lambda item: item[0])
