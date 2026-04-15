@@ -11,15 +11,27 @@ analyze_sessions.py — 分析 session 格式对话日志
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+def format_stage_seconds(seconds: float) -> str:
+    return f"{seconds:.2f}s"
 
 # ---------------------------------------------------------------------------
 # 时间戳解析
@@ -363,32 +375,17 @@ def analyze_session(folder: Path) -> Optional[Dict]:
 
     api_call_count = len(json_files)
     api_errors = 0
-    models: List[str] = []
-    all_data: List[dict] = []
 
-    for jf in json_files:
-        try:
-            data = json.loads(jf.read_text(encoding="utf-8"))
-        except Exception:
-            api_call_count -= 1
-            continue
-        all_data.append(data)
-        resp = data.get("response") or {}
-        if isinstance(resp, dict) and isinstance(resp.get("status_code"), int):
-            if resp["status_code"] >= 400:
-                api_errors += 1
-        if data.get("model"):
-            models.append(data["model"])
-
-    if not all_data:
+    try:
+        best_data = json.loads(json_files[-1].read_text(encoding="utf-8"))
+    except Exception:
         return None
 
-    best_data = max(
-        all_data,
-        key=lambda d: len(d.get("messages") or []) + (
-            1 if (d.get("response") or {}).get("content") else 0
-        ),
-    )
+    resp = best_data.get("response") or {}
+    if isinstance(resp, dict) and isinstance(resp.get("status_code"), int):
+        if resp["status_code"] >= 400:
+            api_errors = 1
+
     messages: List[dict] = best_data.get("messages") or []
     resp_content = (best_data.get("response") or {}).get("content")
     full_messages = messages + (
@@ -424,7 +421,7 @@ def analyze_session(folder: Path) -> Optional[Dict]:
         "tool_fail_keyword":  tr["fail_kw"],
         "tool_fail_total":    tr["fail_total"],
         "tool_success_rate":  tool_success_rate,
-        "model":              models[-1] if models else "",
+        "model":              best_data.get("model", ""),
         "q1":                 q1,
         "tool_use_detail":    td["use"],
         "tool_success_detail": td["success"],
@@ -807,13 +804,9 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
     rate_vals  = stats["rate_vals"]
     dur_vals   = stats["dur_vals"]
 
-    # ── 构建详情 DataFrame（Q1 列先置空，后续单独写入）────────────────────────
-    _q1_label = next(label for key, label in _DETAIL_COLS if key == "q1")
-    q1_vals   = [_sanitize_cell(s.get("q1"), max_len=_Q1_MAX_LEN) for s in sessions]
-
     rows = [
         {label: (
-            "" if key == "q1"
+            _sanitize_cell(s.get("q1"), max_len=_Q1_MAX_LEN) if key == "q1"
             else _sanitize_cell(_fmt_skill_dict(s.get(key))) if key == "skills_used"
             else _sanitize_cell(_fmt_tool_dict(s.get(key))) if isinstance(s.get(key), dict)
             else _sanitize_cell(s.get(key))
@@ -867,15 +860,6 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
             cell.alignment = hdr_align
         ws1.row_dimensions[1].height = 30
 
-        # 隔行底色
-        alt_fill = PatternFill(fill_type="solid", fgColor="EBF3FB")
-        for row_idx in range(2, ws1.max_row + 1, 2):
-            for cell in ws1[row_idx]:
-                # 只在没有其他填充时加底色
-                rgb = cell.fill.fgColor.rgb
-                if rgb in ("00000000", "FFFFFFFF", "00FFFFFF"):
-                    cell.fill = alt_fill
-
         # 成功率列转为小数（Excel百分比格式）
         rate_col_idx = next(
             i for i, (_, lbl) in enumerate(_DETAIL_COLS, 1) if lbl == "工具成功率(%)"
@@ -890,18 +874,13 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
                 except (TypeError, ValueError):
                     pass
 
-        # Q1列：逐格写入，捕获 IllegalCharacterError 时置空
-        from openpyxl.utils.exceptions import IllegalCharacterError
+        # Q1列：统一顶对齐
         q1_col_idx = next(
             i for i, (_, lbl) in enumerate(_DETAIL_COLS, 1) if lbl == "Q1首问"
         )
         q1_letter = get_column_letter(q1_col_idx)
-        for row_idx, val in enumerate(q1_vals, start=2):
+        for row_idx in range(2, ws1.max_row + 1):
             cell = ws1[f"{q1_letter}{row_idx}"]
-            try:
-                cell.value = val
-            except IllegalCharacterError:
-                cell.value = ""
             cell.alignment = Alignment(vertical="top")
 
         # 任务完成列：左对齐
@@ -912,18 +891,33 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
         for row_idx in range(2, ws1.max_row + 1):
             ws1[f"{completed_letter}{row_idx}"].alignment = Alignment(horizontal="left")
 
-        # 列宽自适应
-        for col_idx, col_cells in enumerate(ws1.columns, start=1):
-            col_letter = get_column_letter(col_idx)
-            max_len = max(
-                (len(str(c.value)) if c.value is not None else 0 for c in col_cells),
-                default=8,
-            )
-            # Q1 列固定宽度 50，其余自适应
-            if col_idx == q1_col_idx:
-                ws1.column_dimensions[col_letter].width = 50
-            else:
-                ws1.column_dimensions[col_letter].width = min(max_len + 2, 40)
+        # 固定列宽，避免遍历整张表做自适应
+        detail_widths = {
+            "Q1首问": 50,
+            "Session": 24,
+            "开始时间": 20,
+            "结束时间": 20,
+            "持续时长(s)": 12,
+            "请求次数": 10,
+            "API错误次数": 12,
+            "用户轮次": 10,
+            "消息总数": 10,
+            "tool_use次数": 12,
+            "tool_result次数": 14,
+            "工具成功次数": 12,
+            "失败(is_error标记)": 16,
+            "失败(错误关键字)": 16,
+            "失败合计": 10,
+            "工具成功率(%)": 12,
+            "模型": 20,
+            "工具调用详情": 32,
+            "工具成功详情": 32,
+            "使用的技能": 24,
+            "任务完成": 14,
+            "错误备注": 28,
+        }
+        for col_idx, (_key, label) in enumerate(_DETAIL_COLS, start=1):
+            ws1.column_dimensions[get_column_letter(col_idx)].width = detail_widths.get(label, 20)
 
         # Sheet 2: 分布统计
         ws2 = ew.book.create_sheet("分布统计")
@@ -1044,6 +1038,8 @@ def main() -> None:
                         help="输出目录，默认为 <SESSION_DIR>/stat")
     parser.add_argument("--recompute", action="store_true",
                         help="忽略已有分析缓存，重新扫描全部 session")
+    parser.add_argument("--worker-num", type=int, default=(os.cpu_count() or 1),
+                        help="并行 worker 数，默认使用 CPU 核心数")
     args = parser.parse_args()
 
     session_dir = Path(args.session_dir).resolve()
@@ -1053,46 +1049,75 @@ def main() -> None:
     output_dir = Path(args.out).resolve() if args.out else session_dir / "stat"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[info] 扫描目录: {session_dir}", file=sys.stderr)
+    logger.info("扫描目录: %s", session_dir)
     folders = sorted(
         f for f in session_dir.iterdir()
         if f.is_dir() and f.resolve() != output_dir
     )
-    print(f"[info] 发现 {len(folders)} 个 session 文件夹", file=sys.stderr)
+    logger.info("发现 %d 个 session 文件夹", len(folders))
 
     analysis_cache_path = output_dir / "session_analysis.json"
     sessions: List[Dict]
+    load_or_scan_start = time.perf_counter()
     if analysis_cache_path.exists() and not args.recompute:
+        logger.info("开始加载分析缓存: %s", analysis_cache_path)
         sessions = load_analysis_cache(analysis_cache_path)
-        print(f"[info] 复用分析缓存: {analysis_cache_path}", file=sys.stderr)
-        print(f"[info] 缓存中包含 {len(sessions)} 个 session", file=sys.stderr)
+        logger.info("复用分析缓存: %s", analysis_cache_path)
+        logger.info("缓存中包含 %d 个 session", len(sessions))
     else:
         sessions = []
-        max_workers = os.cpu_count() or 1
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        worker_num = max(1, args.worker_num)
+        logger.info("开始并行解析 session，worker_num=%d", worker_num)
+        with ProcessPoolExecutor(max_workers=worker_num) as executor:
             futures = {executor.submit(analyze_session, f): f for f in folders}
             for future in tqdm(as_completed(futures), total=len(futures), desc="解析 session", unit="个"):
                 r = future.result()
                 if r:
                     sessions.append(r)
-        print(f"[info] 成功解析 {len(sessions)} 个 session", file=sys.stderr)
+        logger.info("成功解析 %d 个 session", len(sessions))
+        logger.info("开始写分析缓存: %s", analysis_cache_path)
         save_analysis_cache(sessions, analysis_cache_path)
-        print(f"[done] 分析缓存 → {analysis_cache_path}", file=sys.stderr)
+        logger.info("分析缓存已写入: %s", analysis_cache_path)
+    load_or_scan_elapsed = time.perf_counter() - load_or_scan_start
 
+    logger.info("开始聚合统计")
+    stats_start = time.perf_counter()
     stats = compute_stats(sessions)
+    stats_elapsed = time.perf_counter() - stats_start
+    logger.info("开始构建报告上下文")
+    context_start = time.perf_counter()
     ctx   = build_context(sessions, stats)
+    context_elapsed = time.perf_counter() - context_start
 
     xlsx_path = output_dir / "session_report.xlsx"
+    logger.info("开始写 Excel: %s", xlsx_path)
+    excel_start = time.perf_counter()
     write_excel(sessions, stats, xlsx_path)
-    print(f"[done] Excel    → {xlsx_path}", file=sys.stderr)
+    excel_elapsed = time.perf_counter() - excel_start
+    logger.info("Excel 已写入: %s", xlsx_path)
 
     html_path = output_dir / "session_report.html"
+    logger.info("开始渲染 HTML: %s", html_path)
+    html_start = time.perf_counter()
     render_report("report.html.j2", ctx, html_path)
-    print(f"[done] HTML     → {html_path}", file=sys.stderr)
+    html_elapsed = time.perf_counter() - html_start
+    logger.info("HTML 已写入: %s", html_path)
 
     md_path = output_dir / "session_report.md"
+    logger.info("开始渲染 Markdown: %s", md_path)
+    md_start = time.perf_counter()
     render_report("report.md.j2", ctx, md_path)
-    print(f"[done] Markdown → {md_path}", file=sys.stderr)
+    md_elapsed = time.perf_counter() - md_start
+    logger.info("Markdown 已写入: %s", md_path)
+    logger.info(
+        "[timing] load_or_scan=%s stats=%s context=%s excel=%s html=%s markdown=%s",
+        format_stage_seconds(load_or_scan_elapsed),
+        format_stage_seconds(stats_elapsed),
+        format_stage_seconds(context_elapsed),
+        format_stage_seconds(excel_elapsed),
+        format_stage_seconds(html_elapsed),
+        format_stage_seconds(md_elapsed),
+    )
 
 
 if __name__ == "__main__":
