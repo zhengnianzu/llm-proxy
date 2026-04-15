@@ -11,10 +11,11 @@ analyze_sessions.py — 分析 session 格式对话日志
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
@@ -1067,7 +1068,8 @@ def main() -> None:
         print(f"[info] 缓存中包含 {len(sessions)} 个 session", file=sys.stderr)
     else:
         sessions = []
-        with ThreadPoolExecutor() as executor:
+        max_workers = os.cpu_count() or 1
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(analyze_session, f): f for f in folders}
             for future in tqdm(as_completed(futures), total=len(futures), desc="解析 session", unit="个"):
                 r = future.result()

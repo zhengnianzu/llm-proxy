@@ -30,8 +30,10 @@ export_sessions.py — 将 logs_anthropic 中的三元组文件导出为 session
 
 import argparse
 import json
+import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,6 +55,55 @@ from src.utils.message_utils import (
     parse_response,
 )
 from src.utils.triplet_collector import collect_new_triplets
+
+
+def format_stage_seconds(seconds: float) -> str:
+    return f"{seconds:.2f}s"
+
+
+def preload_request(task: Tuple[str, dict]) -> Tuple[str, dict, Optional[dict], Optional[str], Optional[int]]:
+    prefix, tri = task
+    try:
+        req_data = load_json(tri["req"])
+    except Exception as e:
+        print(f"[warn] 读取 req 失败 {prefix}: {e}")
+        return prefix, tri, None, None, None
+
+    messages = extract_messages(req_data)
+    if not messages:
+        return prefix, tri, None, None, None
+
+    q1 = get_first_user_text(messages)
+    user_count = count_user_messages(messages)
+    return prefix, tri, req_data, q1, user_count
+
+
+def export_one_file(task: Tuple[Path, str, str, dict, dict]) -> Tuple[str, str, Optional[dict]]:
+    out, folder_prefix, prefix, tri, req_data = task
+
+    merged = dict(req_data)
+    if "headers" in tri:
+        try:
+            merged["header"] = load_json(tri["headers"])
+        except Exception as e:
+            print(f"[warn] 读取 headers 失败 {prefix}: {e}")
+            merged["header"] = {}
+    else:
+        merged["header"] = {}
+
+    if "res" in tri:
+        try:
+            merged["response"] = parse_response(load_json(tri["res"]))
+        except Exception as e:
+            print(f"[warn] 解析 res 失败 {prefix}: {e}")
+            merged["response"] = {}
+    else:
+        merged["response"] = {}
+
+    out_file = out / folder_prefix / f"{prefix}.json"
+    with open(out_file, "w", encoding="utf-8") as fh:
+        json.dump(merged, fh, ensure_ascii=False, indent=2)
+    return folder_prefix, f"{prefix}.json", merged
 
 
 def main():
@@ -93,7 +144,9 @@ def main():
         print(f"[info] 增量模式：base-output={base_out}，cutoff={cutoff}")
 
     # ── 收集三元组并过滤 ─────────────────────────────────────────
+    collect_start = time.perf_counter()
     new_triplets, new_prefixes, _ = collect_new_triplets(src, cutoff)
+    collect_elapsed = time.perf_counter() - collect_start
 
     if not new_triplets and not base_index:
         sys.exit("[error] 未找到任何 req/headers/res 文件")
@@ -119,29 +172,40 @@ def main():
             sessions.append(session)
             latest_session_by_q1[q1] = session
 
-    skipped = 0
-    for prefix in new_prefixes:
-        tri = new_triplets[prefix]
-        if "req" not in tri:
-            skipped += 1
-            continue
-        try:
-            req_data = load_json(tri["req"])
-        except Exception as e:
-            print(f"[warn] 读取 req 失败 {tri['req']}: {e}")
-            skipped += 1
-            continue
+    preload_start = time.perf_counter()
+    preload_tasks: List[Tuple[str, dict]] = [
+        (prefix, new_triplets[prefix])
+        for prefix in new_prefixes
+        if "req" in new_triplets[prefix]
+    ]
 
-        messages = extract_messages(req_data)
-        if not messages:
-            skipped += 1
-            continue
+    preloaded: List[Tuple[str, dict, dict, str, int]] = []
+    skipped = len(new_prefixes) - len(preload_tasks)
+    max_workers = os.cpu_count() or 1
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(preload_request, task): task for task in preload_tasks}
+        with tqdm(total=len(preload_tasks), desc="预解析请求", unit="req") as bar:
+            for future in as_completed(futures):
+                prefix, tri, req_data, q1, user_count = future.result()
+                bar.update(1)
+                if req_data is None or q1 is None or user_count is None:
+                    skipped += 1
+                    continue
+                preloaded.append((prefix, tri, req_data, q1, user_count))
+    preload_elapsed = time.perf_counter() - preload_start
 
-        q1 = get_first_user_text(messages)
-        user_count = count_user_messages(messages)
+    group_start = time.perf_counter()
+    preloaded.sort(key=lambda item: item[0])
+
+    for prefix, tri, req_data, q1, user_count in preloaded:
 
         if user_count <= 1:
-            session = {"folder_prefix": prefix, "q1": q1, "items": [(prefix, tri)], "from_base": False}
+            session = {
+                "folder_prefix": prefix,
+                "q1": q1,
+                "items": [(prefix, tri, req_data)],
+                "from_base": False,
+            }
             sessions.append(session)
             latest_session_by_q1[q1] = session
         else:
@@ -150,59 +214,29 @@ def main():
                 session = {"folder_prefix": prefix, "q1": q1, "items": [], "from_base": False}
                 sessions.append(session)
                 latest_session_by_q1[q1] = session
-            session["items"].append((prefix, tri))
+            session["items"].append((prefix, tri, req_data))
+    group_elapsed = time.perf_counter() - group_start
 
     print(f"[info] 共 {len(sessions)} 个 session，跳过 {skipped} 个三元组")
 
     # ── 导出 ─────────────────────────────────────────────────────
+    export_start = time.perf_counter()
     active_sessions = [s for s in sessions if s.get("items")]
     index_entries: List[dict] = []
-    all_items: List[Tuple] = [
-        (s, prefix, tri)
+    all_items: List[Tuple[Path, str, str, dict, dict]] = [
+        (out, s["folder_prefix"], prefix, tri, req_data)
         for s in active_sessions
-        for prefix, tri in sorted(s["items"], key=lambda x: x[0])
+        for prefix, tri, req_data in sorted(s["items"], key=lambda x: x[0])
     ]
 
     for s in active_sessions:
         (out / s["folder_prefix"]).mkdir(parents=True, exist_ok=True)
 
-    def _export_one(task: Tuple) -> Tuple[str, str, Optional[dict]]:
-        session, prefix, tri = task
-        try:
-            req_data = load_json(tri["req"])
-        except Exception as e:
-            print(f"[warn] 读取 req 失败 {prefix}: {e}")
-            return session["folder_prefix"], f"{prefix}.json", None
-
-        merged = dict(req_data)
-        if "headers" in tri:
-            try:
-                merged["header"] = load_json(tri["headers"])
-            except Exception as e:
-                print(f"[warn] 读取 headers 失败 {prefix}: {e}")
-                merged["header"] = {}
-        else:
-            merged["header"] = {}
-
-        if "res" in tri:
-            try:
-                merged["response"] = parse_response(load_json(tri["res"]))
-            except Exception as e:
-                print(f"[warn] 解析 res 失败 {prefix}: {e}")
-                merged["response"] = {}
-        else:
-            merged["response"] = {}
-
-        out_file = out / session["folder_prefix"] / f"{prefix}.json"
-        with open(out_file, "w", encoding="utf-8") as fh:
-            json.dump(merged, fh, ensure_ascii=False, indent=2)
-        return session["folder_prefix"], f"{prefix}.json", merged
-
     results: Dict[str, List[Tuple[str, dict]]] = {s["folder_prefix"]: [] for s in active_sessions}
     exported_files = 0
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(_export_one, task): task for task in all_items}
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(export_one_file, task): task for task in all_items}
         with tqdm(total=len(all_items), desc="导出文件", unit="file") as bar:
             for future in as_completed(futures):
                 folder_prefix, filename, merged = future.result()
@@ -210,7 +244,9 @@ def main():
                 if merged is not None:
                     results[folder_prefix].append((filename, merged))
                     exported_files += 1
+    export_elapsed = time.perf_counter() - export_start
 
+    index_start = time.perf_counter()
     for session in active_sessions:
         best_file: Optional[str] = None
         best_msg_count = -1
@@ -246,9 +282,20 @@ def main():
     index_path = out / "index.json"
     with open(index_path, "w", encoding="utf-8") as fh:
         json.dump(index_entries, fh, ensure_ascii=False, indent=2)
+    index_elapsed = time.perf_counter() - index_start
 
     print(f"[done] 导出 {exported_files} 个新文件，{len(index_entries)} 个 session → {out}")
     print(f"[done] index.json 已生成: {index_path}")
+    print(
+        "[timing] collect=%s preload=%s group=%s export=%s index=%s"
+        % (
+            format_stage_seconds(collect_elapsed),
+            format_stage_seconds(preload_elapsed),
+            format_stage_seconds(group_elapsed),
+            format_stage_seconds(export_elapsed),
+            format_stage_seconds(index_elapsed),
+        )
+    )
 
 
 if __name__ == "__main__":
