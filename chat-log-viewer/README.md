@@ -303,6 +303,40 @@ python analyze_sessions.py ./sessions/key1 --out ./reports/key1
 - tool_use / tool_result 次数及工具成功率
 - 对话时长分布、API call 次数分布等
 
+**`analyze_best_data()` 统计口径：**
+
+分析脚本会以单个 session 目录中时间最新的 JSON 文件作为 `best_data`，并基于该文件一次性完成主要统计，避免对同一份 `messages` 重复扫描。
+
+- `q1`
+  第一条 `role == "user"` 的消息文本，去除头部噪声后得到首问。
+- `user_turns`
+  对每条 `user` 消息，只要其 `content` 中存在非 `tool_result` block，就记为一个用户轮次。
+- `tool_use_count`
+  统计两部分中的 `tool_use` block：
+  `messages` 里所有 `assistant` 消息的 `content`；
+  `response.content` 中的最终响应块。
+- `tool_result_count`
+  仅统计 `user` 消息中的 `tool_result` block。
+- `tool_success` / `tool_fail_flag` / `tool_fail_keyword`
+  `tool_result` 若 `is_error=true`，记入 `tool_fail_flag`；
+  否则提取文本并按错误关键字规则检测，命中则记入 `tool_fail_keyword`，未命中则记为成功。
+- `tool_use_detail` / `tool_success_detail` / `tool_fail_detail`
+  `tool_use` 先按 `id -> name` 建立映射，后续 `tool_result` 通过 `tool_use_id` 回查对应工具名；缺失时记为 `unknown`。
+- `skills_used`
+  仅识别工具名为 `read` 的 `tool_use`，并从 `input.file_path` 或 `input.path` 中匹配
+  `.openclaw/skills/<skill>/SKILL.md`，按 `<skill>` 聚合计数。
+- `total_messages`
+  等于 `len(messages)`，若 `response.content` 存在，再额外加 1，表示最终 assistant 响应。
+
+**质量检查规则：**
+
+- `E001`
+  若 `messages content`、`thinking/reasoning_content` 或 `response.content` 中存在疑似乱码文本，则标记。
+- `E002`
+  若 `response.status_code == 200` 且 `response.content` 为空，则标记为空响应。
+- `E003`
+  若 `tool_use_count < 3`，则标记为工具调用过少。
+
 ---
 
 ### export_sessions.py — 会话导出

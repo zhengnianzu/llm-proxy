@@ -358,6 +358,191 @@ def fmt_quality(error_codes: List[str]) -> tuple:
     return codes, note
 
 
+def _extract_first_user_text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = [b.get("text") or b.get("id") or "" for b in content if isinstance(b, dict)]
+        text = "\n".join(p for p in parts if p)
+    else:
+        text = str(content)
+
+    while True:
+        prev = text
+        text = re.sub(r"^\s*\[[^\]]*\]\s*", "", text)
+        text = re.sub(
+            r"^Sender\s*(?:\([^)]*\))?:\s*```json\s*\{[\s\S]*?\}\s*```\s*",
+            "", text, flags=re.IGNORECASE,
+        )
+        text = re.sub(r"^Sender\s*(?:\([^)]*\))?:[^\n]*\n?", "", text, flags=re.IGNORECASE)
+        if text == prev:
+            break
+    return text.strip()
+
+
+def _new_best_data_stats() -> Dict[str, Any]:
+    return {
+        "q1": "",
+        "user_turns": 0,
+        "tool_use_count": 0,
+        "tool_result_count": 0,
+        "tool_success": 0,
+        "tool_fail_flag": 0,
+        "tool_fail_keyword": 0,
+        "tool_use_detail": Counter(),
+        "tool_success_detail": Counter(),
+        "tool_fail_detail": Counter(),
+        "skills_used": Counter(),
+        "id_to_name": {},
+        "has_garbled": False,
+    }
+
+
+def _mark_garbled_from_content(content: Any, stats: Dict[str, Any]) -> None:
+    text = _collect_text(content)
+    if text and _is_garbled(text):
+        stats["has_garbled"] = True
+    if isinstance(content, list):
+        for blk in content:
+            if not isinstance(blk, dict):
+                continue
+            thinking = blk.get("thinking") or blk.get("reasoning_content") or ""
+            if isinstance(thinking, str) and _is_garbled(thinking):
+                stats["has_garbled"] = True
+
+
+def _record_skill_use(name: str, blk: dict, stats: Dict[str, Any]) -> None:
+    if name != "read":
+        return
+    inp = blk.get("input") or {}
+    if isinstance(inp, str):
+        try:
+            inp = json.loads(inp)
+        except Exception:
+            inp = {}
+    if not isinstance(inp, dict):
+        inp = {}
+    file_path = inp.get("file_path") or inp.get("path") or ""
+    if "SKILL.md" not in file_path:
+        return
+    match = _SKILL_PATH_RE.search(file_path)
+    if match:
+        stats["skills_used"][match.group(1)] += 1
+
+
+def _record_tool_use(blk: dict, stats: Dict[str, Any]) -> None:
+    tool_id = blk.get("id", "")
+    name = blk.get("name", "unknown")
+    if tool_id:
+        stats["id_to_name"][tool_id] = name
+    stats["tool_use_detail"][name] += 1
+    stats["tool_use_count"] += 1
+    _record_skill_use(name, blk, stats)
+
+
+def _record_tool_result(blk: dict, stats: Dict[str, Any]) -> None:
+    stats["tool_result_count"] += 1
+    name = stats["id_to_name"].get(blk.get("tool_use_id", ""), "unknown")
+    if blk.get("is_error"):
+        stats["tool_fail_flag"] += 1
+        stats["tool_fail_detail"][name] += 1
+        return
+
+    text = _collect_text(blk.get("content", ""))
+    if _has_error_keywords(text):
+        stats["tool_fail_keyword"] += 1
+        stats["tool_fail_detail"][name] += 1
+    else:
+        stats["tool_success"] += 1
+        stats["tool_success_detail"][name] += 1
+
+
+def _analyze_user_message(content: Any, stats: Dict[str, Any]) -> None:
+    has_non_tool_result = False
+    for blk in iter_blocks(content):
+        blk_type = blk.get("type")
+        if blk_type != "tool_result":
+            has_non_tool_result = True
+        if blk_type == "tool_result":
+            _record_tool_result(blk, stats)
+    if has_non_tool_result:
+        stats["user_turns"] += 1
+
+
+def _analyze_assistant_message(content: Any, stats: Dict[str, Any]) -> None:
+    for blk in iter_blocks(content):
+        if blk.get("type") == "tool_use":
+            _record_tool_use(blk, stats)
+
+
+def _build_quality_errors(resp: dict, resp_content: Any, stats: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    if stats["has_garbled"]:
+        errors.append("E001")
+    if resp.get("status_code") == 200 and not resp_content:
+        errors.append("E002")
+    if stats["tool_use_count"] < 3:
+        errors.append("E003")
+    return errors
+
+
+def analyze_best_data(best_data: dict) -> Dict[str, Any]:
+    """在一次 pass 中完成单个 best_data 的主要统计。
+
+    这里刻意保持与旧逻辑一致：
+    - Q1 取第一条 user 消息文本
+    - user_turns 仅在 user message 含非 tool_result block 时计数
+    - tool_result 只从 user message 中统计
+    - tool_use 同时统计 assistant messages 与最终 response.content
+    """
+    messages: List[dict] = best_data.get("messages") or []
+    resp = best_data.get("response") or {}
+    resp_content = resp.get("content")
+    stats = _new_best_data_stats()
+
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", [])
+
+        if role == "user" and not stats["q1"]:
+            stats["q1"] = _extract_first_user_text_from_content(content)
+
+        if role == "user":
+            _analyze_user_message(content, stats)
+        elif role == "assistant":
+            _analyze_assistant_message(content, stats)
+
+        # 质量检查依赖正文和 thinking/reasoning 内容，这里与主统计一并扫描。
+        _mark_garbled_from_content(content, stats)
+
+    if isinstance(resp_content, list):
+        for blk in resp_content:
+            if isinstance(blk, dict) and blk.get("type") == "tool_use":
+                _record_tool_use(blk, stats)
+        _mark_garbled_from_content(resp_content, stats)
+
+    tool_result_count = stats["tool_result_count"]
+    return {
+        "q1": stats["q1"],
+        "total_messages": len(messages) + (1 if resp_content else 0),
+        "user_turns": stats["user_turns"],
+        "tool_use_count": stats["tool_use_count"],
+        "tool_result_count": tool_result_count,
+        "tool_success": stats["tool_success"],
+        "tool_fail_flag": stats["tool_fail_flag"],
+        "tool_fail_keyword": stats["tool_fail_keyword"],
+        "tool_fail_total": stats["tool_fail_flag"] + stats["tool_fail_keyword"],
+        "tool_success_rate": (
+            round(stats["tool_success"] / tool_result_count * 100, 1) if tool_result_count > 0 else None
+        ),
+        "tool_use_detail": dict(stats["tool_use_detail"]),
+        "tool_success_detail": dict(stats["tool_success_detail"]),
+        "tool_fail_detail": dict(stats["tool_fail_detail"]),
+        "skills_used": dict(stats["skills_used"]),
+        "quality_errors": _build_quality_errors(resp, resp_content, stats),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 单 session 分析
 # ---------------------------------------------------------------------------
@@ -386,24 +571,7 @@ def analyze_session(folder: Path) -> Optional[Dict]:
         if resp["status_code"] >= 400:
             api_errors = 1
 
-    messages: List[dict] = best_data.get("messages") or []
-    resp_content = (best_data.get("response") or {}).get("content")
-    full_messages = messages + (
-        [{"role": "assistant", "content": resp_content}] if resp_content else []
-    )
-
-    q1             = get_q1(messages)
-    user_turns     = count_user_turns(full_messages)
-    total_messages = len(full_messages)
-    tool_use_cnt   = count_tool_use(messages, resp_content)
-    tr             = analyze_tool_results(full_messages)
-    td             = analyze_tools_detail(full_messages)
-    skills         = analyze_skills(full_messages)
-
-    tool_result_cnt   = tr["total"]
-    tool_success_rate = (
-        round(tr["success"] / tool_result_cnt * 100, 1) if tool_result_cnt > 0 else None
-    )
+    analyzed = analyze_best_data(best_data)
 
     return {
         "session":            folder.name,
@@ -412,23 +580,23 @@ def analyze_session(folder: Path) -> Optional[Dict]:
         "duration_s":         duration_s,
         "api_call_count":     api_call_count,
         "api_errors":         api_errors,
-        "user_turns":         user_turns,
-        "total_messages":     total_messages,
-        "tool_use_count":     tool_use_cnt,
-        "tool_result_count":  tool_result_cnt,
-        "tool_success":       tr["success"],
-        "tool_fail_flag":     tr["fail_flag"],
-        "tool_fail_keyword":  tr["fail_kw"],
-        "tool_fail_total":    tr["fail_total"],
-        "tool_success_rate":  tool_success_rate,
+        "user_turns":         analyzed["user_turns"],
+        "total_messages":     analyzed["total_messages"],
+        "tool_use_count":     analyzed["tool_use_count"],
+        "tool_result_count":  analyzed["tool_result_count"],
+        "tool_success":       analyzed["tool_success"],
+        "tool_fail_flag":     analyzed["tool_fail_flag"],
+        "tool_fail_keyword":  analyzed["tool_fail_keyword"],
+        "tool_fail_total":    analyzed["tool_fail_total"],
+        "tool_success_rate":  analyzed["tool_success_rate"],
         "model":              best_data.get("model", ""),
-        "q1":                 q1,
-        "tool_use_detail":    td["use"],
-        "tool_success_detail": td["success"],
-        "tool_fail_detail":   td["fail"],
-        "skills_used":        skills,
+        "q1":                 analyzed["q1"],
+        "tool_use_detail":    analyzed["tool_use_detail"],
+        "tool_success_detail": analyzed["tool_success_detail"],
+        "tool_fail_detail":   analyzed["tool_fail_detail"],
+        "skills_used":        analyzed["skills_used"],
         **dict(zip(("completed", "completed_note"),
-                   fmt_quality(check_quality(best_data, tool_use_cnt)))),
+                   fmt_quality(analyzed["quality_errors"]))),
     }
 
 
