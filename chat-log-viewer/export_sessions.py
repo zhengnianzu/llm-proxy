@@ -74,6 +74,45 @@ def format_stage_seconds(seconds: float) -> str:
     return f"{seconds:.2f}s"
 
 
+class _LogProgress:
+    """非 TTY 输出时使用普通日志进度，便于 nohup/tail -f 观察。"""
+
+    def __init__(self, desc: str = "", unit: str = "it", every: int = 200):
+        self.desc = desc or "progress"
+        self.unit = unit
+        self.every = max(1, every)
+        self.count = 0
+        self.start = time.perf_counter()
+
+    def __enter__(self):
+        print(f"[progress] {self.desc} started", flush=True)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed = time.perf_counter() - self.start
+        print(
+            f"[progress] {self.desc} done count={self.count}{self.unit} elapsed={elapsed:.2f}s",
+            flush=True,
+        )
+        return False
+
+    def update(self, n: int = 1) -> None:
+        self.count += n
+        if self.count % self.every == 0:
+            elapsed = time.perf_counter() - self.start
+            rate = self.count / elapsed if elapsed > 0 else 0.0
+            print(
+                f"[progress] {self.desc} count={self.count}{self.unit} rate={rate:.2f}/{self.unit}/s",
+                flush=True,
+            )
+
+
+def make_progress(desc: str, unit: str, total: Optional[int] = None):
+    if sys.stdout.isatty():
+        return tqdm(total=total, desc=desc, unit=unit)
+    return _LogProgress(desc=desc, unit=unit)
+
+
 def preload_request(task: Tuple[str, dict]) -> Tuple[str, dict, Optional[str], Optional[int]]:
     prefix, tri = task
     try:
@@ -166,7 +205,7 @@ def stream_preload_requests(
 
     try:
         with open(index_path, "r", encoding="utf-8") as f:
-            with tqdm(desc="预解析请求", unit="req") as bar:
+            with make_progress(desc="预解析请求", unit="req") as bar:
                 for raw in f:
                     line = raw.strip()
                     if not line:
@@ -299,7 +338,7 @@ def main():
         skipped = len(new_prefixes) - len(preload_tasks)
         with ProcessPoolExecutor(max_workers=worker_num) as executor:
             futures = {executor.submit(preload_request, task): task for task in preload_tasks}
-            with tqdm(total=len(preload_tasks), desc="预解析请求", unit="req") as bar:
+            with make_progress(total=len(preload_tasks), desc="预解析请求", unit="req") as bar:
                 for future in as_completed(futures):
                     prefix, tri, q1, user_count = future.result()
                     bar.update(1)
@@ -378,7 +417,7 @@ def main():
 
     with ProcessPoolExecutor(max_workers=worker_num) as executor:
         futures = {executor.submit(export_one_file, task): task for task in all_items}
-        with tqdm(total=len(all_items), desc="导出文件", unit="file") as bar:
+        with make_progress(total=len(all_items), desc="导出文件", unit="file") as bar:
             for future in as_completed(futures):
                 folder_prefix, filename, msg_count, model, ok = future.result()
                 bar.update(1)
