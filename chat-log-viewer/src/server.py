@@ -4,23 +4,25 @@ Usage:
     python server.py --dir /path/to/logs /path/to/other_logs [--port 8080] [--host 0.0.0.0]
     python server.py --dirs /path/to/parents [--dirs /path/to/more_parents] [--port 8080]
     python server.py --session-dir /path/to/logs_session_a /path/to/logs_session_b [--port 8080]
+    python server.py --session-dir /path/to/logs_session_a --report-dir /path/to/report_a [--port 8080]
     python server.py --session-dirs /path/to/session_parents [--port 8080]
 """
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import logging
 import os
 import sys
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.utils.message_utils import (
@@ -44,6 +46,10 @@ parser.add_argument("--session-dir", "-s", action="append", nargs="+", default=N
                     help="Pre-exported session directory with index.json; can be specified multiple times")
 parser.add_argument("--session-dirs", action="append", nargs="+", default=None,
                     help="Parent directory whose immediate subdirectories are treated as session roots; can be specified multiple times")
+parser.add_argument("--report-dir", action="append", nargs="+", default=None,
+                    help="Analysis/report directory paired with --session-dir; defaults to <session_dir>/stat")
+parser.add_argument("--label", action="append", nargs="+", default=None,
+                    help="Display label paired with --session-dir; defaults to directory name")
 parser.add_argument("--port", "-p", type=int, default=8080)
 parser.add_argument("--host", default="0.0.0.0")
 args = parser.parse_args()
@@ -72,6 +78,44 @@ SESSION_PARENT_DIRS: List[Path] = [Path(p).resolve() for group in (args.session_
 for parent_dir in SESSION_PARENT_DIRS:
     if not parent_dir.is_dir():
         sys.exit(f"[error] Session parent directory not found: {parent_dir}")
+REPORT_DIRS: List[Path] = [Path(p).resolve() for group in (args.report_dir or []) for p in group]
+LABELS: List[str] = [label for group in (args.label or []) for label in group]
+if REPORT_DIRS and not SESSION_DIRS:
+    sys.exit("[error] --report-dir requires --session-dir")
+if len(REPORT_DIRS) > len(SESSION_DIRS):
+    sys.exit("[error] --report-dir count cannot exceed --session-dir count")
+if len(LABELS) > len(SESSION_DIRS):
+    sys.exit("[error] --label count cannot exceed --session-dir count")
+
+# ---------------------------------------------------------------------------
+# Source registry: each entry is a distinct source (even if session_dir is the same)
+# ---------------------------------------------------------------------------
+@dataclasses.dataclass
+class SourceEntry:
+    key: str
+    label: str
+    session_dir: Path
+    report_dir: Path
+
+SOURCE_ENTRIES: List[SourceEntry] = []
+_SOURCE_BY_KEY: Dict[str, SourceEntry] = {}
+
+def _build_source_entries():
+    """Build source entries from CLI args. Called once at startup."""
+    SOURCE_ENTRIES.clear()
+    _SOURCE_BY_KEY.clear()
+    for idx, session_dir in enumerate(SESSION_DIRS):
+        report_dir = REPORT_DIRS[idx] if idx < len(REPORT_DIRS) else (session_dir / "stat").resolve()
+        label = LABELS[idx] if idx < len(LABELS) else f"{session_dir.name or session_dir}"
+        # Use index in key to allow duplicate paths with different labels
+        digest = hashlib.md5(f"{idx}:{session_dir}".encode("utf-8")).hexdigest()[:12]
+        key = f"session-{digest}"
+        entry = SourceEntry(key=key, label=label, session_dir=session_dir, report_dir=report_dir)
+        SOURCE_ENTRIES.append(entry)
+        _SOURCE_BY_KEY[key] = entry
+
+if has_session_args:
+    _build_source_entries()
 
 # ---------------------------------------------------------------------------
 # App
@@ -84,6 +128,8 @@ _cache: Dict[str, List[Dict]] = {}
 _best: Dict[str, OrderedDict] = {}
 _scanned: Dict[str, Set[str]] = {}
 _index_line_count: Dict[str, int] = {}  # dir_key -> 已处理的 index.jsonl 行数（用于增量刷新）
+_report_meta_cache: Dict[str, Dict[str, Any]] = {}
+_analysis_summary_cache: Dict[str, Dict[str, Any]] = {}
 
 _SKIP_SUFFIXES = ("-res.json", "-headers.json")
 
@@ -112,12 +158,40 @@ def _dir_label(root: Path) -> str:
 
 
 def _session_key(root: Path) -> str:
+    """Legacy fallback — prefer using SourceEntry.key directly."""
     digest = hashlib.md5(str(root).encode("utf-8")).hexdigest()[:12]
     return f"session-{digest}"
 
 
 def _session_label(root: Path) -> str:
     return f"{root.name or root} - {root}"
+
+
+def _source_report_dir(source: SourceEntry) -> Path:
+    return source.report_dir
+
+
+def _source_report_meta(source: SourceEntry) -> Dict[str, Any]:
+    report_dir = _source_report_dir(source)
+    meta = {
+        "report_dir": str(report_dir),
+        "has_analysis": (report_dir / "session_analysis.json").is_file(),
+        "has_report_html": (report_dir / "session_report.html").is_file(),
+        "has_report_md": (report_dir / "session_report.md").is_file(),
+        "has_report_xlsx": (report_dir / "session_report.xlsx").is_file(),
+    }
+    _report_meta_cache[source.key] = meta
+    return meta
+
+
+def _get_report_file(source: SourceEntry, name: str) -> Path:
+    report_dir = _source_report_dir(source)
+    path = (report_dir / name).resolve()
+    if path.parent != report_dir.resolve():
+        raise HTTPException(status_code=400, detail="Invalid report path")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Report file not found")
+    return path
 
 
 def _discover_root_dirs() -> List[Path]:
@@ -162,14 +236,10 @@ def _sync_root_dirs() -> List[Path]:
     return roots
 
 
-def _discover_session_dirs() -> List[Path]:
-    roots: List[Path] = []
-    seen: Set[Path] = set()
-
-    for root in SESSION_DIRS:
-        if root not in seen and root.is_dir():
-            roots.append(root)
-            seen.add(root)
+def _discover_session_sources() -> List[SourceEntry]:
+    """Return all configured source entries, including dynamic ones from SESSION_PARENT_DIRS."""
+    sources: List[SourceEntry] = list(SOURCE_ENTRIES)
+    seen_keys: Set[str] = {s.key for s in sources}
 
     for parent in SESSION_PARENT_DIRS:
         try:
@@ -177,28 +247,38 @@ def _discover_session_dirs() -> List[Path]:
         except Exception:
             continue
         for child in children:
-            if child not in seen:
-                roots.append(child)
-                seen.add(child)
+            # Dynamic sources from parent dirs use path-based key (legacy behavior)
+            digest = hashlib.md5(str(child).encode("utf-8")).hexdigest()[:12]
+            key = f"session-{digest}"
+            if key not in seen_keys:
+                sources.append(SourceEntry(
+                    key=key,
+                    label=f"{child.name or child}",
+                    session_dir=child,
+                    report_dir=(child / "stat").resolve(),
+                ))
+                seen_keys.add(key)
 
-    return roots
+    return sources
 
 
-def _sync_session_dirs() -> List[Path]:
-    roots = _discover_session_dirs()
-    valid_keys = {_session_key(root) for root in roots}
+def _sync_session_dirs() -> List[SourceEntry]:
+    sources = _discover_session_sources()
+    valid_keys = {s.key for s in sources}
 
     for stale_key in list(_cache.keys()):
         if stale_key.startswith("session-") and stale_key not in valid_keys:
             _cache.pop(stale_key, None)
+            _report_meta_cache.pop(stale_key, None)
+            _analysis_summary_cache.pop(stale_key, None)
 
-    for root in roots:
-        key = _session_key(root)
-        if key not in _cache:
-            logger.info(f"[session-dirs] New root detected: {root}")
-            _cache[key] = scan_session_dir(root)
+    for source in sources:
+        if source.key not in _cache:
+            logger.info(f"[session-dirs] New source detected: {source.label} -> {source.session_dir}")
+            _cache[source.key] = scan_session_dir(source)
+            _analysis_summary_cache[source.key] = _build_analysis_summary(_cache[source.key])
 
-    return roots
+    return sources
 
 
 def _get_root_by_key(dir_key: Optional[str]) -> Path:
@@ -217,20 +297,195 @@ def _get_root_by_key(dir_key: Optional[str]) -> Path:
     raise HTTPException(status_code=404, detail="Directory not found")
 
 
-def _get_session_root_by_key(dir_key: Optional[str]) -> Path:
+def _get_source_by_key(dir_key: Optional[str]) -> SourceEntry:
     if not has_session_args:
         raise HTTPException(status_code=400, detail="Session directory selection is not available in scan mode")
-    roots = _sync_session_dirs()
-    if not roots:
+    sources = _sync_session_dirs()
+    if not sources:
         raise HTTPException(status_code=500, detail="No session directories configured")
     if dir_key is None:
-        if len(roots) == 1:
-            return roots[0]
+        if len(sources) == 1:
+            return sources[0]
         raise HTTPException(status_code=400, detail="Missing dir")
-    for root in roots:
-        if _session_key(root) == dir_key:
-            return root
+    for source in sources:
+        if source.key == dir_key:
+            return source
     raise HTTPException(status_code=404, detail="Directory not found")
+
+
+def _load_session_analysis(report_dir: Path) -> Dict[str, Dict[str, Any]]:
+    analysis_path = report_dir / "session_analysis.json"
+    if not analysis_path.exists():
+        return {}
+    try:
+        payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"[analysis] Failed to load {analysis_path}: {e}")
+        return {}
+
+    sessions = payload.get("sessions") if isinstance(payload, dict) else payload
+    if not isinstance(sessions, list):
+        logger.warning(f"[analysis] Invalid payload format: {analysis_path}")
+        return {}
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        session = item.get("session")
+        if not session:
+            continue
+        result[str(session)] = item
+    return result
+
+
+def _pct(values: List[float], p: int) -> float:
+    if not values:
+        return 0.0
+    sv = sorted(values)
+    idx = min(int(len(sv) * p / 100), len(sv) - 1)
+    return float(sv[idx])
+
+
+def _bucket_counts(values: List[float], buckets: List[tuple]) -> List[Dict[str, Any]]:
+    total = len(values)
+    rows: List[Dict[str, Any]] = []
+    for label, lo, hi in buckets:
+        count = sum(1 for v in values if v is not None and lo <= v < hi)
+        rows.append({
+            "label": label,
+            "count": count,
+            "pct": round(count / total * 100, 1) if total else 0.0,
+        })
+    return rows
+
+
+def _build_analysis_summary(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    analyzed = [item for item in items if item.get("analysis_available")]
+    total_sessions = len(items)
+    analysis_sessions = len(analyzed)
+    turns_vals = [int(item["user_turns"]) for item in analyzed if item.get("user_turns") is not None]
+    tool_use_vals = [int(item["tool_use_count"]) for item in analyzed if item.get("tool_use_count") is not None]
+    rate_vals = [float(item["tool_success_rate"]) for item in analyzed if item.get("tool_success_rate") is not None]
+    duration_vals = [float(item["duration_s"]) for item in analyzed if item.get("duration_s") is not None]
+    model_dist = Counter((item.get("model") or "(未知)") for item in analyzed)
+    completed_dist = Counter((item.get("completed") or "(未知)") for item in analyzed)
+    fail_tool_counter: Counter = Counter()
+    skills_counter: Counter = Counter()
+    for item in analyzed:
+        fail_tool_counter.update(item.get("tool_fail_detail") or {})
+        skills_counter.update(item.get("skills_used") or {})
+
+    ok_count = sum(1 for item in analyzed if item.get("completed") == 0)
+
+    return {
+        "total_sessions": total_sessions,
+        "analysis_sessions": analysis_sessions,
+        "kpis": {
+            "quality_passed": ok_count,
+            "quality_passed_rate": round(ok_count / analysis_sessions * 100, 1) if analysis_sessions else None,
+            "avg_tool_success_rate": round(sum(rate_vals) / len(rate_vals), 1) if rate_vals else None,
+            "p90_duration_s": round(_pct(duration_vals, 90), 1) if duration_vals else None,
+            "total_skills": len(skills_counter),
+        },
+        "charts": {
+            "user_turns_hist": _bucket_counts(turns_vals, [
+                ("1", 1, 2), ("2-3", 2, 4), ("4-7", 4, 8), ("8-15", 8, 16), (">15", 16, 10 ** 9),
+            ]),
+            "tool_use_hist": _bucket_counts(tool_use_vals, [
+                ("1-5", 1, 6), ("6-15", 6, 16), ("16-30", 16, 31), ("31-50", 31, 51), (">50", 51, 10 ** 9),
+            ]),
+            "tool_success_rate_hist": _bucket_counts(rate_vals, [
+                ("0-50%", 0, 50), ("50-80%", 50, 80), ("80-95%", 80, 95), ("95-99%", 95, 100), ("100%", 100, 101),
+            ]),
+            "duration_hist": _bucket_counts(duration_vals, [
+                ("<1min", 0, 60), ("1-5min", 60, 300), ("5-15min", 300, 900), ("15-30min", 900, 1800), (">30min", 1800, 10 ** 9),
+            ]),
+            "model_dist": [
+                {"label": label, "count": count, "pct": round(count / analysis_sessions * 100, 1) if analysis_sessions else 0.0}
+                for label, count in model_dist.most_common(8)
+            ],
+            "completed_dist": [
+                {"label": str(label), "count": count, "pct": round(count / analysis_sessions * 100, 1) if analysis_sessions else 0.0}
+                for label, count in completed_dist.most_common(8)
+            ],
+            "tool_fail_top": [
+                {"label": label, "count": count}
+                for label, count in fail_tool_counter.most_common(10)
+            ],
+            "skills_dist": [
+                {"label": label, "count": count}
+                for label, count in skills_counter.most_common(15)
+            ],
+        },
+    }
+
+
+def _build_source_summary(source: SourceEntry, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    analyzed = [item for item in items if item.get("analysis_available")]
+    total_sessions = len(items)
+    analysis_sessions = len(analyzed)
+    ok_count = sum(1 for item in analyzed if item.get("completed") == 0)
+    success_rate = round(ok_count / analysis_sessions * 100, 1) if analysis_sessions else None
+    rate_vals = [float(item["tool_success_rate"]) for item in analyzed if item.get("tool_success_rate") is not None]
+    duration_vals = [float(item["duration_s"]) for item in analyzed if item.get("duration_s") is not None]
+    skills_set: set = set()
+    for item in analyzed:
+        skills_set.update((item.get("skills_used") or {}).keys())
+    return {
+        "key": source.key,
+        "label": source.label,
+        "session_dir": str(source.session_dir),
+        "report_dir": str(source.report_dir),
+        "total_sessions": total_sessions,
+        "analysis_sessions": analysis_sessions,
+        "success_rate": success_rate,
+        "avg_tool_success_rate": round(sum(rate_vals) / len(rate_vals), 1) if rate_vals else None,
+        "quality_passed": ok_count,
+        "total_skills": len(skills_set),
+        "p90_duration_s": round(_pct(duration_vals, 90), 1) if duration_vals else None,
+        "has_analysis": any(item.get("analysis_available") for item in items),
+        "has_report_html": (source.report_dir / "session_report.html").is_file(),
+    }
+
+
+def _merge_session_analysis(base_item: Dict[str, Any], analysis_item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = dict(base_item)
+    merged["session"] = str(base_item.get("rel_path", "")).split("/", 1)[0] if base_item.get("rel_path") else ""
+    merged["q1"] = base_item.get("label", "")
+    merged["analysis_available"] = bool(analysis_item)
+    if not analysis_item:
+        return merged
+
+    for field in (
+        "start_time",
+        "end_time",
+        "duration_s",
+        "api_call_count",
+        "api_errors",
+        "user_turns",
+        "total_messages",
+        "tool_use_count",
+        "tool_result_count",
+        "tool_success",
+        "tool_fail_flag",
+        "tool_fail_keyword",
+        "tool_fail_total",
+        "tool_success_rate",
+        "completed",
+        "completed_note",
+        "tool_use_detail",
+        "tool_success_detail",
+        "tool_fail_detail",
+        "skills_used",
+    ):
+        if field in analysis_item:
+            merged[field] = analysis_item[field]
+    if analysis_item.get("q1") and not merged.get("label"):
+        merged["label"] = analysis_item["q1"]
+        merged["label_short"] = str(analysis_item["q1"])[:120]
+        merged["q1"] = analysis_item["q1"]
+    return merged
 
 
 def _parse_file(abs_path: Path, root_dir: Path, dir_key: str, dir_label: str) -> Optional[Dict]:
@@ -350,7 +605,8 @@ def scan_directory(root_dir: Path, incremental: bool = False) -> List[Dict]:
     return result
 
 
-def scan_session_dir(session_dir: Path) -> List[Dict]:
+def scan_session_dir(source: SourceEntry) -> List[Dict]:
+    session_dir = source.session_dir
     index_path = session_dir / "index.json"
     if not index_path.exists():
         logger.warning(f"[session] index.json not found: {index_path}")
@@ -362,23 +618,28 @@ def scan_session_dir(session_dir: Path) -> List[Dict]:
         logger.error(f"[session] Failed to load index.json: {e}")
         return []
 
+    analysis_by_session = _load_session_analysis(_source_report_dir(source))
     result = []
     for idx, entry in enumerate(entries):
         folder = entry.get("folder", "")
         latest = entry.get("latest_file", "")
         if not folder or not latest:
             continue
-        result.append({
+        item = {
             "label": entry.get("q1", ""),
             "label_short": (entry.get("q1") or "")[:120],
             "msg_count": entry.get("msg_count", 0),
             "model": entry.get("model", ""),
             "rel_path": f"{folder}/{latest}",
-            "dir_key": _session_key(session_dir),
-            "dir_label": _session_label(session_dir),
+            "dir_key": source.key,
+            "dir_label": source.label,
             "id": idx,
-        })
-    logger.info(f"[session] Loaded {len(result)} sessions from index")
+        }
+        result.append(_merge_session_analysis(item, analysis_by_session.get(folder)))
+    logger.info(
+        f"[session] Loaded {len(result)} sessions from index"
+        f" (analysis matched: {sum(1 for item in result if item.get('analysis_available'))})"
+    )
     return result
 
 
@@ -394,8 +655,8 @@ def index():
 @app.get("/api/list")
 def api_list(dir: Optional[str] = Query(default=None)):
     if has_session_args:
-        session_dir = _get_session_root_by_key(dir)
-        return JSONResponse(_cache.get(_session_key(session_dir), []))
+        source = _get_source_by_key(dir)
+        return JSONResponse(_cache.get(source.key, []))
     root_dir = _get_root_by_key(dir)
     return JSONResponse(_cache.get(_dir_key(root_dir), []))
 
@@ -405,11 +666,11 @@ def api_refresh(dir: Optional[str] = Query(default=None)):
     global _cache
     if has_session_args:
         _sync_session_dirs()
-        session_dir = _get_session_root_by_key(dir)
-        session_key = _session_key(session_dir)
-        _cache[session_key] = scan_session_dir(session_dir)
-        logger.info(f"Refreshed {session_key}: {len(_cache[session_key])} conversations")
-        return JSONResponse({"count": len(_cache[session_key]), "dir": session_key})
+        source = _get_source_by_key(dir)
+        _cache[source.key] = scan_session_dir(source)
+        _analysis_summary_cache[source.key] = _build_analysis_summary(_cache[source.key])
+        logger.info(f"Refreshed {source.key}: {len(_cache[source.key])} conversations")
+        return JSONResponse({"count": len(_cache[source.key]), "dir": source.key})
 
     root_dir = _get_root_by_key(dir)
     dir_key = _dir_key(root_dir)
@@ -420,7 +681,11 @@ def api_refresh(dir: Optional[str] = Query(default=None)):
 
 @app.get("/api/file")
 def api_file(rel_path: str = Query(...), dir: Optional[str] = Query(default=None)):
-    base_dir = _get_session_root_by_key(dir) if has_session_args else _get_root_by_key(dir)
+    if has_session_args:
+        source = _get_source_by_key(dir)
+        base_dir = source.session_dir
+    else:
+        base_dir = _get_root_by_key(dir)
     try:
         abs_path = (base_dir / rel_path).resolve()
         # 兼容 index.jsonl 中 req_file 指向其他已注册根目录的情况
@@ -456,21 +721,105 @@ def api_file(rel_path: str = Query(...), dir: Optional[str] = Query(default=None
     return JSONResponse(data)
 
 
+@app.get("/api/report/meta")
+def api_report_meta(dir: Optional[str] = Query(default=None)):
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Reports are only available in session mode")
+    source = _get_source_by_key(dir)
+    meta = _source_report_meta(source)
+    return JSONResponse({
+        "dir": source.key,
+        "report_dir": meta["report_dir"],
+        "html": {
+            "exists": meta["has_report_html"],
+            "url": f"/report/view?dir={source.key}" if meta["has_report_html"] else None,
+        },
+        "md": {
+            "exists": meta["has_report_md"],
+            "url": f"/report/raw/md?dir={source.key}" if meta["has_report_md"] else None,
+        },
+        "xlsx": {
+            "exists": meta["has_report_xlsx"],
+            "url": f"/report/raw/xlsx?dir={source.key}" if meta["has_report_xlsx"] else None,
+        },
+    })
+
+
+@app.get("/report/view", response_class=HTMLResponse)
+def report_view(dir: Optional[str] = Query(default=None)):
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Reports are only available in session mode")
+    source = _get_source_by_key(dir)
+    html_path = _get_report_file(source, "session_report.html")
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/report/raw/md", response_class=PlainTextResponse)
+def report_raw_md(dir: Optional[str] = Query(default=None)):
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Reports are only available in session mode")
+    source = _get_source_by_key(dir)
+    md_path = _get_report_file(source, "session_report.md")
+    return PlainTextResponse(md_path.read_text(encoding="utf-8"))
+
+
+@app.get("/report/raw/xlsx")
+def report_raw_xlsx(dir: Optional[str] = Query(default=None)):
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Reports are only available in session mode")
+    source = _get_source_by_key(dir)
+    xlsx_path = _get_report_file(source, "session_report.xlsx")
+    return FileResponse(
+        str(xlsx_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=xlsx_path.name,
+    )
+
+
+@app.get("/api/analysis/summary")
+def api_analysis_summary(dir: Optional[str] = Query(default=None)):
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Analysis is only available in session mode")
+    source = _get_source_by_key(dir)
+    if source.key not in _analysis_summary_cache:
+        _cache[source.key] = scan_session_dir(source)
+        _analysis_summary_cache[source.key] = _build_analysis_summary(_cache[source.key])
+    return JSONResponse(_analysis_summary_cache[source.key])
+
+
+@app.get("/api/summary")
+def api_summary():
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Summary is only available in session mode")
+    sources = _sync_session_dirs()
+    result = []
+    for source in sources:
+        if source.key not in _cache:
+            _cache[source.key] = scan_session_dir(source)
+        if source.key not in _analysis_summary_cache:
+            _analysis_summary_cache[source.key] = _build_analysis_summary(_cache[source.key])
+        result.append(_build_source_summary(source, _cache[source.key]))
+    return JSONResponse({
+        "sources": result,
+        "total_sources": len(result),
+    })
+
+
 @app.get("/api/config")
 def api_config():
     if has_session_args:
-        roots = _sync_session_dirs()
+        sources = _sync_session_dirs()
         return JSONResponse({
             "mode": "session",
             "dirs": [
-                {
-                    "key": _session_key(root),
-                    "label": _session_label(root),
-                    "path": str(root),
-                }
-                for root in roots
+                dict({
+                    "key": source.key,
+                    "label": source.label,
+                    "path": str(source.session_dir),
+                }, **_source_report_meta(source))
+                for source in sources
             ],
-            "active_dir": _session_key(roots[0]) if len(roots) == 1 else None,
+            "active_dir": sources[0].key if len(sources) == 1 else None,
         })
     roots = _sync_root_dirs()
     dirs = [
@@ -498,11 +847,14 @@ if __name__ == "__main__":
             mode_desc.append("--session-dir")
         if SESSION_PARENT_DIRS:
             mode_desc.append("--session-dirs")
+        if REPORT_DIRS:
+            mode_desc.append("--report-dir")
         print(f"[chat-log-viewer] Mode       : session ({', '.join(mode_desc)})")
         for parent_dir in SESSION_PARENT_DIRS:
             print(f"[chat-log-viewer] Session parent: {parent_dir}")
-        for session_dir in _sync_session_dirs():
-            print(f"[chat-log-viewer] Session dir: {_session_key(session_dir)} -> {session_dir}")
+        for source in _sync_session_dirs():
+            print(f"[chat-log-viewer] Source     : {source.key} [{source.label}] -> {source.session_dir}")
+            print(f"[chat-log-viewer] Report dir : {source.report_dir}")
     else:
         mode_desc = []
         if ROOT_DIRS:

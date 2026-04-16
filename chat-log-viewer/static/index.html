@@ -3,14 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Log Viewer</title>
+    <title>Trace Analytics Platform</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
+        :root {
+            --bg: #f3f6fb;
+            --surface: #ffffff;
+            --surface-alt: #eef3f9;
+            --text: #1f2a37;
+            --muted: #6b7280;
+            --primary: #0f6c7b;
+            --primary-soft: #d8eef2;
+            --success: #1f9d68;
+            --warn: #d97706;
+            --danger: #d64545;
+            --border: #dbe3ec;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f7f7f8;
-            color: #2d3748;
+            background: var(--bg);
+            color: var(--text);
             height: 100vh;
             display: flex;
             flex-direction: column;
@@ -18,70 +32,103 @@
 
         /* ========= Header ========= */
         .header {
-            background: #fff;
-            padding: 10px 18px;
-            border-bottom: 1px solid #e5e7eb;
-            box-shadow: 0 1px 3px rgba(0,0,0,.05);
+            background: linear-gradient(90deg, #0f2733, #123e4a);
+            padding: 12px 18px;
+            border-bottom: 1px solid rgba(255,255,255,.08);
             display: flex;
             align-items: center;
             justify-content: space-between;
             flex-shrink: 0;
             gap: 12px;
         }
-        .header h1 { font-size: 16px; font-weight: 600; color: #1a202c; white-space: nowrap; }
+        .header-left { display: flex; align-items: center; gap: 18px; min-width: 0; }
+        .header h1 { font-size: 17px; font-weight: 700; color: #f8fbfd; white-space: nowrap; }
+        .nav-tabs { display: flex; align-items: center; gap: 8px; }
+        .nav-tab {
+            padding: 7px 12px; border-radius: 999px; border: 1px solid transparent;
+            color: #b8d6dc; background: transparent; font-size: 12px; font-weight: 600; cursor: pointer;
+        }
+        .nav-tab.active { background: rgba(255,255,255,.12); color: #fff; border-color: rgba(255,255,255,.12); }
+        .nav-tab.disabled { opacity: .55; cursor: not-allowed; }
         .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .label { font-size: 13px; color: #6b7280; white-space: nowrap; }
+        .label { font-size: 12px; color: #cfe2e7; white-space: nowrap; }
         .dir-select {
             min-width: 240px;
             max-width: 420px;
             padding: 7px 10px;
-            border: 1px solid #d1d5db;
+            border: 1px solid rgba(255,255,255,.18);
             border-radius: 7px;
             font-size: 13px;
-            color: #1f2937;
-            background: #fff;
+            color: #f1f5f9;
+            background: rgba(255,255,255,.06);
             outline: none;
         }
-        .dir-select:focus { border-color: #10a37f; }
+        .dir-select:focus { border-color: #8ec9d4; }
         .btn {
             padding: 7px 14px; border: none; border-radius: 7px;
             cursor: pointer; font-size: 13px; font-weight: 500;
             transition: background .18s; white-space: nowrap;
         }
-        .btn-green { background: #10a37f; color: #fff; }
-        .btn-green:hover { background: #0d8c6e; }
+        .btn-green { background: #1f9d68; color: #fff; }
+        .btn-green:hover { background: #167c52; }
+        .btn-ghost { background: rgba(255,255,255,.08); color: #edf8fb; border: 1px solid rgba(255,255,255,.12); }
         .stats-chip {
-            font-size: 11px; color: #6b7280; padding: 3px 8px;
-            background: #f3f4f6; border-radius: 999px; white-space: nowrap;
+            font-size: 11px; color: #e5f3f6; padding: 3px 8px;
+            background: rgba(255,255,255,.09); border-radius: 999px; white-space: nowrap;
         }
 
         /* ========= Layout ========= */
         .main { display: flex; flex: 1; overflow: hidden; }
+        .view { display: none; flex: 1; overflow: hidden; }
+        .view.active { display: flex; }
 
         /* ========= Sidebar ========= */
         .sidebar {
-            width: 300px; flex-shrink: 0;
-            background: #fff;
-            border-right: 1px solid #e5e7eb;
+            width: 350px; flex-shrink: 0;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
             display: flex; flex-direction: column; overflow: hidden;
         }
         .sidebar-toolbar {
-            padding: 8px 12px;
-            border-bottom: 1px solid #f3f4f6;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
             flex-shrink: 0;
-            display: flex; gap: 6px;
+            display: flex; flex-direction: column; gap: 8px;
+            background: linear-gradient(180deg, #f9fbfe, #f2f7fb);
         }
         .search-input {
             flex: 1; padding: 5px 9px;
-            border: 1px solid #d1d5db; border-radius: 6px;
+            border: 1px solid #cfd9e5; border-radius: 6px;
             font-size: 12px; outline: none;
         }
-        .search-input:focus { border-color: #10a37f; }
+        .search-input:focus { border-color: var(--primary); }
+        .toolbar-row { display: flex; gap: 6px; }
+        .toolbar-row > * { flex: 1; min-width: 0; }
+        .mini-select, .mini-input {
+            width: 100%; padding: 6px 8px; border-radius: 6px;
+            border: 1px solid #cfd9e5; background: #fff; font-size: 12px; outline: none;
+        }
+        .mini-select:focus, .mini-input:focus { border-color: var(--primary); }
+        .preset-row { display: flex; gap: 6px; flex-wrap: wrap; }
+        .preset-chip {
+            padding: 5px 8px; font-size: 11px; border-radius: 999px; cursor: pointer;
+            border: 1px solid #c8d9e7; background: #fff; color: #375069;
+        }
+        .preset-chip:hover { background: #eef6fb; }
+        .filter-list { display: flex; flex-direction: column; gap: 6px; }
+        .filter-chip {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 7px 9px; font-size: 11px; border-radius: 10px; background: #fff;
+            border: 1px solid #d7e3ed; color: #395165;
+        }
+        .filter-chip button {
+            border: none; background: transparent; cursor: pointer; color: #9a4e4e; font-size: 12px;
+        }
         .sidebar-hdr {
             padding: 7px 14px;
             font-size: 11px; font-weight: 600; color: #9ca3af;
             text-transform: uppercase; letter-spacing: .06em;
-            border-bottom: 1px solid #f3f4f6;
+            border-bottom: 1px solid var(--border);
             flex-shrink: 0;
         }
         .file-list { flex: 1; overflow-y: auto; }
@@ -90,12 +137,12 @@
 
         .file-item {
             padding: 10px 14px; cursor: pointer;
-            border-bottom: 1px solid #f3f4f6;
+            border-bottom: 1px solid #eef2f7;
             border-left: 3px solid transparent;
             transition: background .13s;
         }
         .file-item:hover { background: #f9fafb; }
-        .file-item.active { background: #f0fdf4; border-left-color: #10a37f; }
+        .file-item.active { background: #ebf7f9; border-left-color: var(--primary); }
         .file-item-label {
             font-size: 12.5px; color: #1e293b; line-height: 1.45;
             display: -webkit-box; -webkit-line-clamp: 3;
@@ -103,13 +150,291 @@
         }
         .file-item-meta { margin-top: 3px; font-size: 11px; color: #9ca3af; }
         .file-item-path { margin-top: 2px; font-size: 10px; color: #c4c9d4; word-break: break-all; }
+        .metric-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        .metric-pill {
+            font-size: 10px; border-radius: 999px; padding: 2px 7px;
+            background: #eef4f8; color: #476074; border: 1px solid #d9e4ee;
+        }
+        .metric-pill.warn { color: #9a5a08; background: #fff6e8; border-color: #f3d8ab; }
+        .metric-pill.danger { color: #a33131; background: #fff0f1; border-color: #f2c5c7; }
+        .metric-pill.success { color: #16644a; background: #edf9f3; border-color: #cce8d9; }
 
         .sidebar-tip { padding: 20px 14px; font-size: 13px; color: #9ca3af; text-align: center; }
 
         /* ========= Chat panel ========= */
-        .chat-panel { flex: 1; overflow-y: auto; padding: 24px 28px; background: #f7f7f8; }
+        .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .filter-bar {
+            padding: 12px 18px; border-bottom: 1px solid var(--border); background: #f7fbfd;
+            display: flex; align-items: center; justify-content: space-between; gap: 14px;
+        }
+        .filter-bar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+        .filter-bar-title { font-size: 12px; font-weight: 700; color: #355264; letter-spacing: .06em; text-transform: uppercase; }
+        .filter-pill-list { display: flex; flex-wrap: wrap; gap: 8px; }
+        .filter-pill {
+            display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px;
+            background: #fff; border: 1px solid #d6e3ed; color: #3f5769; font-size: 12px;
+        }
+        .filter-pill button {
+            border: none; background: transparent; color: #935555; cursor: pointer; font-size: 12px;
+        }
+        .filter-bar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+        .chat-panel { flex: 1; overflow-y: auto; padding: 24px 28px; background: var(--bg); }
         .chat-panel::-webkit-scrollbar { width: 6px; }
         .chat-panel::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 3px; }
+        .modal-backdrop {
+            position: fixed; inset: 0; background: rgba(15, 28, 38, .48);
+            display: none; align-items: center; justify-content: center; z-index: 50; padding: 24px;
+        }
+        .modal-backdrop.open { display: flex; }
+        .modal {
+            width: min(760px, 100%); background: #fff; border-radius: 18px; border: 1px solid #d9e4ec;
+            box-shadow: 0 20px 60px rgba(13, 29, 41, .24); overflow: hidden;
+        }
+        .modal-header {
+            padding: 16px 20px; background: linear-gradient(135deg, #1f4e79 0%, #2e75b6 100%);
+            color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        }
+        .modal-header h3 { font-size: 18px; font-weight: 700; }
+        .modal-close {
+            border: 1px solid rgba(255,255,255,.22); background: rgba(255,255,255,.1); color: #fff;
+            border-radius: 10px; width: 32px; height: 32px; cursor: pointer;
+        }
+        .modal-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+        .modal-footer {
+            padding: 14px 20px 20px; display: flex; justify-content: space-between; align-items: center; gap: 10px;
+        }
+        .modal-actions { display: flex; gap: 8px; }
+        .modal-hint { font-size: 12px; color: #708595; }
+        .detail-panel {
+            width: 320px; flex-shrink: 0; background: #f8fbfd; border-left: 1px solid var(--border);
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        .detail-panel.collapsed { width: 52px; }
+        .detail-header {
+            padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex;
+            align-items: center; justify-content: space-between; gap: 8px; background: #f4f9fc;
+        }
+        .detail-title { font-size: 13px; font-weight: 700; color: #294154; }
+        .detail-toggle {
+            border: 1px solid #cddce8; background: #fff; color: #486172; border-radius: 8px;
+            width: 28px; height: 28px; cursor: pointer;
+        }
+        .detail-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+        .detail-panel.collapsed .detail-body,
+        .detail-panel.collapsed .detail-title { display: none; }
+        .detail-empty { color: #90a0af; font-size: 13px; line-height: 1.6; }
+        .insight-card {
+            background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 12px;
+            box-shadow: 0 1px 2px rgba(15, 35, 55, 0.04);
+        }
+        .insight-card h3 { font-size: 12px; color: #577084; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .05em; }
+        .insight-row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 12.5px; }
+        .insight-row strong { color: #243849; font-weight: 600; }
+        .insight-row span { color: #607282; text-align: right; word-break: break-word; }
+        .analysis-badge {
+            display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 10px; font-weight: 700;
+            background: #edf7fb; color: var(--primary); border: 1px solid #cde2ea;
+        }
+        .analysis-badge.missing { background: #f3f4f6; color: #6b7280; border-color: #dde1e6; }
+        .detail-list { display: flex; flex-direction: column; gap: 6px; }
+        .detail-list-item {
+            display: flex; justify-content: space-between; gap: 8px; font-size: 12px;
+            padding: 6px 8px; border-radius: 8px; background: #f8fafc; border: 1px solid #e7edf4;
+        }
+        .detail-list-item code { font-size: 11px; }
+        .analysis-view, .reports-view {
+            flex: 1; overflow-y: auto; padding: 28px 32px; background: var(--bg);
+        }
+        .reports-view.active, .analysis-view.active {
+            display: block;
+        }
+        .analysis-layout { display: flex; flex-direction: column; gap: 20px; }
+
+        /* -- Analysis Hero -- */
+        .analysis-hero {
+            background: linear-gradient(135deg, #0e4d5e 0%, #1a7a8a 50%, #2e9dad 100%);
+            border-radius: 16px; padding: 24px 28px; color: #fff;
+            box-shadow: 0 8px 24px rgba(14, 77, 94, .18);
+            display: flex; align-items: center; justify-content: space-between; gap: 20px;
+        }
+        .analysis-hero-text h2 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+        .analysis-hero-text p { font-size: 13px; color: rgba(255,255,255,.78); }
+        .analysis-hero-stats { display: flex; gap: 16px; flex-shrink: 0; }
+        .analysis-hero-stat {
+            background: rgba(255,255,255,.13); border-radius: 12px; padding: 14px 18px;
+            text-align: center; min-width: 100px; backdrop-filter: blur(4px);
+        }
+        .analysis-hero-stat .stat-value { font-size: 26px; font-weight: 700; }
+        .analysis-hero-stat .stat-label { font-size: 11px; color: rgba(255,255,255,.7); margin-top: 2px; text-transform: uppercase; letter-spacing: .06em; }
+
+        /* -- KPI Cards -- */
+        .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+        .kpi-card {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px;
+            box-shadow: 0 2px 8px rgba(19, 37, 55, .04);
+            display: flex; align-items: flex-start; gap: 14px;
+            transition: box-shadow .2s, transform .2s;
+        }
+        .kpi-card:hover { box-shadow: 0 4px 16px rgba(19, 37, 55, .08); transform: translateY(-1px); }
+        .kpi-icon {
+            width: 42px; height: 42px; border-radius: 12px; display: flex;
+            align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0;
+        }
+        .kpi-icon.blue   { background: #e8f4f8; }
+        .kpi-icon.orange { background: #fff3e0; }
+        .kpi-icon.red    { background: #ffeef0; }
+        .kpi-icon.green  { background: #e8f5e9; }
+        .kpi-icon.purple { background: #f3e8ff; }
+        .kpi-body { flex: 1; min-width: 0; }
+        .kpi-label { font-size: 12px; color: #698090; text-transform: uppercase; letter-spacing: .05em; }
+        .kpi-value { font-size: 26px; font-weight: 700; color: #173043; margin-top: 6px; line-height: 1.1; }
+        .kpi-note { margin-top: 4px; font-size: 11px; color: #9aabb8; }
+
+        /* -- Chart Cards -- */
+        .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+        .chart-card {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+            box-shadow: 0 2px 8px rgba(19, 37, 55, .04); overflow: hidden;
+            transition: box-shadow .2s;
+        }
+        .chart-card:hover { box-shadow: 0 4px 16px rgba(19, 37, 55, .08); }
+        .chart-card-header {
+            padding: 14px 18px 10px; border-bottom: 1px solid #f0f4f8;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .chart-card-header .chart-icon { font-size: 16px; }
+        .chart-card-header h3 { font-size: 14px; color: #203646; font-weight: 600; margin: 0; }
+        .chart-card-body { padding: 14px 18px 18px; }
+        .dist-list { display: flex; flex-direction: column; gap: 10px; }
+        .dist-row {
+            display: grid; grid-template-columns: 90px 1fr 64px; gap: 10px;
+            align-items: center; font-size: 12px; padding: 4px 6px; border-radius: 8px;
+            transition: background .15s;
+        }
+        .dist-row:hover { background: #f7fafc; }
+        .dist-row strong { color: #40596b; font-weight: 600; }
+        .dist-bar { height: 12px; border-radius: 999px; background: #edf3f7; overflow: hidden; }
+        .dist-bar-fill { height: 100%; border-radius: 999px; transition: width .4s ease; }
+        .dist-bar-fill.bar-teal    { background: linear-gradient(90deg, #2f7e8d, #5cb8c4); }
+        .dist-bar-fill.bar-emerald { background: linear-gradient(90deg, #10b981, #6ee7b7); }
+        .dist-bar-fill.bar-amber   { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+        .dist-bar-fill.bar-rose    { background: linear-gradient(90deg, #e11d48, #fb7185); }
+        .dist-bar-fill.bar-indigo  { background: linear-gradient(90deg, #6366f1, #a5b4fc); }
+        .dist-bar-fill.bar-sky     { background: linear-gradient(90deg, #0ea5e9, #7dd3fc); }
+        .dist-bar-fill.bar-violet  { background: linear-gradient(90deg, #8b5cf6, #c4b5fd); }
+        .dist-value { text-align: right; color: #5f7485; font-variant-numeric: tabular-nums; font-size: 12px; }
+        .dist-row.clickable { cursor: pointer; }
+        .dist-row.clickable:hover { background: #eef5fa; }
+        .dist-row.clickable:hover strong { color: var(--primary); }
+        .analysis-empty {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 40px 24px;
+            color: #72889a; font-size: 14px; text-align: center;
+        }
+        .filter-summary {
+            padding: 8px 12px; border-bottom: 1px solid var(--border); background: #f8fbfe;
+            font-size: 12px; color: #5d7486; display: none;
+        }
+        .filter-summary.active { display: block; }
+        .filter-summary strong { color: #244050; }
+        .summary-hero {
+            max-width: 1100px; margin: 0 auto 20px; background: linear-gradient(135deg, #1a3a5c 0%, #2b6cb0 60%, #3b82c4 100%);
+            border-radius: 16px; padding: 28px 32px; color: #fff; box-shadow: 0 8px 24px rgba(26, 58, 92, .18);
+        }
+        .summary-hero h2 { font-size: 22px; font-weight: 700; margin-bottom: 6px; text-align: center; }
+        .summary-hero p { font-size: 13px; color: rgba(255, 255, 255, .78); text-align: center; }
+        .summary-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 14px; margin-top: 22px;
+        }
+        .summary-card {
+            background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.1); border-radius: 12px;
+            padding: 18px 16px; text-align: center; backdrop-filter: blur(4px);
+            transition: background .2s;
+        }
+        .summary-card:hover { background: rgba(255,255,255,.18); }
+        .summary-card h3 { font-size: 11px; color: rgba(255,255,255,.7); margin-bottom: 10px; text-transform: uppercase; letter-spacing: .08em; }
+        .summary-card p { color: #fff; font-size: 28px; font-weight: 700; line-height: 1.1; }
+        /* -- Source Cards (vertical layout) -- */
+        .source-cards {
+            max-width: 1100px; margin: 0 auto;
+            display: flex; flex-direction: column; gap: 16px;
+        }
+        .source-card {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+            box-shadow: 0 2px 8px rgba(19, 37, 55, .04); overflow: hidden;
+            transition: box-shadow .2s;
+        }
+        .source-card:hover { box-shadow: 0 4px 16px rgba(19, 37, 55, .08); }
+        .source-card-header {
+            padding: 16px 20px; border-bottom: 1px solid #eef3f8;
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        }
+        .source-card-title { font-size: 15px; font-weight: 700; color: #1a3a5c; }
+        .source-card-path { font-size: 11px; color: #8a9bb0; margin-top: 2px; word-break: break-all; }
+        .source-card-badge {
+            font-size: 11px; padding: 4px 10px; border-radius: 999px; font-weight: 600;
+            background: #eef6fb; color: #2e6676; border: 1px solid #d2e5ed; white-space: nowrap;
+        }
+        .source-card-body { padding: 16px 20px; }
+        .source-metrics {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px;
+        }
+        .source-metric {
+            display: flex; flex-direction: column; gap: 4px;
+        }
+        .source-metric-label {
+            font-size: 11px; color: #698090; text-transform: uppercase; letter-spacing: .04em;
+        }
+        .source-metric-value {
+            font-size: 20px; font-weight: 700; color: #173043; font-variant-numeric: tabular-nums;
+        }
+        .source-metric-value.warn { color: var(--warn); }
+        .source-metric-value.danger { color: var(--danger); }
+        .source-metric-value.success { color: var(--success); }
+        .source-rate-row {
+            display: flex; flex-direction: column; gap: 10px; margin-top: 14px;
+            padding-top: 14px; border-top: 1px solid #f0f4f8;
+        }
+        .source-rate-item {
+            display: flex; align-items: center; gap: 12px;
+        }
+        .source-rate-label { font-size: 12px; color: #698090; min-width: 80px; }
+        .source-rate-bar { flex: 1; }
+        .source-card-footer {
+            padding: 12px 20px; border-top: 1px solid #eef3f8;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .source-report-link {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 13px; font-weight: 600; color: #2e75b6; text-decoration: none;
+            padding: 6px 14px; border-radius: 8px; border: 1px solid #d2e5ed;
+            background: #f5fafd; transition: background .15s, border-color .15s;
+        }
+        .source-report-link:hover { background: #e8f2fa; border-color: #a8cde0; }
+
+        .summary-pill {
+            display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
+            background: #eef6fb; color: #2e6676; border: 1px solid #d2e5ed;
+        }
+        .rate-bar { display: flex; align-items: center; gap: 8px; min-width: 180px; }
+        .bar-wrap { flex: 1; background: #e8edf5; border-radius: 999px; height: 10px; overflow: hidden; }
+        .bar-fill  { height: 100%; border-radius: 999px; transition: width .4s ease; }
+        .bar-green { background: linear-gradient(90deg, #34c759, #5ae075); }
+        .bar-blue  { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+        .bar-pct   { font-size: 12px; color: #4a5e6d; font-weight: 600; min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; }
+        .summary-empty {
+            max-width: 1100px; margin: 0 auto; background: var(--surface); border: 1px solid var(--border);
+            border-radius: 16px; padding: 48px 24px; text-align: center; color: #8298a8;
+        }
+        .summary-empty .empty-icon { font-size: 48px; margin-bottom: 12px; opacity: .5; }
+        .summary-empty p { font-size: 14px; }
+        .placeholder-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+        .placeholder-card {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 18px;
+            min-height: 140px; box-shadow: 0 2px 8px rgba(19, 37, 55, .04);
+        }
+        .placeholder-card h3 { font-size: 14px; margin-bottom: 10px; color: #203646; }
+        .placeholder-card p { color: #698090; font-size: 13px; line-height: 1.7; }
 
         .empty-state {
             display: flex; flex-direction: column; align-items: center;
@@ -266,7 +591,14 @@
 <body>
 
 <div class="header">
-    <h1>💬 Chat Log Viewer</h1>
+    <div class="header-left">
+        <h1>Trace Analytics Platform</h1>
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-view="sessions">Sessions</button>
+            <button class="nav-tab" data-view="analysis">Analysis</button>
+            <button class="nav-tab" data-view="summary">Summary</button>
+        </div>
+    </div>
     <div class="header-right">
         <select id="dirSelect" class="dir-select" style="display:none"></select>
         <button class="btn btn-green" onclick="refreshList()">🔄 刷新</button>
@@ -275,27 +607,124 @@
 </div>
 
 <div class="main">
-    <!-- Sidebar -->
-    <div class="sidebar">
-        <div class="sidebar-toolbar">
-            <input class="search-input" type="text" id="searchInput" placeholder="搜索…" />
+    <div class="view active" id="sessionsView">
+        <div class="sidebar">
+            <div class="sidebar-toolbar">
+                <input class="search-input" type="text" id="searchInput" placeholder="搜索首问或路径…" />
+            </div>
+            <div class="sidebar-hdr" id="sidebarHdr">对话列表</div>
+            <div class="file-list" id="fileList">
+                <div class="sidebar-tip"><span class="spinner"></span>加载中…</div>
+            </div>
         </div>
-        <div class="sidebar-hdr" id="sidebarHdr">对话列表</div>
-        <div class="file-list" id="fileList">
-            <div class="sidebar-tip"><span class="spinner"></span>加载中…</div>
+
+        <div class="chat-main">
+            <div class="filter-bar">
+                <div class="filter-bar-left">
+                    <div class="filter-bar-title">Filters</div>
+                    <div class="filter-pill-list" id="filterPillList"></div>
+                </div>
+                <div class="filter-bar-right">
+                    <select id="sortField" class="mini-select" style="width:180px">
+                        <option value="msg_count">按消息数</option>
+                        <option value="tool_fail_total" class="analysis-option">按工具失败数</option>
+                        <option value="user_turns" class="analysis-option">按用户轮次</option>
+                        <option value="tool_success_rate" class="analysis-option">按工具成功率</option>
+                        <option value="duration_s" class="analysis-option">按时长</option>
+                        <option value="tool_use_count" class="analysis-option">按工具调用数</option>
+                    </select>
+                    <select id="sortOrder" class="mini-select" style="width:100px">
+                        <option value="desc">降序</option>
+                        <option value="asc">升序</option>
+                    </select>
+                    <button class="btn btn-green" id="openFilterModalBtn">编辑筛选</button>
+                    <button class="btn btn-ghost" id="clearFilterBtn">清空</button>
+                </div>
+            </div>
+            <div class="filter-summary" id="filterSummary"></div>
+            <div class="chat-panel" id="chatPanel">
+                <div class="empty-state">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863
+                               9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3
+                               12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                    </svg>
+                    <p>从左侧选择一个对话</p>
+                </div>
+            </div>
+        </div>
+
+        <aside class="detail-panel" id="detailPanel">
+            <div class="detail-header">
+                <div class="detail-title">Session 属性</div>
+                <button class="detail-toggle" id="detailToggleBtn">→</button>
+            </div>
+            <div class="detail-body" id="detailBody">
+                <div class="detail-empty">选择一条 session 后，这里会显示轮次、工具失败、时长、完成状态等属性。</div>
+            </div>
+        </aside>
+    </div>
+
+    <div class="view analysis-view" id="analysisView">
+        <div class="analysis-layout" id="analysisContent">
+            <div class="analysis-empty"><span class="spinner"></span>分析数据加载中…</div>
         </div>
     </div>
 
-    <!-- Chat panel -->
-    <div class="chat-panel" id="chatPanel">
-        <div class="empty-state">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863
-                       9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3
-                       12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-            </svg>
-            <p>从左侧选择一个对话</p>
+    <div class="view reports-view" id="summaryView">
+        <div class="placeholder-grid">
+            <div class="placeholder-card">
+                <h3>Summary 视图</h3>
+                <p>Summary 视图展示 source 级汇总，包括总条数、成功率和工具成功率。</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal-backdrop" id="filterModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h3>编辑筛选条件</h3>
+            <button class="modal-close" id="closeFilterModalBtn">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="toolbar-row">
+                <select id="filterField" class="mini-select">
+                    <option value="msg_count">消息数</option>
+                    <option value="model">模型</option>
+                    <option value="user_turns" class="analysis-option">用户轮次</option>
+                    <option value="tool_fail_total" class="analysis-option">工具失败数</option>
+                    <option value="tool_success_rate" class="analysis-option">工具成功率(%)</option>
+                    <option value="tool_use_count" class="analysis-option">工具调用数</option>
+                    <option value="duration_s" class="analysis-option">时长(s)</option>
+                    <option value="api_errors" class="analysis-option">API错误数</option>
+                    <option value="completed" class="analysis-option">完成状态</option>
+                </select>
+                <select id="filterOp" class="mini-select">
+                    <option value=">=">>=</option>
+                    <option value="<="><=</option>
+                    <option value="contains">包含</option>
+                    <option value="=">=</option>
+                </select>
+            </div>
+            <div class="toolbar-row">
+                <input id="filterValue" class="mini-input" type="text" placeholder="过滤值" />
+                <button class="btn btn-green" id="applyFilterBtn">添加条件</button>
+            </div>
+            <div class="preset-row">
+                <button class="preset-chip analysis-option" data-preset="high_turn_fail">高轮次异常</button>
+                <button class="preset-chip analysis-option" data-preset="low_success">低成功率</button>
+                <button class="preset-chip analysis-option" data-preset="heavy_tools">重工具调用</button>
+                <button class="preset-chip analysis-option" data-preset="api_error">API异常</button>
+            </div>
+            <div class="filter-list" id="filterList"></div>
+        </div>
+        <div class="modal-footer">
+            <div class="modal-hint">多条件按 AND 组合。分析页点击分布项后，也会把条件带到这里。</div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="closeFilterModalBtn2">关闭</button>
+            </div>
         </div>
     </div>
 </div>
@@ -305,25 +734,122 @@
 // State
 // ----------------------------------------------------------------
 let allItems = [];
+let filteredItems = [];
 let activeEl  = null;
+let activeItem = null;
 let currentDir = null;
 let availableDirs = [];
+let currentView = 'sessions';
+let currentFilters = [];
+let currentSort = { field: 'tool_fail_total', order: 'desc' };
+let analysisSummary = null;
+let summaryData = null;
 
 const fileListEl  = document.getElementById('fileList');
 const chatPanel   = document.getElementById('chatPanel');
 const statsChip   = document.getElementById('statsChip');
 const searchInput = document.getElementById('searchInput');
 const dirSelect   = document.getElementById('dirSelect');
+const filterField = document.getElementById('filterField');
+const filterOp = document.getElementById('filterOp');
+const filterValue = document.getElementById('filterValue');
+const applyFilterBtn = document.getElementById('applyFilterBtn');
+const clearFilterBtn = document.getElementById('clearFilterBtn');
+const sortField = document.getElementById('sortField');
+const sortOrder = document.getElementById('sortOrder');
+const detailPanel = document.getElementById('detailPanel');
+const detailBody = document.getElementById('detailBody');
+const detailToggleBtn = document.getElementById('detailToggleBtn');
+const navTabs = Array.from(document.querySelectorAll('.nav-tab'));
+const presetChips = Array.from(document.querySelectorAll('.preset-chip[data-preset]'));
+const analysisContent = document.getElementById('analysisContent');
+const summaryView = document.getElementById('summaryView');
+const filterSummary = document.getElementById('filterSummary');
+const filterList = document.getElementById('filterList');
+const filterPillList = document.getElementById('filterPillList');
+const filterModal = document.getElementById('filterModal');
+const openFilterModalBtn = document.getElementById('openFilterModalBtn');
+const closeFilterModalBtn = document.getElementById('closeFilterModalBtn');
+const closeFilterModalBtn2 = document.getElementById('closeFilterModalBtn2');
 
 dirSelect.addEventListener('change', async () => {
     currentDir = dirSelect.value || null;
     activeEl = null;
-    chatPanel.innerHTML = `
-        <div class="empty-state">
-            <p>从左侧选择一个对话</p>
-        </div>
-    `;
+    activeItem = null;
+    _renderEmptyChat();
+    _renderDetailPanel(null);
     await loadList();
+});
+
+navTabs.forEach(tab => {
+    tab.addEventListener('click', () => switchView(tab.dataset.view));
+});
+
+detailToggleBtn.addEventListener('click', () => {
+    detailPanel.classList.toggle('collapsed');
+    detailToggleBtn.textContent = detailPanel.classList.contains('collapsed') ? '←' : '→';
+});
+
+openFilterModalBtn.addEventListener('click', () => {
+    filterModal.classList.add('open');
+});
+
+closeFilterModalBtn.addEventListener('click', () => {
+    filterModal.classList.remove('open');
+});
+
+closeFilterModalBtn2.addEventListener('click', () => {
+    filterModal.classList.remove('open');
+});
+
+filterModal.addEventListener('click', (event) => {
+    if (event.target === filterModal) {
+        filterModal.classList.remove('open');
+    }
+});
+
+applyFilterBtn.addEventListener('click', () => {
+    const filter = {
+        field: filterField.value,
+        op: filterOp.value,
+        value: filterValue.value.trim(),
+        summary: `${filterField.options[filterField.selectedIndex].text} ${filterOp.options[filterOp.selectedIndex].text} ${filterValue.value.trim()}`.trim(),
+    };
+    if (!filter.value) return;
+    currentFilters.push(filter);
+    _applyFilter();
+});
+
+clearFilterBtn.addEventListener('click', () => {
+    currentFilters = [];
+    filterValue.value = '';
+    _applyFilter();
+});
+
+sortField.addEventListener('change', () => {
+    currentSort.field = sortField.value;
+    _applyFilter();
+});
+
+sortOrder.addEventListener('change', () => {
+    currentSort.order = sortOrder.value;
+    _applyFilter();
+});
+
+presetChips.forEach(chip => {
+    chip.addEventListener('click', () => _applyPreset(chip.dataset.preset));
+});
+
+analysisContent.addEventListener('click', (event) => {
+    const row = event.target.closest('.dist-row.clickable');
+    if (!row) return;
+    const payload = row.dataset.filter;
+    if (!payload) return;
+    try {
+        _setFilterFromAnalysis(JSON.parse(payload));
+    } catch (e) {
+        console.error('invalid analysis filter payload', e);
+    }
 });
 
 // ----------------------------------------------------------------
@@ -336,6 +862,8 @@ async function loadList() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         allItems = await res.json();
         _applyFilter();
+        await loadAnalysisSummary();
+        await loadSummary();
     } catch(e) {
         fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${esc(e.message)}</div>`;
     }
@@ -352,24 +880,71 @@ async function refreshList() {
     }
 }
 
+async function loadAnalysisSummary() {
+    analysisContent.innerHTML = '<div class="analysis-empty"><span class="spinner"></span>分析数据加载中…</div>';
+    try {
+        const res = await fetch('/api/analysis/summary' + _dirQuery());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        analysisSummary = await res.json();
+        renderAnalysis();
+    } catch (e) {
+        analysisSummary = null;
+        analysisContent.innerHTML = `<div class="analysis-empty">分析数据加载失败：${esc(e.message)}</div>`;
+    }
+}
+
+async function loadSummary() {
+    summaryView.innerHTML = '<div class="summary-empty"><span class="spinner"></span> Summary 加载中…</div>';
+    try {
+        const res = await fetch('/api/summary');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        summaryData = await res.json();
+        renderSummary();
+    } catch (e) {
+        summaryData = null;
+        summaryView.innerHTML = `<div class="summary-empty"><div class="empty-icon">⚠️</div><p>Summary 加载失败：${esc(e.message)}</p></div>`;
+    }
+}
+
 // ----------------------------------------------------------------
 // Search filter
 // ----------------------------------------------------------------
 searchInput.addEventListener('input', () => _applyFilter());
 
+function _updateAnalysisOptions() {
+    const hasAnalysis = allItems.some(item => item.analysis_available);
+    document.querySelectorAll('.analysis-option').forEach(el => {
+        el.style.display = hasAnalysis ? '' : 'none';
+    });
+    // Reset sort to msg_count if current sort field is hidden
+    if (!hasAnalysis && sortField.value !== 'msg_count') {
+        sortField.value = 'msg_count';
+        currentSort.field = 'msg_count';
+    }
+}
+
 function _applyFilter() {
+    _updateAnalysisOptions();
     const q = searchInput.value.trim().toLowerCase();
-    const filtered = q
+    let filtered = q
         ? allItems.filter(it =>
-            it.label_short.toLowerCase().includes(q) ||
-            it.rel_path.toLowerCase().includes(q))
-        : allItems;
+            String(it.label_short || '').toLowerCase().includes(q) ||
+            String(it.rel_path || '').toLowerCase().includes(q))
+        : allItems.slice();
+
+    if (currentFilters.length) {
+        filtered = filtered.filter(item => currentFilters.every(filter => _matchFilter(item, filter)));
+    }
+    filtered.sort((a, b) => _compareItems(a, b, currentSort.field, currentSort.order));
+    filteredItems = filtered;
 
     fileListEl.innerHTML = '';
-	    filtered.forEach(item => fileListEl.appendChild(_makeItemEl(item)));
+    filtered.forEach(item => fileListEl.appendChild(_makeItemEl(item)));
 
-	    statsChip.style.display = 'inline';
-	    statsChip.textContent = `${filtered.length} / ${allItems.length} 条对话`;
+    statsChip.style.display = 'inline';
+    statsChip.textContent = `${filtered.length} / ${allItems.length} 条对话`;
+    _renderFilterSummary();
+    _renderFilterList();
 }
 
 function _dirQuery() {
@@ -412,9 +987,19 @@ async function initConfig() {
 function _makeItemEl(item) {
     const el = document.createElement('div');
     el.className = 'file-item';
+    if (activeItem && activeItem.rel_path === item.rel_path && activeItem.dir_key === item.dir_key) {
+        el.classList.add('active');
+        activeEl = el;
+    }
     el.innerHTML = `
         <div class="file-item-label">${esc(item.label_short || '(空)')}</div>
         <div class="file-item-meta">${item.msg_count} 条${item.model ? ' · ' + esc(item.model) : ''}</div>
+        ${item.analysis_available ? `<div class="metric-row">
+            ${_metricPill(`轮次 ${fmtMetric(item.user_turns, '-')}`)}
+            ${_metricPill(`工具 ${fmtMetric(item.tool_use_count, '-')}`)}
+            ${_metricPill(`失败 ${fmtMetric(item.tool_fail_total, '-')}`, (item.tool_fail_total || 0) > 0 ? 'danger' : '')}
+            ${_metricPill(`成功率 ${fmtPercent(item.tool_success_rate)}`, item.tool_success_rate == null ? '' : (item.tool_success_rate < 70 ? 'warn' : 'success'))}
+        </div>` : ''}
         <div class="file-item-path">${esc(item.rel_path)}</div>
     `;
     el.addEventListener('click', () => selectItem(item, el));
@@ -428,6 +1013,8 @@ async function selectItem(item, el) {
     if (activeEl) activeEl.classList.remove('active');
     el.classList.add('active');
     activeEl = el;
+    activeItem = item;
+    _renderDetailPanel(item);
 
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
@@ -525,6 +1112,478 @@ function renderMessages(data, relPath, label) {
         }
         chatPanel.appendChild(row);
     });
+}
+
+function switchView(view) {
+    currentView = view;
+    document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `${view}View`));
+    navTabs.forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
+    if (view === 'analysis' && !analysisSummary) {
+        loadAnalysisSummary();
+    }
+    if (view === 'summary' && !summaryData) {
+        loadSummary();
+    }
+}
+
+function _renderEmptyChat() {
+    chatPanel.innerHTML = `
+        <div class="empty-state">
+            <p>从左侧选择一个对话</p>
+        </div>
+    `;
+}
+
+function _applyPreset(name) {
+    currentFilters = [];
+    if (name === 'high_turn_fail') {
+        currentFilters.push({ field: 'user_turns', op: '>=', value: '8', summary: '用户轮次 >= 8' });
+        currentFilters.push({ field: 'tool_fail_total', op: '>=', value: '1', summary: '工具失败数 >= 1' });
+        currentSort = { field: 'tool_fail_total', order: 'desc' };
+    } else if (name === 'low_success') {
+        currentFilters.push({ field: 'tool_success_rate', op: '<=', value: '70', summary: '工具成功率 <= 70%' });
+        currentSort = { field: 'tool_success_rate', order: 'asc' };
+    } else if (name === 'heavy_tools') {
+        currentFilters.push({ field: 'tool_use_count', op: '>=', value: '10', summary: '工具调用数 >= 10' });
+        currentSort = { field: 'tool_use_count', order: 'desc' };
+    } else if (name === 'api_error') {
+        currentFilters.push({ field: 'api_errors', op: '>=', value: '1', summary: 'API 错误数 >= 1' });
+        currentSort = { field: 'api_errors', order: 'desc' };
+    }
+    sortField.value = currentSort.field;
+    sortOrder.value = currentSort.order;
+    _applyFilter();
+}
+
+function _metricPill(text, kind='') {
+    return `<span class="metric-pill${kind ? ' ' + kind : ''}">${esc(text)}</span>`;
+}
+
+function _matchFilter(item, filter) {
+    const raw = item?.[filter.field];
+    const value = filter.value;
+    if (filter.op === 'range') {
+        const left = Number(raw);
+        if (Number.isNaN(left)) return false;
+        const min = filter.min == null ? -Infinity : Number(filter.min);
+        const max = filter.max == null ? Infinity : Number(filter.max);
+        return left >= min && left < max;
+    }
+    if (filter.op === 'map_has_key') {
+        return Boolean(item?.[filter.field] && Object.prototype.hasOwnProperty.call(item[filter.field], filter.key));
+    }
+    if (filter.op === 'contains') return String(raw ?? '').toLowerCase().includes(value.toLowerCase());
+    if (filter.op === '=') return String(raw ?? '') === value;
+    const left = Number(raw);
+    const right = Number(value);
+    if (Number.isNaN(left) || Number.isNaN(right)) return false;
+    if (filter.op === '>=') return left >= right;
+    if (filter.op === '<=') return left <= right;
+    return false;
+}
+
+function _compareItems(a, b, field, order) {
+    const av = a?.[field];
+    const bv = b?.[field];
+    const aNum = Number(av);
+    const bNum = Number(bv);
+    let result = 0;
+    if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) {
+        result = aNum - bNum;
+    } else {
+        result = String(av ?? '').localeCompare(String(bv ?? ''), 'zh-CN');
+    }
+    return order === 'asc' ? result : -result;
+}
+
+function _renderDetailPanel(item) {
+    if (!item) {
+        detailBody.innerHTML = '<div class="detail-empty">选择一条 session 后，这里会显示轮次、工具失败、时长、完成状态等属性。</div>';
+        return;
+    }
+    detailBody.innerHTML = `
+        <div class="insight-card">
+            <h3>Overview</h3>
+            <div class="insight-row"><strong>Session</strong><span><code>${esc(item.session || '-')}</code></span></div>
+            <div class="insight-row"><strong>模型</strong><span>${esc(item.model || '-')}</span></div>
+            <div class="insight-row"><strong>分析状态</strong><span class="analysis-badge${item.analysis_available ? '' : ' missing'}">${item.analysis_available ? 'analysis ready' : 'analysis missing'}</span></div>
+            <div class="insight-row"><strong>路径</strong><span><code>${esc(item.rel_path || '-')}</code></span></div>
+        </div>
+        ${item.analysis_available ? `
+        <div class="insight-card">
+            <h3>Metrics</h3>
+            <div class="insight-row"><strong>用户轮次</strong><span>${fmtMetric(item.user_turns)}</span></div>
+            <div class="insight-row"><strong>API 调用数</strong><span>${fmtMetric(item.api_call_count)}</span></div>
+            <div class="insight-row"><strong>时长</strong><span>${fmtDuration(item.duration_s)}</span></div>
+            <div class="insight-row"><strong>工具调用数</strong><span>${fmtMetric(item.tool_use_count)}</span></div>
+            <div class="insight-row"><strong>工具失败数</strong><span>${fmtMetric(item.tool_fail_total)}</span></div>
+            <div class="insight-row"><strong>工具成功率</strong><span>${fmtPercent(item.tool_success_rate)}</span></div>
+            <div class="insight-row"><strong>完成状态</strong><span>${esc(item.completed || '-')}</span></div>
+        </div>
+        <div class="insight-card">
+            <h3>Tool Fail Detail</h3>
+            ${renderDetailMap(item.tool_fail_detail)}
+        </div>
+        ` : ''}
+    `;
+}
+
+function renderDetailMap(obj) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) return '<div class="detail-empty">无失败工具明细</div>';
+    return `<div class="detail-list">${entries.slice(0, 8).map(([k, v]) =>
+        `<div class="detail-list-item"><code>${esc(k)}</code><strong>${esc(v)}</strong></div>`).join('')}</div>`;
+}
+
+function fmtMetric(value, fallback='-') {
+    return value == null || value === '' ? fallback : String(value);
+}
+
+function fmtPercent(value) {
+    return value == null || value === '' ? '-' : `${value}%`;
+}
+
+function fmtDuration(value) {
+    if (value == null || value === '') return '-';
+    const sec = Number(value);
+    if (Number.isNaN(sec)) return String(value);
+    if (sec < 60) return `${Math.round(sec)}s`;
+    if (sec < 3600) return `${(sec / 60).toFixed(1)}min`;
+    return `${(sec / 3600).toFixed(1)}h`;
+}
+
+function _setFilterFromAnalysis(filter) {
+    currentFilters = [filter];
+    if (filter.field && Array.from(filterField.options).some(opt => opt.value === filter.field)) {
+        filterField.value = filter.field;
+    }
+    if (['>=', '<=', 'contains', '='].includes(filter.op)) {
+        filterOp.value = filter.op;
+        filterValue.value = filter.value ?? '';
+    } else if (filter.op === 'range') {
+        filterOp.value = '>=';
+        filterValue.value = filter.summary || '';
+    } else if (filter.op === 'map_has_key') {
+        filterOp.value = 'contains';
+        filterValue.value = filter.key || '';
+    }
+    switchView('sessions');
+    _applyFilter();
+}
+
+function _renderFilterSummary() {
+    if (!currentFilters.length) {
+        filterSummary.classList.remove('active');
+        filterSummary.textContent = '';
+        return;
+    }
+    const summary = currentFilters.map(filter =>
+        filter.summary || `${filter.field} ${filter.op} ${filter.value ?? ''}`.trim()
+    ).join(' AND ');
+    filterSummary.classList.add('active');
+    filterSummary.innerHTML = `<strong>当前筛选：</strong>${esc(summary)}`;
+}
+
+function _renderFilterList() {
+    if (!currentFilters.length) {
+        filterList.innerHTML = '';
+        filterPillList.innerHTML = '<span class="detail-empty">未设置筛选条件</span>';
+        return;
+    }
+    filterList.innerHTML = currentFilters.map((filter, idx) => `
+        <div class="filter-chip">
+            <span>${esc(filter.summary || `${filter.field} ${filter.op} ${filter.value ?? ''}`.trim())}</span>
+            <button type="button" data-filter-index="${idx}">移除</button>
+        </div>
+    `).join('');
+    filterList.querySelectorAll('button[data-filter-index]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const idx = Number(btn.dataset.filterIndex);
+            currentFilters.splice(idx, 1);
+            _applyFilter();
+        });
+    });
+    filterPillList.innerHTML = currentFilters.map((filter, idx) => `
+        <span class="filter-pill">
+            <span>${esc(filter.summary || `${filter.field} ${filter.op} ${filter.value ?? ''}`.trim())}</span>
+            <button type="button" data-pill-index="${idx}">×</button>
+        </span>
+    `).join('');
+    filterPillList.querySelectorAll('button[data-pill-index]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const idx = Number(btn.dataset.pillIndex);
+            currentFilters.splice(idx, 1);
+            _applyFilter();
+        });
+    });
+}
+
+function renderAnalysis() {
+    if (!analysisSummary) {
+        analysisContent.innerHTML = '<div class="analysis-empty">暂无分析数据</div>';
+        return;
+    }
+    if (!analysisSummary.analysis_sessions) {
+        analysisContent.innerHTML = `
+            <div class="analysis-empty">
+                当前 source 没有可用的分析样本。请先在对应的 <code>report_dir</code> 下生成 <code>session_analysis.json</code>。
+            </div>
+        `;
+        return;
+    }
+    const kpis = analysisSummary.kpis || {};
+    const charts = analysisSummary.charts || {};
+    const chartIcons = {
+        user_turns: '👥', tool_use: '🔧', tool_success_rate: '🎯',
+        duration: '⏱️', model: '🤖', completed: '✅', tool_fail: '⚠️'
+    };
+    const chartColors = ['bar-teal', 'bar-emerald', 'bar-amber', 'bar-rose', 'bar-indigo', 'bar-sky', 'bar-violet'];
+    analysisContent.innerHTML = `
+        <div class="analysis-hero">
+            <div class="analysis-hero-text">
+                <h2>Session Analysis</h2>
+                <p>聚合统计与异常分布概览，点击分布项可跳转到 Sessions 筛选。</p>
+            </div>
+            <div class="analysis-hero-stats">
+                <div class="analysis-hero-stat">
+                    <div class="stat-value">${analysisSummary.total_sessions}</div>
+                    <div class="stat-label">Total</div>
+                </div>
+                <div class="analysis-hero-stat">
+                    <div class="stat-value">${analysisSummary.analysis_sessions}</div>
+                    <div class="stat-label">Analyzed</div>
+                </div>
+            </div>
+        </div>
+        <div class="kpi-grid">
+            ${renderKpiCard('质量通过', `${kpis.quality_passed ?? '-'} / ${analysisSummary.analysis_sessions}`, kpis.quality_passed_rate != null ? `通过率 ${kpis.quality_passed_rate}%` : '', '✅', 'green')}
+            ${renderKpiCard('平均工具成功率', fmtPercent(kpis.avg_tool_success_rate), 'analysis 样本均值', '🎯', 'blue')}
+            ${renderKpiCard('P90 时长', fmtDuration(kpis.p90_duration_s), 'duration_s 的 90 分位', '⏱️', 'purple')}
+            ${renderKpiCard('技能总数', kpis.total_skills ?? '-', '当前 source 使用的技能种类', '🛠️', 'orange')}
+        </div>
+        <div class="chart-grid">
+            ${renderDistCard('用户轮次分布', charts.user_turns_hist, true, 'user_turns', chartIcons.user_turns, chartColors[0])}
+            ${renderDistCard('工具调用分布', charts.tool_use_hist, true, 'tool_use_count', chartIcons.tool_use, chartColors[1])}
+            ${renderDistCard('工具成功率分布', charts.tool_success_rate_hist, true, 'tool_success_rate', chartIcons.tool_success_rate, chartColors[2])}
+            ${renderDistCard('时长分布', charts.duration_hist, true, 'duration_s', chartIcons.duration, chartColors[3])}
+            ${renderDistCard('模型分布', charts.model_dist, true, 'model', chartIcons.model, chartColors[4])}
+            ${renderDistCard('完成状态分布', charts.completed_dist, true, 'completed', chartIcons.completed, chartColors[5])}
+            ${renderDistCard('失败工具 Top', charts.tool_fail_top, false, 'tool_fail_detail', chartIcons.tool_fail, chartColors[6])}
+            ${renderDistCard('技能使用分布', charts.skills_dist, false, '', '🛠️', 'bar-sky')}
+        </div>
+    `;
+}
+
+function renderSummary() {
+    if (!summaryData) {
+        summaryView.innerHTML = '<div class="summary-empty"><div class="empty-icon">📊</div><p>暂无 Summary 数据</p></div>';
+        return;
+    }
+    const sources = Array.isArray(summaryData.sources) ? summaryData.sources : [];
+    if (!sources.length) {
+        summaryView.innerHTML = '<div class="summary-empty"><div class="empty-icon">📭</div><p>暂无可用的数据源</p></div>';
+        return;
+    }
+    const totalSessions = sources.reduce((acc, s) => acc + (s.total_sessions || 0), 0);
+    const totalAnalysis = sources.reduce((acc, s) => acc + (s.analysis_sessions || 0), 0);
+    const totalPassed = sources.reduce((acc, s) => acc + (s.quality_passed || 0), 0);
+    const totalSkills = new Set(sources.flatMap(s => Object.keys(s.skills_detail || {}))).size || sources.reduce((max, s) => Math.max(max, s.total_skills || 0), 0);
+    const successRates = sources.map(s => s.success_rate).filter(v => v != null);
+    const toolRates = sources.map(s => s.avg_tool_success_rate).filter(v => v != null);
+    const avgSuccess = successRates.length ? (successRates.reduce((a, b) => a + b, 0) / successRates.length).toFixed(1) + '%' : 'N/A';
+    const avgTool = toolRates.length ? (toolRates.reduce((a, b) => a + b, 0) / toolRates.length).toFixed(1) + '%' : 'N/A';
+
+    const hasAnyAnalysis = totalAnalysis > 0;
+
+    summaryView.innerHTML = `
+        <div class="summary-hero">
+            <h2>报告总览</h2>
+            <p>当前轨迹数据综合分析</p>
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <h3>Sources</h3>
+                    <p>${summaryData.total_sources || 0}</p>
+                </div>
+                <div class="summary-card">
+                    <h3>Total Sessions</h3>
+                    <p>${totalSessions}</p>
+                </div>
+                ${hasAnyAnalysis ? `
+                <div class="summary-card">
+                    <h3>Analyzed</h3>
+                    <p>${totalAnalysis}</p>
+                </div>
+                <div class="summary-card">
+                    <h3>Avg Success Rate</h3>
+                    <p>${avgSuccess}</p>
+                </div>
+                <div class="summary-card">
+                    <h3>Avg Tool Rate</h3>
+                    <p>${avgTool}</p>
+                </div>
+                <div class="summary-card">
+                    <h3>Quality Passed</h3>
+                    <p>${totalPassed}</p>
+                </div>
+                <div class="summary-card">
+                    <h3>Skills</h3>
+                    <p>${totalSkills}</p>
+                </div>
+                ` : ''}
+            </div>
+        </div>
+        <div class="source-cards">
+                    ${sources.map(source => {
+                        const labelParts = (source.label || source.key || '-').split(' - ');
+                        const shortLabel = labelParts[0];
+                        const fullPath = labelParts.length > 1 ? labelParts.slice(1).join(' - ') : '';
+                        return `
+                        <div class="source-card">
+                            <div class="source-card-header">
+                                <div>
+                                    <div class="source-card-title">${esc(shortLabel)}</div>
+                                    ${fullPath ? `<div class="source-card-path">${esc(fullPath)}</div>` : ''}
+                                </div>
+                                <span class="source-card-badge">${source.has_analysis ? 'Analysis Ready' : 'No Analysis'}</span>
+                            </div>
+                            <div class="source-card-body">
+                                <div class="source-metrics">
+                                    <div class="source-metric">
+                                        <div class="source-metric-label">Sessions</div>
+                                        <div class="source-metric-value">${esc(source.total_sessions ?? '-')}</div>
+                                    </div>
+                                    ${source.has_analysis ? `
+                                    <div class="source-metric">
+                                        <div class="source-metric-label">Analyzed</div>
+                                        <div class="source-metric-value">${esc(source.analysis_sessions ?? '-')}</div>
+                                    </div>
+                                    <div class="source-metric">
+                                        <div class="source-metric-label">质量通过</div>
+                                        <div class="source-metric-value${(source.quality_passed || 0) > 0 ? ' success' : ''}">${esc(source.quality_passed ?? '-')}</div>
+                                    </div>
+                                    <div class="source-metric">
+                                        <div class="source-metric-label">技能总数</div>
+                                        <div class="source-metric-value">${esc(source.total_skills ?? '-')}</div>
+                                    </div>
+                                    <div class="source-metric">
+                                        <div class="source-metric-label">P90 时长</div>
+                                        <div class="source-metric-value">${esc(fmtDuration(source.p90_duration_s))}</div>
+                                    </div>
+                                    ` : ''}
+                                </div>
+                                ${source.has_analysis ? `
+                                <div class="source-rate-row">
+                                    <div class="source-rate-item">
+                                        <span class="source-rate-label">任务成功率</span>
+                                        <div class="source-rate-bar">${renderRateBar(source.success_rate, 'green')}</div>
+                                    </div>
+                                    <div class="source-rate-item">
+                                        <span class="source-rate-label">工具成功率</span>
+                                        <div class="source-rate-bar">${renderRateBar(source.avg_tool_success_rate, 'blue')}</div>
+                                    </div>
+                                </div>
+                                ` : `<div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f4f8;font-size:13px;color:#8a9bb0">暂无分析数据，请先生成 session_analysis.json</div>`}
+                            </div>
+                            ${source.has_report_html ? `
+                            <div class="source-card-footer">
+                                <a class="source-report-link" href="/report/view?dir=${encodeURIComponent(source.key)}" target="_blank">📄 查看详细报告</a>
+                            </div>` : ''}
+                        </div>
+                    `;}).join('')}
+        </div>
+    `;
+}
+
+function renderKpiCard(label, value, note='', icon='📊', color='blue') {
+    return `
+        <div class="kpi-card">
+            <div class="kpi-icon ${color}">${icon}</div>
+            <div class="kpi-body">
+                <div class="kpi-label">${esc(label)}</div>
+                <div class="kpi-value">${esc(value ?? '-')}</div>
+                <div class="kpi-note">${esc(note)}</div>
+            </div>
+        </div>
+    `;
+}
+
+function renderRateBar(value, color='blue') {
+    if (value == null) return '<span class="detail-empty">N/A</span>';
+    const pct = Math.max(0, Math.min(100, Number(value)));
+    const cls = color === 'green' ? 'bar-green' : 'bar-blue';
+    return `
+        <div class="rate-bar">
+            <div class="bar-wrap"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div>
+            <span class="bar-pct">${esc(value)}%</span>
+        </div>
+    `;
+}
+
+function renderDistCard(title, rows, withPct=true, filterKind='', icon='📊', barColor='bar-teal') {
+    const safeRows = Array.isArray(rows) ? rows : [];
+    return `
+        <div class="chart-card">
+            <div class="chart-card-header">
+                <span class="chart-icon">${icon}</span>
+                <h3>${esc(title)}</h3>
+            </div>
+            <div class="chart-card-body">
+                ${safeRows.length ? `<div class="dist-list">${safeRows.map(row => renderDistRow(row, withPct, filterKind, barColor)).join('')}</div>` : '<div class="detail-empty">暂无数据</div>'}
+            </div>
+        </div>
+    `;
+}
+
+function renderDistRow(row, withPct=true, filterKind='', barColor='bar-teal') {
+    const pct = Number(row.pct || 0);
+    const barWidth = Math.max(0, Math.min(100, withPct ? pct : Math.min(Number(row.count || 0), 100)));
+    const right = withPct ? `${row.count} · ${pct}%` : `${row.count}`;
+    const filter = buildAnalysisFilter(filterKind, row);
+    const clickable = !!filter;
+    return `
+        <div class="dist-row${clickable ? ' clickable' : ''}" ${clickable ? `data-filter="${escAttr(JSON.stringify(filter))}"` : ''}>
+            <strong>${esc(row.label ?? '-')}</strong>
+            <div class="dist-bar"><div class="dist-bar-fill ${barColor}" style="width:${barWidth}%"></div></div>
+            <div class="dist-value">${esc(right)}</div>
+        </div>
+    `;
+}
+
+function buildAnalysisFilter(kind, row) {
+    if (!kind || !row || !row.label) return null;
+    const label = String(row.label);
+    if (kind === 'user_turns') {
+        if (label === '1') return { field: 'user_turns', op: '=', value: '1', summary: '用户轮次 = 1' };
+        if (label === '2-3') return { field: 'user_turns', op: 'range', min: 2, max: 4, summary: '用户轮次 ∈ [2, 3]' };
+        if (label === '4-7') return { field: 'user_turns', op: 'range', min: 4, max: 8, summary: '用户轮次 ∈ [4, 7]' };
+        if (label === '8-15') return { field: 'user_turns', op: 'range', min: 8, max: 16, summary: '用户轮次 ∈ [8, 15]' };
+        if (label === '>15') return { field: 'user_turns', op: '>=', value: '16', summary: '用户轮次 >= 16' };
+    }
+    if (kind === 'tool_use_count') {
+        if (label === '1-5') return { field: 'tool_use_count', op: 'range', min: 1, max: 6, summary: '工具调用数 ∈ [1, 5]' };
+        if (label === '6-15') return { field: 'tool_use_count', op: 'range', min: 6, max: 16, summary: '工具调用数 ∈ [6, 15]' };
+        if (label === '16-30') return { field: 'tool_use_count', op: 'range', min: 16, max: 31, summary: '工具调用数 ∈ [16, 30]' };
+        if (label === '31-50') return { field: 'tool_use_count', op: 'range', min: 31, max: 51, summary: '工具调用数 ∈ [31, 50]' };
+        if (label === '>50') return { field: 'tool_use_count', op: '>=', value: '51', summary: '工具调用数 >= 51' };
+    }
+    if (kind === 'tool_success_rate') {
+        if (label === '0-50%') return { field: 'tool_success_rate', op: 'range', min: 0, max: 50, summary: '工具成功率 ∈ [0, 50%)' };
+        if (label === '50-80%') return { field: 'tool_success_rate', op: 'range', min: 50, max: 80, summary: '工具成功率 ∈ [50, 80%)' };
+        if (label === '80-95%') return { field: 'tool_success_rate', op: 'range', min: 80, max: 95, summary: '工具成功率 ∈ [80, 95%)' };
+        if (label === '95-99%') return { field: 'tool_success_rate', op: 'range', min: 95, max: 100, summary: '工具成功率 ∈ [95, 100)' };
+        if (label === '100%') return { field: 'tool_success_rate', op: '=', value: '100.0', summary: '工具成功率 = 100%' };
+    }
+    if (kind === 'duration_s') {
+        if (label === '<1min') return { field: 'duration_s', op: 'range', min: 0, max: 60, summary: '时长 < 1min' };
+        if (label === '1-5min') return { field: 'duration_s', op: 'range', min: 60, max: 300, summary: '时长 ∈ [1, 5min)' };
+        if (label === '5-15min') return { field: 'duration_s', op: 'range', min: 300, max: 900, summary: '时长 ∈ [5, 15min)' };
+        if (label === '15-30min') return { field: 'duration_s', op: 'range', min: 900, max: 1800, summary: '时长 ∈ [15, 30min)' };
+        if (label === '>30min') return { field: 'duration_s', op: '>=', value: '1800', summary: '时长 >= 30min' };
+    }
+    if (kind === 'model') return { field: 'model', op: '=', value: label, summary: `模型 = ${label}` };
+    if (kind === 'completed') return { field: 'completed', op: '=', value: label, summary: `完成状态 = ${label}` };
+    if (kind === 'tool_fail_detail') return { field: 'tool_fail_detail', op: 'map_has_key', key: label, summary: `失败工具包含 ${label}` };
+    return null;
 }
 
 // ----------------------------------------------------------------
@@ -749,6 +1808,10 @@ function renderKV(entries) {
 
 function esc(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function escAttr(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function showError(msg) {

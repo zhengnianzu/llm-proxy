@@ -248,8 +248,23 @@ def _build_server_cmd(cfg: dict) -> List[str]:
         for d in cfg.get("dirs", []):
             cmd += ["--dirs", d]
     elif mode == "session":
+        if cfg.get("session_sources"):
+            for src in cfg.get("session_sources", []):
+                if not isinstance(src, dict):
+                    continue
+                session_dir = src.get("session_dir")
+                report_dir = src.get("report_dir")
+                label = src.get("label")
+                if session_dir:
+                    cmd += ["--session-dir", session_dir]
+                if report_dir:
+                    cmd += ["--report-dir", report_dir]
+                if label:
+                    cmd += ["--label", label]
         for d in cfg.get("session_dir", []):
             cmd += ["--session-dir", d]
+        for d in cfg.get("report_dir", []):
+            cmd += ["--report-dir", d]
         for d in cfg.get("session_dirs", []):
             cmd += ["--session-dirs", d]
     else:

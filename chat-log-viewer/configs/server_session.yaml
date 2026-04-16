@@ -1,0 +1,56 @@
+# server.yaml — Chat Log Viewer (server.py) 配置文件
+# 用法: python cli.py server start [--config configs/server.yaml]
+#
+# 模式说明（二选一，不可混用）:
+#   scan 模式:    扫描目录下的原始 JSON 日志文件
+#   session 模式: 读取预导出的会话目录（含 index.json）
+#
+# mode: scan | session
+
+mode: session
+
+# ----- scan 模式参数 -----
+# dir: 直接扫描的日志目录（列表，可多个）
+# dir:
+#   - /home/nianzuzheng/project/LLM_PROXY-PT/logs_anthropic
+
+# dirs: 父目录，其所有子目录均作为扫描根（列表，可多个）
+# dirs:
+#   - /home/nianzuzheng/project/LLM_PROXY-PT/all_logs
+
+# ----- session 模式参数 -----
+# 推荐：显式配置 source 映射，支持 session_dir -> report_dir
+# session_sources:
+#   - label: exp-a
+#     session_dir: /home/nianzuzheng/project/LLM_PROXY-PT/sessions_out_a
+#     report_dir: /home/nianzuzheng/project/LLM_PROXY-PT/sessions_out_a/stat
+#   - label: exp-b
+#     session_dir: /home/nianzuzheng/project/LLM_PROXY-PT/sessions_out_b
+#     report_dir: /home/nianzuzheng/project/LLM_PROXY-PT/reports/exp-b
+#
+# session_dir: 预导出的会话目录（列表，可多个）
+# session_dir:
+#   - /home/nianzuzheng/project/LLM_PROXY-PT/sessions_out
+#
+# report_dir: 与 session_dir 按顺序一一对应的分析/报告目录（列表，可多个）
+# 未配置时默认使用 <session_dir>/stat
+# report_dir:
+#   - /home/nianzuzheng/project/LLM_PROXY-PT/sessions_out/stat
+
+session_sources:
+  - label: expa
+    session_dir: /home/nianzuzheng/project/llm-proxy-main/chat-log-viewer/session_test
+    report_dir: /home/nianzuzheng/project/llm-proxy-main/chat-log-viewer/report
+
+
+# session_dirs: 父目录，其所有子目录均作为会话根
+# session_dirs:
+#   - /home/nianzuzheng/project/LLM_PROXY-PT/sessions
+
+# ----- 服务参数 -----
+host: 0.0.0.0
+port: 8080
+
+# ----- 日志参数 -----
+# 不填时自动按端口生成: logs/server-port<port>.log
+log_level: INFO   # DEBUG | INFO | WARNING | ERROR
