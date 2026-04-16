@@ -677,7 +677,7 @@ def run_raw(
 ) -> Tuple[int, int]:
     """
     raw 模式：将 src/index.jsonl 中新增的三元组文件整批上传到 obs_raw。
-    每个 prefix 的文件上传到 obs_raw/<prefix>/ 下。
+    每个文件直接上传到 obs_raw/<filename>。
     upload_erase=True 时，上传成功的文件从 src 删除。
 
     Returns:
@@ -701,11 +701,10 @@ def run_raw(
     logger.info("raw mode: %d new triplets to upload", len(triplets))
 
     def _upload_triplet(prefix: str, tri: dict) -> Tuple[str, bool, List[Path]]:
-        dst_prefix = obs_raw.rstrip("/") + "/" + prefix + "/"
         uploaded_paths: List[Path] = []
         all_ok = True
         for kind, file_path in tri.items():
-            dst = dst_prefix + file_path.name
+            dst = obs_raw.rstrip("/") + "/" + file_path.name
             ok, msg = _run_upload_cmd(upload_script, str(file_path), dst, timeout=120)
             if ok:
                 uploaded_paths.append(file_path)

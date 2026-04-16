@@ -74,6 +74,31 @@ def format_stage_seconds(seconds: float) -> str:
     return f"{seconds:.2f}s"
 
 
+def resolve_related_file(parent: Path, ts: str, kind: str) -> Optional[Path]:
+    candidates = [
+        parent / f"{ts}-{kind}.json",
+        parent / ts / f"{ts}-{kind}.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def resolve_req_file(src: Path, ts: str, req_file: str) -> Optional[Path]:
+    req_name = Path(req_file).name
+    candidates = [
+        src / req_file,
+        src / req_name,
+        src / ts / req_name,
+        src / ts / f"{ts}-req.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 class _LogProgress:
     """非 TTY 输出时使用普通日志进度，便于 nohup/tail -f 观察。"""
 
@@ -136,17 +161,17 @@ def build_triplet_from_index_entry(src: Path, entry: dict) -> Optional[Tuple[str
     if not ts or not req_file:
         return None
 
-    req_path = src / Path(req_file).name
-    if not req_path.is_file():
+    req_path = resolve_req_file(src, ts, req_file)
+    if not req_path:
         return None
 
     tri: Dict[str, Path] = {"req": req_path}
     parent = req_path.parent
-    headers_path = parent / f"{ts}-headers.json"
-    res_path = parent / f"{ts}-res.json"
-    if headers_path.is_file():
+    headers_path = resolve_related_file(parent, ts, "headers")
+    res_path = resolve_related_file(parent, ts, "res")
+    if headers_path:
         tri["headers"] = headers_path
-    if res_path.is_file():
+    if res_path:
         tri["res"] = res_path
     return ts, tri
 

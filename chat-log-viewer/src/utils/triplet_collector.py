@@ -28,6 +28,31 @@ TIMESTAMP_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d{3})-(req|headers|res)\.json$"
 )
 
+
+def resolve_related_file(parent: Path, ts: str, kind: str) -> Optional[Path]:
+    candidates = [
+        parent / f"{ts}-{kind}.json",
+        parent / ts / f"{ts}-{kind}.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def resolve_req_file(src: Path, ts: str, req_file: str) -> Optional[Path]:
+    req_name = Path(req_file).name
+    candidates = [
+        src / req_file,
+        src / req_name,
+        src / ts / req_name,
+        src / ts / f"{ts}-req.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
 # ---------------------------------------------------------------------------
 # index.jsonl 读取
 # ---------------------------------------------------------------------------
@@ -82,17 +107,17 @@ def collect_triplets_from_index(
     triplets: Dict[str, Dict[str, Path]] = {}
     for entry in entries:
         ts = entry["ts"]
-        req_path = src / Path(entry["req_file"]).name
-        if not req_path.is_file():
+        req_path = resolve_req_file(src, ts, entry["req_file"])
+        if not req_path:
             continue
         tri: Dict[str, Path] = {"req": req_path}
-        # headers/res 与 req 在同一目录，名称由 ts 推导
+        # headers/res 优先兼容同目录命名，缺失时再兼容 ts 子目录命名。
         parent = req_path.parent
-        headers_path = parent / f"{ts}-headers.json"
-        res_path = parent / f"{ts}-res.json"
-        if headers_path.is_file():
+        headers_path = resolve_related_file(parent, ts, "headers")
+        res_path = resolve_related_file(parent, ts, "res")
+        if headers_path:
             tri["headers"] = headers_path
-        if res_path.is_file():
+        if res_path:
             tri["res"] = res_path
         triplets[ts] = tri
     return triplets, total
