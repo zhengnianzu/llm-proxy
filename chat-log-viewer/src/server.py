@@ -653,12 +653,96 @@ def index():
 
 
 @app.get("/api/list")
-def api_list(dir: Optional[str] = Query(default=None)):
+def api_list(
+    dir: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    filters: Optional[str] = Query(default=None),
+    sort_field: Optional[str] = Query(default=None),
+    sort_order: Optional[str] = Query(default="desc"),
+):
     if has_session_args:
         source = _get_source_by_key(dir)
-        return JSONResponse(_cache.get(source.key, []))
-    root_dir = _get_root_by_key(dir)
-    return JSONResponse(_cache.get(_dir_key(root_dir), []))
+        items = _cache.get(source.key, [])
+    else:
+        root_dir = _get_root_by_key(dir)
+        items = _cache.get(_dir_key(root_dir), [])
+
+    # --- search ---
+    if q:
+        ql = q.lower()
+        items = [it for it in items if
+                 ql in str(it.get("label_short") or "").lower() or
+                 ql in str(it.get("rel_path") or "").lower()]
+
+    # --- filters ---
+    if filters:
+        try:
+            filter_list = json.loads(filters)
+        except json.JSONDecodeError:
+            filter_list = []
+        for f in filter_list:
+            items = [it for it in items if _match_filter(it, f)]
+
+    # --- sort ---
+    if sort_field:
+        reverse = sort_order != "asc"
+        items = sorted(items, key=lambda it: _sort_key(it, sort_field), reverse=reverse)
+
+    return JSONResponse({"items": items, "total": len(items)})
+
+
+def _match_filter(item: dict, f: dict) -> bool:
+    """Server-side replica of the front-end _matchFilter logic."""
+    field = f.get("field", "")
+    op = f.get("op", "")
+    value = f.get("value", "")
+    raw = item.get(field)
+
+    if op == "range":
+        try:
+            left = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return False
+        if left is None:
+            return False
+        lo = float(f.get("min", "-inf")) if f.get("min") is not None else float("-inf")
+        hi = float(f.get("max", "inf")) if f.get("max") is not None else float("inf")
+        return lo <= left < hi
+
+    if op == "map_has_key":
+        key = f.get("key", "")
+        return isinstance(raw, dict) and key in raw
+
+    if op == "contains":
+        return value.lower() in str(raw or "").lower()
+
+    if op == "=":
+        return str(raw or "") == value
+
+    # numeric comparisons
+    try:
+        left = float(raw) if raw is not None else None
+        right = float(value)
+    except (TypeError, ValueError):
+        return False
+    if left is None:
+        return False
+    if op == ">=":
+        return left >= right
+    if op == "<=":
+        return left <= right
+    return False
+
+
+def _sort_key(item: dict, field: str):
+    """Return a sort key; numeric fields sort numerically, else string."""
+    v = item.get(field)
+    if v is None:
+        return (1, 0)  # nulls last
+    try:
+        return (0, float(v))
+    except (TypeError, ValueError):
+        return (0, str(v))
 
 
 @app.get("/api/refresh")
