@@ -600,6 +600,64 @@
             vertical-align: middle; margin-right: 5px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Favorite star button */
+        .fav-btn {
+            background: none; border: 1px solid var(--border); border-radius: 6px;
+            cursor: pointer; font-size: 18px; padding: 4px 10px; color: #b8c4ce;
+            transition: all .15s;
+        }
+        .fav-btn:hover { border-color: #f59e0b; color: #f59e0b; }
+        .fav-btn.active { color: #f59e0b; border-color: #f59e0b; }
+
+        /* Bookmark view */
+        .bookmark-layout {
+            display: flex; height: 100%; overflow: hidden;
+        }
+        .bookmark-sidebar {
+            width: 340px; min-width: 260px; border-right: 1px solid var(--border);
+            display: flex; flex-direction: column; background: var(--surface);
+        }
+        .bookmark-toolbar {
+            padding: 10px 12px; border-bottom: 1px solid var(--border);
+            display: flex; gap: 8px; align-items: center; flex-shrink: 0;
+        }
+        .bookmark-toolbar .search-input { flex: 1; }
+        .bookmark-list {
+            flex: 1; overflow-y: auto; padding: 4px 0;
+        }
+        .bookmark-main {
+            flex: 1; display: flex; flex-direction: column; overflow: hidden;
+        }
+        .bookmark-chat-panel {
+            flex: 1; overflow-y: auto; padding: 20px 24px;
+        }
+        .bookmark-item {
+            padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #f0f4f8;
+            transition: background .1s;
+        }
+        .bookmark-item:hover { background: var(--surface-alt); }
+        .bookmark-item.active { background: var(--primary-soft); border-left: 3px solid var(--primary); }
+        .bookmark-item-label { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .bookmark-item-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+        .bookmark-item-source { font-size: 10px; color: var(--primary); background: var(--primary-soft); padding: 1px 6px; border-radius: 3px; display: inline-block; margin-top: 3px; }
+        .bookmark-item-actions { float: right; }
+        .bookmark-remove-btn {
+            background: none; border: none; cursor: pointer; color: #d64545; font-size: 14px; opacity: .5;
+            transition: opacity .15s;
+        }
+        .bookmark-remove-btn:hover { opacity: 1; }
+        .bookmark-empty { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 14px; }
+        .bookmark-hdr {
+            padding: 8px 14px; font-size: 12px; font-weight: 600; color: var(--muted);
+            border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;
+        }
+        .btn-export {
+            padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 6px;
+            border: 1px solid var(--primary); color: var(--primary); background: transparent;
+            cursor: pointer; transition: all .15s;
+        }
+        .btn-export:hover { background: var(--primary); color: #fff; }
     </style>
 </head>
 <body>
@@ -611,6 +669,7 @@
             <button class="nav-tab active" data-view="sessions">Sessions</button>
             <button class="nav-tab" data-view="analysis">Analysis</button>
             <button class="nav-tab" data-view="summary">Summary</button>
+            <button class="nav-tab" data-view="bookmark">Bookmark</button>
         </div>
     </div>
     <div class="header-right">
@@ -696,6 +755,30 @@
             </div>
         </div>
     </div>
+
+    <div class="view" id="bookmarkView">
+        <div class="bookmark-layout">
+            <div class="bookmark-sidebar">
+                <div class="bookmark-toolbar">
+                    <input class="search-input" type="text" id="bookmarkSearch" placeholder="搜索收藏…" />
+                </div>
+                <div class="bookmark-hdr">
+                    <span id="bookmarkCount">0 条收藏</span>
+                    <button class="btn-export" id="bookmarkExportBtn">导出 CSV</button>
+                </div>
+                <div class="bookmark-list" id="bookmarkList">
+                    <div class="bookmark-empty">暂无收藏，请在 Session 详情面板点击星标添加</div>
+                </div>
+            </div>
+            <div class="bookmark-main">
+                <div class="bookmark-chat-panel" id="bookmarkChatPanel">
+                    <div class="empty-state">
+                        <p>从左侧选择一条收藏查看对话</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <div class="modal-backdrop" id="filterModal">
@@ -760,6 +843,16 @@ let currentFilters = [];
 let currentSort = { field: 'tool_fail_total', order: 'desc' };
 let analysisSummary = null;
 let summaryData = null;
+let favoritesSet = new Set(); // "dir_key||rel_path"
+let favoritesData = []; // raw list from API
+
+// Per-dir cache to avoid re-fetching on dataset switch
+const _dirCache = {
+    analysis: {},   // dir -> analysisSummary json
+    summary: null,  // summary is global (all sources)
+    analysisHtml: {},  // dir -> rendered HTML string
+    summaryHtml: null, // rendered summary HTML string
+};
 
 const fileListEl  = document.getElementById('fileList');
 const chatPanel   = document.getElementById('chatPanel');
@@ -794,6 +887,7 @@ dirSelect.addEventListener('change', async () => {
     currentDir = dirSelect.value || null;
     activeEl = null;
     activeItem = null;
+    analysisSummary = null;
     _renderEmptyChat();
     _renderDetailPanel(null);
     await loadList();
@@ -895,9 +989,7 @@ async function loadList() {
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     try {
         await executeSearch();
-        // 不阻塞 Sessions 视图，后台并行加载
-        loadAnalysisSummary();
-        loadSummary();
+        // Analysis 和 Summary 延迟到切换视图时加载，不在此触发
     } catch(e) {
         fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${esc(e.message)}</div>`;
     }
@@ -905,6 +997,11 @@ async function loadList() {
 
 async function refreshList() {
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>刷新中…</div>';
+    // Clear all caches on manual refresh
+    _dirCache.analysis = {};
+    _dirCache.summary = null;
+    _dirCache.analysisHtml = {};
+    _dirCache.summaryHtml = null;
     try {
         await initConfig();
         await fetch('/api/refresh' + _dirQuery());
@@ -915,12 +1012,26 @@ async function refreshList() {
 }
 
 async function loadAnalysisSummary() {
+    const cacheKey = currentDir || '__default__';
+    // Use cached rendered HTML if available
+    if (_dirCache.analysisHtml[cacheKey]) {
+        analysisSummary = _dirCache.analysis[cacheKey];
+        analysisContent.innerHTML = _dirCache.analysisHtml[cacheKey];
+        return;
+    }
     analysisContent.innerHTML = '<div class="analysis-empty"><span class="spinner"></span>分析数据加载中…</div>';
     try {
-        const res = await fetch('/api/analysis/summary' + _dirQuery());
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        analysisSummary = await res.json();
+        // Use cached data if available, otherwise fetch
+        if (_dirCache.analysis[cacheKey]) {
+            analysisSummary = _dirCache.analysis[cacheKey];
+        } else {
+            const res = await fetch('/api/analysis/summary' + _dirQuery());
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            analysisSummary = await res.json();
+            _dirCache.analysis[cacheKey] = analysisSummary;
+        }
         renderAnalysis();
+        _dirCache.analysisHtml[cacheKey] = analysisContent.innerHTML;
     } catch (e) {
         analysisSummary = null;
         analysisContent.innerHTML = `<div class="analysis-empty">分析数据加载失败：${esc(e.message)}</div>`;
@@ -928,12 +1039,24 @@ async function loadAnalysisSummary() {
 }
 
 async function loadSummary() {
+    // Summary is global (all sources), cache the rendered HTML
+    if (_dirCache.summaryHtml) {
+        summaryData = _dirCache.summary;
+        summaryView.innerHTML = _dirCache.summaryHtml;
+        return;
+    }
     summaryView.innerHTML = '<div class="summary-empty"><span class="spinner"></span> Summary 加载中…</div>';
     try {
-        const res = await fetch('/api/summary');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        summaryData = await res.json();
+        if (_dirCache.summary) {
+            summaryData = _dirCache.summary;
+        } else {
+            const res = await fetch('/api/summary');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            summaryData = await res.json();
+            _dirCache.summary = summaryData;
+        }
         renderSummary();
+        _dirCache.summaryHtml = summaryView.innerHTML;
     } catch (e) {
         summaryData = null;
         summaryView.innerHTML = `<div class="summary-empty"><div class="empty-icon">⚠️</div><p>Summary 加载失败：${esc(e.message)}</p></div>`;
@@ -1170,11 +1293,14 @@ function switchView(view) {
     currentView = view;
     document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `${view}View`));
     navTabs.forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
-    if (view === 'analysis' && !analysisSummary) {
+    if (view === 'analysis') {
         loadAnalysisSummary();
     }
-    if (view === 'summary' && !summaryData) {
+    if (view === 'summary') {
         loadSummary();
+    }
+    if (view === 'bookmark') {
+        loadBookmark();
     }
 }
 
@@ -1217,9 +1343,10 @@ function _renderDetailPanel(item) {
         detailBody.innerHTML = '<div class="detail-empty">选择一条 session 后，这里会显示轮次、工具失败、时长、完成状态等属性。</div>';
         return;
     }
+    const isFav = favoritesSet.has(_favKey(item.dir_key, item.rel_path));
     detailBody.innerHTML = `
         <div class="insight-card">
-            <h3>Overview</h3>
+            <h3>Overview <button class="fav-btn${isFav ? ' active' : ''}" id="favToggleBtn" title="${isFav ? '取消收藏' : '加入收藏'}">${isFav ? '★' : '☆'}</button></h3>
             <div class="insight-row"><strong>Session</strong><span><code>${esc(item.session || '-')}</code></span></div>
             <div class="insight-row"><strong>模型</strong><span>${esc(item.model || '-')}</span></div>
             <div class="insight-row"><strong>分析状态</strong><span class="analysis-badge${item.analysis_available ? '' : ' missing'}">${item.analysis_available ? 'analysis ready' : 'analysis missing'}</span></div>
@@ -1242,6 +1369,10 @@ function _renderDetailPanel(item) {
         </div>
         ` : ''}
     `;
+    const favBtn = document.getElementById('favToggleBtn');
+    if (favBtn) {
+        favBtn.addEventListener('click', () => toggleFavorite(item));
+    }
 }
 
 function renderDetailMap(obj) {
@@ -1837,11 +1968,194 @@ function showError(msg) {
 }
 
 // ----------------------------------------------------------------
+// Favorites / Bookmark
+// ----------------------------------------------------------------
+function _favKey(dirKey, relPath) { return dirKey + '||' + relPath; }
+
+async function loadFavorites() {
+    try {
+        const res = await fetch('/api/favorites');
+        if (!res.ok) return;
+        favoritesData = await res.json();
+        favoritesSet = new Set(favoritesData.map(f => _favKey(f.dir_key, f.rel_path)));
+    } catch (e) { console.warn('loadFavorites failed', e); }
+}
+
+async function toggleFavorite(item) {
+    const key = _favKey(item.dir_key, item.rel_path);
+    const isFav = favoritesSet.has(key);
+    const url = isFav ? '/api/favorites/remove' : '/api/favorites/add';
+    try {
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                dir_key: item.dir_key,
+                rel_path: item.rel_path,
+                label_short: item.label_short || '',
+                model: item.model || '',
+                msg_count: item.msg_count || 0,
+                session: item.session || '',
+                dir_label: item.dir_label || '',
+            }),
+        });
+        if (isFav) { favoritesSet.delete(key); } else { favoritesSet.add(key); }
+        _renderDetailPanel(item);
+        // Refresh favorites data
+        await loadFavorites();
+    } catch (e) { console.error('toggleFavorite failed', e); }
+}
+
+const bookmarkList = document.getElementById('bookmarkList');
+const bookmarkChatPanel = document.getElementById('bookmarkChatPanel');
+const bookmarkSearch = document.getElementById('bookmarkSearch');
+const bookmarkCount = document.getElementById('bookmarkCount');
+const bookmarkExportBtn = document.getElementById('bookmarkExportBtn');
+let bookmarkActiveEl = null;
+
+bookmarkSearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') renderBookmarkList();
+});
+
+bookmarkExportBtn.addEventListener('click', () => {
+    window.open('/api/favorites/export?fmt=csv', '_blank');
+});
+
+async function loadBookmark() {
+    await loadFavorites();
+    renderBookmarkList();
+}
+
+function renderBookmarkList() {
+    const q = (bookmarkSearch.value || '').trim().toLowerCase();
+    let items = favoritesData;
+    if (q) {
+        items = items.filter(f =>
+            (f.label_short || '').toLowerCase().includes(q) ||
+            (f.dir_label || '').toLowerCase().includes(q) ||
+            (f.rel_path || '').toLowerCase().includes(q)
+        );
+    }
+    bookmarkCount.textContent = `${items.length} 条收藏`;
+    if (!items.length) {
+        bookmarkList.innerHTML = '<div class="bookmark-empty">暂无收藏，请在 Session 详情面板点击星标添加</div>';
+        return;
+    }
+    bookmarkList.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    items.forEach(fav => {
+        const el = document.createElement('div');
+        el.className = 'bookmark-item';
+        el.innerHTML = `
+            <div class="bookmark-item-actions">
+                <button class="bookmark-remove-btn" title="移除收藏">✕</button>
+            </div>
+            <div class="bookmark-item-label">${esc(fav.label_short || '(空)')}</div>
+            <div class="bookmark-item-meta">${fav.msg_count || 0} 条${fav.model ? ' · ' + esc(fav.model) : ''}</div>
+            <span class="bookmark-item-source">${esc(fav.dir_label || fav.dir_key || '')}</span>
+        `;
+        el.querySelector('.bookmark-remove-btn').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await fetch('/api/favorites/remove', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dir_key: fav.dir_key, rel_path: fav.rel_path }),
+            });
+            await loadFavorites();
+            renderBookmarkList();
+            // Update detail panel star if same item
+            if (activeItem) _renderDetailPanel(activeItem);
+        });
+        el.addEventListener('click', () => {
+            if (bookmarkActiveEl) bookmarkActiveEl.classList.remove('active');
+            el.classList.add('active');
+            bookmarkActiveEl = el;
+            loadBookmarkChat(fav);
+        });
+        frag.appendChild(el);
+    });
+    bookmarkList.appendChild(frag);
+}
+
+async function loadBookmarkChat(fav) {
+    bookmarkChatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+    try {
+        const params = new URLSearchParams({ rel_path: fav.rel_path });
+        if (fav.dir_key) params.set('dir', fav.dir_key);
+        const res = await fetch('/api/file?' + params.toString());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // Reuse renderMessages but target bookmarkChatPanel
+        const data = await res.json();
+        const savedPanel = chatPanel;
+        // Temporarily swap chatPanel reference for renderMessages
+        const realChatPanel = chatPanel;
+        // We'll render manually to bookmarkChatPanel
+        renderMessagesToChatPanel(bookmarkChatPanel, data, fav.rel_path, fav.label_short || '');
+    } catch (e) {
+        bookmarkChatPanel.innerHTML = `<div class="error-box"><strong>错误：</strong>${esc(e.message)}</div>`;
+    }
+}
+
+function renderMessagesToChatPanel(panel, data, relPath, label) {
+    panel.innerHTML = '';
+    const messages = extractMessages(data);
+    if (!messages) { panel.innerHTML = '<div class="error-box">未找到 messages 字段</div>'; return; }
+    if (!messages.length) { panel.innerHTML = '<div class="error-box">messages 为空</div>'; return; }
+
+    const model  = data.model || data.request?.model;
+    const temp   = data.temperature ?? data.request?.temperature;
+    const maxTok = data.max_tokens   ?? data.request?.max_tokens;
+
+    const meta = document.createElement('div');
+    meta.className = 'metadata';
+    meta.innerHTML = `
+        <div class="metadata-title">📋 对话信息</div>
+        ${model  ? `<div class="metadata-item"><strong>模型</strong><span>${esc(model)}</span></div>` : ''}
+        ${temp  !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${temp}</span></div>` : ''}
+        ${maxTok ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${maxTok}</span></div>` : ''}
+        <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
+        <div class="metadata-item"><strong>路径</strong><span style="font-size:12px;font-family:monospace">${esc(relPath)}</span></div>
+    `;
+    panel.appendChild(meta);
+
+    messages.forEach(msg => {
+        const role = msg.role || 'unknown';
+        if (role === 'system') { panel.appendChild(renderSystemPrompt(msg.content)); return; }
+        let blocks = [];
+        if (role === 'tool') {
+            blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
+        } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+            if (Array.isArray(msg.content)) { blocks.push(...msg.content); }
+            else if (msg.content) { blocks.push({ type: 'text', text: msg.content }); }
+            msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
+        } else if (Array.isArray(msg.content)) {
+            blocks = msg.content;
+        } else {
+            blocks = [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
+        }
+        if (msg.reasoning_content) { blocks = [{ type: 'thinking', thinking: msg.reasoning_content }, ...blocks]; }
+        const displayRole = role === 'tool' ? 'user' : role;
+        const row = document.createElement('div');
+        row.className = `msg-row ${displayRole}`;
+        const avatar = document.createElement('div');
+        avatar.className = `avatar ${displayRole}`;
+        avatar.textContent = displayRole === 'user' ? '👤' : '🤖';
+        const col = document.createElement('div');
+        col.className = 'msg-bubble-col';
+        blocks.forEach(b => { const el = renderBlock(b); if (el) col.appendChild(el); });
+        if (displayRole === 'user') { row.appendChild(avatar); row.appendChild(col); }
+        else { row.appendChild(col); row.appendChild(avatar); }
+        panel.appendChild(row);
+    });
+}
+
+// ----------------------------------------------------------------
 // Init
 // ----------------------------------------------------------------
 (async function init() {
     try {
         await initConfig();
+        await loadFavorites();
         await loadList();
     } catch (e) {
         fileListEl.innerHTML = `<div class="sidebar-tip">初始化失败：${esc(e.message)}</div>`;

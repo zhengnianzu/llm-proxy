@@ -17,11 +17,12 @@ import os
 import sys
 from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -919,6 +920,101 @@ def api_config():
         "dirs": dirs,
         "active_dir": dirs[0]["key"] if len(dirs) == 1 else None,
     })
+
+
+# ---------------------------------------------------------------------------
+# Favorites
+# ---------------------------------------------------------------------------
+_FAVORITES_FILE = Path(__file__).resolve().parent.parent / "favorites.json"
+_favorites: List[Dict] = []
+
+
+def _load_favorites():
+    global _favorites
+    if _FAVORITES_FILE.is_file():
+        try:
+            with open(_FAVORITES_FILE, "r", encoding="utf-8") as f:
+                _favorites = json.load(f)
+        except Exception:
+            _favorites = []
+    else:
+        _favorites = []
+
+
+def _save_favorites():
+    with open(_FAVORITES_FILE, "w", encoding="utf-8") as f:
+        json.dump(_favorites, f, ensure_ascii=False, indent=2)
+
+
+_load_favorites()
+
+
+@app.get("/api/favorites")
+def api_favorites():
+    # Enrich dir_label from source registry
+    enriched = []
+    for fav in _favorites:
+        entry = _SOURCE_BY_KEY.get(fav.get("dir_key"))
+        item = {**fav, "dir_label": entry.label if entry else fav.get("dir_label", "")}
+        enriched.append(item)
+    return JSONResponse(enriched)
+
+
+@app.post("/api/favorites/add")
+async def api_favorites_add(request: Request):
+    body = await request.json()
+    dir_key = body.get("dir_key", "")
+    rel_path = body.get("rel_path", "")
+    if not dir_key or not rel_path:
+        raise HTTPException(status_code=400, detail="dir_key and rel_path required")
+    # Dedup
+    for fav in _favorites:
+        if fav.get("dir_key") == dir_key and fav.get("rel_path") == rel_path:
+            return JSONResponse({"status": "already_exists"})
+    _favorites.append({
+        "dir_key": dir_key,
+        "rel_path": rel_path,
+        "label_short": body.get("label_short", ""),
+        "model": body.get("model", ""),
+        "msg_count": body.get("msg_count", 0),
+        "session": body.get("session", ""),
+        "dir_label": body.get("dir_label", ""),
+        "added_at": datetime.now().isoformat(),
+    })
+    _save_favorites()
+    return JSONResponse({"status": "ok"})
+
+
+@app.post("/api/favorites/remove")
+async def api_favorites_remove(request: Request):
+    body = await request.json()
+    dir_key = body.get("dir_key", "")
+    rel_path = body.get("rel_path", "")
+    _favorites[:] = [f for f in _favorites if not (f.get("dir_key") == dir_key and f.get("rel_path") == rel_path)]
+    _save_favorites()
+    return JSONResponse({"status": "ok"})
+
+
+@app.get("/api/favorites/export")
+def api_favorites_export(fmt: str = Query(default="csv")):
+    """Export favorites as CSV."""
+    import csv
+    import io
+
+    fields = ["dir_key", "dir_label", "session", "label_short", "model", "msg_count", "rel_path", "added_at"]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for fav in _favorites:
+        entry = _SOURCE_BY_KEY.get(fav.get("dir_key"))
+        row = {**fav, "dir_label": entry.label if entry else fav.get("dir_label", "")}
+        writer.writerow(row)
+    content = "\ufeff" + buf.getvalue()  # UTF-8 BOM for Excel
+    return PlainTextResponse(
+        content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=bookmark_favorites.csv"},
+    )
 
 
 # ---------------------------------------------------------------------------
