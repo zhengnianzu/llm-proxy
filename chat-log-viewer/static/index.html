@@ -2362,85 +2362,10 @@ function showError(msg) {
 // Trajectory Diff
 // ----------------------------------------------------------------
 let trajMode = false;
-let trajRounds = [];      // [{round, file, rel_path, msg_count}]
-let trajDataCache = {};   // rel_path -> full json data
+let trajRounds = [];      // from backend: [{round, file, rel_path, msg_count, diff_count, summary}]
+let trajDiffs = {};       // from backend: { "round_idx": [diff objects with block_diffs/diff_html] }
 let trajActiveRound = null;
 let trajActiveRoundEl = null;
-
-// Levenshtein-based similarity ratio (0~1), with early exit for long strings
-function _strSimilarity(a, b) {
-    if (a === b) return 1;
-    if (!a || !b) return 0;
-    // For very long strings, sample-compare to avoid O(n*m) cost
-    if (a.length > 5000 || b.length > 5000) {
-        const maxLen = Math.max(a.length, b.length);
-        const minLen = Math.min(a.length, b.length);
-        // Length ratio check first
-        if (minLen / maxLen < 0.9) return minLen / maxLen;
-        // Sample 500-char chunks at start, middle, end
-        const chunks = [0, Math.floor(minLen / 2) - 250, minLen - 500].filter(i => i >= 0);
-        let matchChars = 0, totalChars = 0;
-        for (const start of chunks) {
-            const len = Math.min(500, minLen - start);
-            const sa = a.substring(start, start + len);
-            const sb = b.substring(start, start + len);
-            for (let i = 0; i < len; i++) {
-                totalChars++;
-                if (sa[i] === sb[i]) matchChars++;
-            }
-        }
-        return totalChars > 0 ? matchChars / totalChars : 0;
-    }
-    // Short strings: full Levenshtein
-    const la = a.length, lb = b.length;
-    const d = Array.from({ length: la + 1 }, (_, i) => i);
-    for (let j = 1; j <= lb; j++) {
-        let prev = d[0]; d[0] = j;
-        for (let i = 1; i <= la; i++) {
-            const tmp = d[i];
-            d[i] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, d[i], d[i - 1]);
-            prev = tmp;
-        }
-    }
-    return 1 - d[la] / Math.max(la, lb);
-}
-
-function _normalizeMsg(msg) {
-    // Deep clone and strip cache_control + normalize whitespace for comparison
-    if (!msg) return '';
-    const clone = JSON.parse(JSON.stringify(msg));
-    if (Array.isArray(clone.content)) {
-        clone.content.forEach(b => {
-            delete b.cache_control;
-            if (typeof b.text === 'string') b.text = b.text.replace(/\s+/g, ' ').trim();
-            if (typeof b.thinking === 'string') b.thinking = b.thinking.replace(/\s+/g, ' ').trim();
-        });
-    } else if (typeof clone.content === 'string') {
-        clone.content = clone.content.replace(/\s+/g, ' ').trim();
-    }
-    delete clone.cache_control;
-    delete clone._isResponse;
-    return JSON.stringify(clone);
-}
-
-function _normalizeContent(content) {
-    if (!content) return '';
-    const clone = JSON.parse(JSON.stringify(content));
-    if (Array.isArray(clone)) {
-        clone.forEach(b => { delete b.cache_control; });
-    }
-    return JSON.stringify(clone);
-}
-
-function _buildFullMessages(data) {
-    // Build messages array including response as the last "assistant" message
-    const msgs = data.messages ? [...data.messages] : [];
-    const response = data.response;
-    if (response && response.content) {
-        msgs.push({ role: 'assistant', content: response.content, _isResponse: true });
-    }
-    return msgs;
-}
 
 async function enterTrajectoryMode() {
     await loadTrajectoryDiff();
@@ -2460,7 +2385,7 @@ async function loadTrajectoryDiff() {
     if (!session) return;
 
     trajRounds = [];
-    trajDataCache = {};
+    trajDiffs = {};
     trajActiveRound = null;
     trajActiveRoundEl = null;
 
@@ -2468,58 +2393,26 @@ async function loadTrajectoryDiff() {
 
     try {
         const params = new URLSearchParams();
-        if (currentDir) params.set('dir', currentDir);
+        const dirKey = activeItem.dir_key || currentDir;
+        if (dirKey) params.set('dir', dirKey);
         params.set('session', session);
-        const res = await fetch('/api/trajectory?' + params.toString());
+        const res = await fetch('/api/trajectory/diff?' + params.toString());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         trajRounds = data.rounds || [];
+        trajDiffs = data.diffs || {};
+
+        // Attach diffs to rounds for rendering
+        trajRounds.forEach((r, idx) => {
+            const roundDiffs = trajDiffs[String(idx)] || [];
+            r.diffs = roundDiffs;
+            r.diffCount = r.diff_count || roundDiffs.length;
+        });
 
         if (trajRounds.length < 2) {
             trajectoryDiffContent.innerHTML = '<div class="analysis-empty"><p>该 session 只有 1 个调用轮次，无需对比</p></div>';
             return;
         }
-
-        // Load all rounds in parallel
-        const loadPromises = trajRounds.map(async (r) => {
-            const p = new URLSearchParams({ rel_path: r.rel_path });
-            if (currentDir) p.set('dir', currentDir);
-            const resp = await fetch('/api/file?' + p.toString());
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            trajDataCache[r.rel_path] = await resp.json();
-        });
-        await Promise.all(loadPromises);
-
-        // Compute diffs for each round
-        const lastRound = trajRounds[trajRounds.length - 1];
-        const lastData = trajDataCache[lastRound.rel_path];
-        const lastMsgs = _buildFullMessages(lastData);
-
-        trajRounds.forEach((r, idx) => {
-            if (idx === trajRounds.length - 1) {
-                r.diffCount = 0;
-                r.diffs = [];
-                return;
-            }
-            const roundData = trajDataCache[r.rel_path];
-            const roundMsgs = _buildFullMessages(roundData);
-            const diffs = [];
-            for (let i = 0; i < roundMsgs.length; i++) {
-                const baseMsgNorm = i < lastMsgs.length ? _normalizeMsg(lastMsgs[i]) : null;
-                const roundMsgNorm = _normalizeMsg(roundMsgs[i]);
-                if (roundMsgNorm !== baseMsgNorm && _strSimilarity(roundMsgNorm, baseMsgNorm || '') < 0.95) {
-                    diffs.push({
-                        msgIndex: i,
-                        role: roundMsgs[i].role || 'unknown',
-                        original: roundMsgs[i],
-                        final: i < lastMsgs.length ? lastMsgs[i] : null,
-                        isResponse: !!roundMsgs[i]._isResponse,
-                    });
-                }
-            }
-            r.diffCount = diffs.length;
-            r.diffs = diffs;
-        });
 
         renderTrajectoryDiff();
     } catch (e) {
@@ -2596,16 +2489,23 @@ function renderTrajectoryDiff() {
 function renderDiffRound(round, roundIdx) {
     const panel = document.getElementById('trajMainPanel');
     if (!panel) return;
-    const isLast = roundIdx === trajRounds.length - 1;
+    const isLast = round.is_base;
 
     if (isLast) {
-        // Base round — show full messages
-        const data = trajDataCache[round.rel_path];
-        panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版完整对话）</div>';
-        const container = document.createElement('div');
-        container.style.cssText = 'padding: 0';
-        renderMessagesToChatPanel(container, data, round.rel_path, '');
-        panel.appendChild(container);
+        panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版完整对话）</div><div class="analysis-empty"><span class="spinner"></span>加载中…</div>';
+        // Load on demand
+        const p = new URLSearchParams({ rel_path: round.rel_path });
+        const dk = activeItem && activeItem.dir_key || currentDir;
+        if (dk) p.set('dir', dk);
+        fetch('/api/file?' + p.toString())
+            .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+            .then(data => {
+                panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版完整对话）</div>';
+                const container = document.createElement('div');
+                renderMessagesToChatPanel(container, data, round.rel_path, '');
+                panel.appendChild(container);
+            })
+            .catch(e => { panel.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });
         return;
     }
 
@@ -2642,29 +2542,27 @@ function renderDiffRound(round, roundIdx) {
 function renderDiffContent(panel, round, roundIdx, contentArea) {
     contentArea.innerHTML = '';
     const diffs = round.diffs || [];
-    const roundData = trajDataCache[round.rel_path];
-    const roundMsgs = _buildFullMessages(roundData);
 
     if (!diffs.length) {
         contentArea.innerHTML = '<div class="diff-unchanged">该轮所有消息与最终版一致，无差异</div>';
         return;
     }
 
-    const diffIndices = new Set(diffs.map(d => d.msgIndex));
+    const diffIndices = new Set(diffs.map(d => d.msg_index));
+    const totalMsgs = round.msg_count || 0;
     let i = 0;
-    while (i < roundMsgs.length) {
+    while (i < totalMsgs) {
         if (!diffIndices.has(i)) {
-            // Find consecutive unchanged range
             let j = i;
-            while (j < roundMsgs.length && !diffIndices.has(j)) j++;
+            while (j < totalMsgs && !diffIndices.has(j)) j++;
             const count = j - i;
             const el = document.createElement('div');
             el.className = 'diff-unchanged';
-            el.textContent = `消息 ${i + 1}${count > 1 ? '-' + (j) : ''} 无变化 (${count} 条)`;
+            el.textContent = `消息 ${i + 1}${count > 1 ? '-' + j : ''} 无变化 (${count} 条)`;
             contentArea.appendChild(el);
             i = j;
         } else {
-            const diff = diffs.find(d => d.msgIndex === i);
+            const diff = diffs.find(d => d.msg_index === i);
             contentArea.appendChild(_renderDiffBlock(diff, round.round));
             i++;
         }
@@ -2675,164 +2573,77 @@ function _renderDiffBlock(diff, roundNum) {
     const block = document.createElement('div');
     block.className = 'diff-block';
 
-    const label = diff.isResponse ? `Response (assistant)` : `消息 ${diff.msgIndex + 1} [${diff.role}]`;
-
-    // Top label bar
+    const label = `消息 ${diff.msg_index + 1} [${diff.role}] — ${diff.status}`;
     const labelBar = document.createElement('div');
     labelBar.className = 'diff-block-label';
     labelBar.innerHTML = `<span>${esc(label)}</span>`;
     block.appendChild(labelBar);
 
-    // Get content blocks from both sides
-    const origBlocks = _getContentBlocks(diff.original);
-    const finalBlocks = diff.final ? _getContentBlocks(diff.final) : [];
-    const maxLen = Math.max(origBlocks.length, finalBlocks.length);
+    const blockDiffs = diff.block_diffs || [];
 
-    for (let i = 0; i < maxLen; i++) {
-        const ob = i < origBlocks.length ? origBlocks[i] : null;
-        const fb = i < finalBlocks.length ? finalBlocks[i] : null;
-        const origText = ob ? _blockToText(ob) : '';
-        const finalText = fb ? _blockToText(fb) : '';
-
-        // Skip if identical
-        if (origText === finalText) continue;
-
-        const blockType = (ob && ob.type) || (fb && fb.type) || '';
-        const typeLabel = blockType === 'text' ? '' : `[${blockType}] `;
-
-        const [origHtml, finalHtml] = _wordDiff(origText, finalText);
-
+    if (blockDiffs.length === 0) {
+        // Fallback: show original vs final as plain text
         const body = document.createElement('div');
         body.className = 'diff-block-body';
-
-        const origHalf = document.createElement('div');
-        origHalf.className = 'diff-half original';
-        origHalf.innerHTML = `
-            <div class="diff-half-header"><span>调用 ${roundNum} ${esc(typeLabel)}原文</span></div>
-            <div class="diff-half-body">${ob ? origHtml : '<em style="color:#9ca3af">(不存在)</em>'}</div>
+        body.innerHTML = `
+            <div class="diff-half original">
+                <div class="diff-half-header"><span>调用 ${roundNum} 原文</span></div>
+                <div class="diff-half-body"><pre style="white-space:pre-wrap;margin:0">${esc(JSON.stringify(diff.original_blocks, null, 2))}</pre></div>
+            </div>
+            <div class="diff-half final">
+                <div class="diff-half-header"><span>最终版</span></div>
+                <div class="diff-half-body"><pre style="white-space:pre-wrap;margin:0">${esc(JSON.stringify(diff.final_blocks, null, 2))}</pre></div>
+            </div>
         `;
-
-        const finalHalf = document.createElement('div');
-        finalHalf.className = 'diff-half final';
-        finalHalf.innerHTML = `
-            <div class="diff-half-header"><span>最终版 ${esc(typeLabel)}</span></div>
-            <div class="diff-half-body">${fb ? finalHtml : '<em style="color:#9ca3af">(不存在)</em>'}</div>
-        `;
-
-        body.appendChild(origHalf);
-        body.appendChild(finalHalf);
         block.appendChild(body);
+    } else {
+        for (const bd of blockDiffs) {
+            const typeLabel = bd.block_type === 'text' ? '' : `[${bd.block_type}] `;
+            const body = document.createElement('div');
+            body.className = 'diff-block-body';
+
+            const origHalf = document.createElement('div');
+            origHalf.className = 'diff-half original';
+            origHalf.innerHTML = `
+                <div class="diff-half-header"><span>调用 ${roundNum} ${esc(typeLabel)}原文</span></div>
+                <div class="diff-half-body">${bd.left_html}</div>
+            `;
+
+            const finalHalf = document.createElement('div');
+            finalHalf.className = 'diff-half final';
+            finalHalf.innerHTML = `
+                <div class="diff-half-header"><span>最终版 ${esc(typeLabel)}</span></div>
+                <div class="diff-half-body">${bd.right_html}</div>
+            `;
+
+            body.appendChild(origHalf);
+            body.appendChild(finalHalf);
+            block.appendChild(body);
+        }
     }
 
     return block;
 }
 
-function _getContentBlocks(msg) {
-    if (!msg) return [];
-    const c = msg.content;
-    if (typeof c === 'string') return [{ type: 'text', text: c }];
-    if (Array.isArray(c)) return c;
-    return [{ type: 'text', text: JSON.stringify(c, null, 2) }];
-}
-
-// Word-level diff: returns [leftHtml, rightHtml] with <span class="diff-del/ins"> highlights
-function _wordDiff(a, b) {
-    if (a === b) return [esc(a), esc(b)];
-    const wordsA = a.split(/(\s+)/);
-    const wordsB = b.split(/(\s+)/);
-
-    // Simple LCS-based word diff (Myers-like, but simplified for reasonable lengths)
-    const maxWords = 2000;
-    if (wordsA.length > maxWords || wordsB.length > maxWords) {
-        // Fallback: just highlight entire blocks for very long texts
-        return [`<span class="diff-del">${esc(a)}</span>`, `<span class="diff-ins">${esc(b)}</span>`];
-    }
-
-    // Build edit script using LCS
-    const n = wordsA.length, m = wordsB.length;
-    // Compute LCS table (space-optimized would be better but this is fine for <2000 words)
-    const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
-    for (let i = 1; i <= n; i++) {
-        for (let j = 1; j <= m; j++) {
-            dp[i][j] = wordsA[i - 1] === wordsB[j - 1]
-                ? dp[i - 1][j - 1] + 1
-                : Math.max(dp[i - 1][j], dp[i][j - 1]);
-        }
-    }
-
-    // Backtrack to get diff
-    const ops = []; // {type: 'same'|'del'|'ins', word}
-    let i = n, j = m;
-    while (i > 0 || j > 0) {
-        if (i > 0 && j > 0 && wordsA[i - 1] === wordsB[j - 1]) {
-            ops.push({ type: 'same', wordA: wordsA[i - 1], wordB: wordsB[j - 1] });
-            i--; j--;
-        } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-            ops.push({ type: 'ins', wordB: wordsB[j - 1] });
-            j--;
-        } else {
-            ops.push({ type: 'del', wordA: wordsA[i - 1] });
-            i--;
-        }
-    }
-    ops.reverse();
-
-    let leftHtml = '', rightHtml = '';
-    for (const op of ops) {
-        if (op.type === 'same') {
-            leftHtml += esc(op.wordA);
-            rightHtml += esc(op.wordB);
-        } else if (op.type === 'del') {
-            leftHtml += `<span class="diff-del">${esc(op.wordA)}</span>`;
-        } else {
-            rightHtml += `<span class="diff-ins">${esc(op.wordB)}</span>`;
-        }
-    }
-    return [leftHtml, rightHtml];
-}
-
-function _msgToText(msg) {
-    if (!msg) return '';
-    const content = msg.content;
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-        return content.map(b => _blockToText(b)).join('\n\n');
-    }
-    return JSON.stringify(content, null, 2);
-}
-
-function _blockToText(b) {
-    if (!b) return '';
-    if (b.type === 'text') return b.text || '';
-    if (b.type === 'thinking') return b.thinking || b.text || '';
-    if (b.type === 'tool_use') return `[tool_use: ${b.name || ''}]\n${JSON.stringify(b.input || {}, null, 2)}`;
-    if (b.type === 'tool_result') {
-        const c = b.content;
-        if (typeof c === 'string') return c;
-        if (Array.isArray(c)) return c.map(x => x.text || JSON.stringify(x)).join('\n');
-        return JSON.stringify(c, null, 2);
-    }
-    if (b.type === '_oai_tool_call') {
-        const tc = b.tool_call || {};
-        return `[tool_call: ${tc.function?.name || ''}]\n${tc.function?.arguments || ''}`;
-    }
-    if (b.type === '_oai_tool_result') {
-        return typeof b.content === 'string' ? b.content : JSON.stringify(b.content, null, 2);
-    }
-    return JSON.stringify(b, null, 2);
-}
-
 function renderRawContent(panel, round, contentArea) {
-    contentArea.innerHTML = '';
-    const data = trajDataCache[round.rel_path];
-    const header = document.createElement('div');
-    header.className = 'diff-section-header';
-    header.textContent = `调用 ${round.round} 原始 JSON (${round.msg_count} messages)`;
-    contentArea.appendChild(header);
-    const pre = document.createElement('pre');
-    pre.style.cssText = 'background:#1e1e2e;color:#cdd6f4;padding:16px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.5;max-height:80vh;white-space:pre-wrap;word-break:break-all;';
-    pre.textContent = JSON.stringify(data, null, 2);
-    contentArea.appendChild(pre);
+    contentArea.innerHTML = '<div class="analysis-empty"><span class="spinner"></span>加载原始 JSON…</div>';
+    const p = new URLSearchParams({ rel_path: round.rel_path });
+    const dk = activeItem && activeItem.dir_key || currentDir;
+    if (dk) p.set('dir', dk);
+    fetch('/api/file?' + p.toString())
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then(data => {
+            contentArea.innerHTML = '';
+            const header = document.createElement('div');
+            header.className = 'diff-section-header';
+            header.textContent = `调用 ${round.round} 原始 JSON (${round.msg_count} messages)`;
+            contentArea.appendChild(header);
+            const pre = document.createElement('pre');
+            pre.style.cssText = 'background:#1e1e2e;color:#cdd6f4;padding:16px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.5;max-height:80vh;white-space:pre-wrap;word-break:break-all;';
+            pre.textContent = JSON.stringify(data, null, 2);
+            contentArea.appendChild(pre);
+        })
+        .catch(e => { contentArea.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });
 }
 
 // ----------------------------------------------------------------

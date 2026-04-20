@@ -32,7 +32,7 @@ from src.utils.message_utils import (
     load_json,
     parse_response,
 )
-from src.utils.trajectory_utils import build_session_trajectory
+from src.utils.trajectory_utils import build_session_trajectory, build_trajectory_diff
 
 logger = logging.getLogger("chat-log-viewer")
 
@@ -829,6 +829,28 @@ def api_session_trajectory(rel_path: str = Query(...), dir: Optional[str] = Quer
 
     try:
         return JSONResponse(build_session_trajectory(session_dir))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/trajectory/diff")
+def api_trajectory_diff(session: str = Query(...), dir: Optional[str] = Query(default=None)):
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Trajectory is only available in session mode")
+
+    source = _get_source_by_key(dir)
+    session_dir = (source.session_dir / session).resolve()
+    try:
+        if source.session_dir not in session_dir.parents and session_dir != source.session_dir:
+            raise ValueError("path not under session dir")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session path")
+
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Session directory not found")
+
+    try:
+        return JSONResponse(build_trajectory_diff(session_dir))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
