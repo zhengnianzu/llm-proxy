@@ -25,6 +25,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from src.quality_rules import (
+    evaluate_quality_rules,
+    get_quality_error_descriptions,
+    get_quality_rule_map,
+    get_rule_dependencies,
+)
+from src.quality_rules.base import QualityContext
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -284,12 +292,7 @@ def get_q1(messages: List[dict]) -> str:
 # 质量评估
 # ---------------------------------------------------------------------------
 
-# 错误代码 → 中文说明
-QUALITY_ERRORS: Dict[str, str] = {
-    "E001": "乱码(行均字符过少)",
-    "E002": "200空响应",
-    "E003": "工具调用过少(<3次)",
-}
+QUALITY_ERRORS: Dict[str, str] = get_quality_error_descriptions()
 
 
 def _is_garbled(text: str, min_lines: int = 10, max_avg_chars: float = 5.0) -> bool:
@@ -324,31 +327,6 @@ def _scan_garbled(data: dict) -> bool:
         if text and _is_garbled(text):
             return True
     return False
-
-
-def check_quality(best_data: dict, tool_use_cnt: int) -> List[str]:
-    """
-    对单个 session 的最佳快照做质量检查。
-    返回触发的错误代码列表（空列表 = 无问题）。
-    """
-    errors: List[str] = []
-
-    # E001: 乱码
-    if _scan_garbled(best_data):
-        errors.append("E001")
-
-    # E002: 请求返回 200 但响应内容为空
-    resp = best_data.get("response") or {}
-    status = resp.get("status_code")
-    content = resp.get("content")
-    if status == 200 and not content:
-        errors.append("E002")
-
-    # E003: 工具调用次数 < 3
-    if tool_use_cnt < 3:
-        errors.append("E003")
-
-    return errors
 
 
 def fmt_quality(error_codes: List[str]) -> tuple:
@@ -478,14 +456,13 @@ def _analyze_assistant_message(content: Any, stats: Dict[str, Any]) -> None:
 
 
 def _build_quality_errors(resp: dict, resp_content: Any, stats: Dict[str, Any]) -> List[str]:
-    errors: List[str] = []
-    if stats["has_garbled"]:
-        errors.append("E001")
-    if resp.get("status_code") == 200 and not resp_content:
-        errors.append("E002")
-    if stats["tool_use_count"] < 3:
-        errors.append("E003")
-    return errors
+    return evaluate_quality_rules(
+        QualityContext(
+            resp=resp,
+            resp_content=resp_content,
+            stats=stats,
+        )
+    )
 
 
 def analyze_best_data(best_data: dict) -> Dict[str, Any]:
@@ -541,6 +518,7 @@ def analyze_best_data(best_data: dict) -> Dict[str, Any]:
         "tool_success_detail": dict(stats["tool_success_detail"]),
         "tool_fail_detail": dict(stats["tool_fail_detail"]),
         "skills_used": dict(stats["skills_used"]),
+        "has_garbled": stats["has_garbled"],
         "quality_errors": _build_quality_errors(resp, resp_content, stats),
     }
 
@@ -1189,6 +1167,103 @@ def load_analysis_cache(path: Path) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# 缓存质量码增量刷新
+# ---------------------------------------------------------------------------
+
+def _normalize_quality_codes(codes: Optional[List[str]]) -> Optional[List[str]]:
+    if not codes:
+        return None
+    result: List[str] = []
+    for raw in codes:
+        for part in str(raw).split(","):
+            code = part.strip().upper()
+            if code:
+                result.append(code)
+    if any(code in ("ALL", "*") for code in result):
+        return None
+    return sorted(set(result))
+
+
+def _validate_refreshable_quality_codes(codes: Optional[List[str]]) -> List[str]:
+    rule_map = get_quality_rule_map()
+    selected = _normalize_quality_codes(codes)
+    target_codes = selected or sorted(rule_map)
+
+    unknown = sorted(set(target_codes) - set(rule_map))
+    if unknown:
+        raise ValueError(f"未知质量规则: {', '.join(unknown)}")
+
+    deps = get_rule_dependencies(target_codes)
+    unsupported = {
+        code: sorted(dep for dep in code_deps if dep != "cache")
+        for code, code_deps in deps.items()
+        if any(dep != "cache" for dep in code_deps)
+    }
+    if unsupported:
+        details = ", ".join(f"{code}({'+'.join(deps)})" for code, deps in unsupported.items())
+        raise ValueError(f"这些规则不能仅通过缓存增量刷新: {details}")
+    return target_codes
+
+
+def refresh_quality_codes_from_cache(sessions: List[Dict], codes: List[str]) -> int:
+    """只使用 session_analysis.json 中已有字段刷新指定质量码。"""
+    changed = 0
+    target_set = set(codes)
+    for row in sessions:
+        old_codes = set(_extract_error_codes(row.get("completed")))
+        kept_codes = old_codes - target_set
+        new_hits = set(evaluate_quality_rules(QualityContext(row=row), codes=codes))
+        merged_codes = sorted(kept_codes | new_hits)
+        new_completed, new_note = fmt_quality(merged_codes)
+
+        if row.get("completed") != new_completed or row.get("completed_note", "") != new_note:
+            row["completed"] = new_completed
+            row["completed_note"] = new_note
+            changed += 1
+    return changed
+
+
+def render_reports_from_sessions(sessions: List[Dict], output_dir: Path) -> None:
+    logger.info("开始聚合统计")
+    stats_start = time.perf_counter()
+    stats = compute_stats(sessions)
+    stats_elapsed = time.perf_counter() - stats_start
+    logger.info("开始构建报告上下文")
+    context_start = time.perf_counter()
+    ctx = build_context(sessions, stats)
+    context_elapsed = time.perf_counter() - context_start
+
+    xlsx_path = output_dir / "session_report.xlsx"
+    logger.info("开始写 Excel: %s", xlsx_path)
+    excel_start = time.perf_counter()
+    write_excel(sessions, stats, xlsx_path)
+    excel_elapsed = time.perf_counter() - excel_start
+    logger.info("Excel 已写入: %s", xlsx_path)
+
+    html_path = output_dir / "session_report.html"
+    logger.info("开始渲染 HTML: %s", html_path)
+    html_start = time.perf_counter()
+    render_report("report.html.j2", ctx, html_path)
+    html_elapsed = time.perf_counter() - html_start
+    logger.info("HTML 已写入: %s", html_path)
+
+    md_path = output_dir / "session_report.md"
+    logger.info("开始渲染 Markdown: %s", md_path)
+    md_start = time.perf_counter()
+    render_report("report.md.j2", ctx, md_path)
+    md_elapsed = time.perf_counter() - md_start
+    logger.info("Markdown 已写入: %s", md_path)
+    logger.info(
+        "[timing] stats=%s context=%s excel=%s html=%s markdown=%s",
+        format_stage_seconds(stats_elapsed),
+        format_stage_seconds(context_elapsed),
+        format_stage_seconds(excel_elapsed),
+        format_stage_seconds(html_elapsed),
+        format_stage_seconds(md_elapsed),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 多目录批量输出
 # ---------------------------------------------------------------------------
 
@@ -1271,8 +1346,30 @@ def analyze_session_root(
     output_dir: Path,
     recompute: bool,
     worker_num: int,
+    refresh_quality_codes: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    analysis_cache_path = output_dir / "session_analysis.json"
+    sessions: List[Dict]
+    if refresh_quality_codes:
+        if not analysis_cache_path.exists():
+            raise FileNotFoundError(f"分析缓存不存在，无法增量刷新: {analysis_cache_path}")
+        logger.info("开始加载分析缓存以刷新质量码: %s", analysis_cache_path)
+        logger.info("开始加载分析缓存: %s", analysis_cache_path)
+        sessions = load_analysis_cache(analysis_cache_path)
+        logger.info("复用分析缓存: %s", analysis_cache_path)
+        logger.info("缓存中包含 %d 个 session", len(sessions))
+        changed = refresh_quality_codes_from_cache(sessions, refresh_quality_codes)
+        logger.info("已刷新质量码 %s，受影响 session: %d", ",".join(refresh_quality_codes), changed)
+        save_analysis_cache(sessions, analysis_cache_path)
+        logger.info("分析缓存已回写: %s", analysis_cache_path)
+        render_reports_from_sessions(sessions, output_dir)
+        return {
+            "session_dir": str(session_dir),
+            "report_dir": str(output_dir),
+            "session_count": str(len(sessions)),
+        }
 
     logger.info("扫描目录: %s", session_dir)
     folders = sorted(
@@ -1281,8 +1378,6 @@ def analyze_session_root(
     )
     logger.info("发现 %d 个 session 文件夹", len(folders))
 
-    analysis_cache_path = output_dir / "session_analysis.json"
-    sessions: List[Dict]
     load_or_scan_start = time.perf_counter()
     if analysis_cache_path.exists() and not recompute:
         logger.info("开始加载分析缓存: %s", analysis_cache_path)
@@ -1304,43 +1399,10 @@ def analyze_session_root(
         logger.info("分析缓存已写入: %s", analysis_cache_path)
     load_or_scan_elapsed = time.perf_counter() - load_or_scan_start
 
-    logger.info("开始聚合统计")
-    stats_start = time.perf_counter()
-    stats = compute_stats(sessions)
-    stats_elapsed = time.perf_counter() - stats_start
-    logger.info("开始构建报告上下文")
-    context_start = time.perf_counter()
-    ctx = build_context(sessions, stats)
-    context_elapsed = time.perf_counter() - context_start
-
-    xlsx_path = output_dir / "session_report.xlsx"
-    logger.info("开始写 Excel: %s", xlsx_path)
-    excel_start = time.perf_counter()
-    write_excel(sessions, stats, xlsx_path)
-    excel_elapsed = time.perf_counter() - excel_start
-    logger.info("Excel 已写入: %s", xlsx_path)
-
-    html_path = output_dir / "session_report.html"
-    logger.info("开始渲染 HTML: %s", html_path)
-    html_start = time.perf_counter()
-    render_report("report.html.j2", ctx, html_path)
-    html_elapsed = time.perf_counter() - html_start
-    logger.info("HTML 已写入: %s", html_path)
-
-    md_path = output_dir / "session_report.md"
-    logger.info("开始渲染 Markdown: %s", md_path)
-    md_start = time.perf_counter()
-    render_report("report.md.j2", ctx, md_path)
-    md_elapsed = time.perf_counter() - md_start
-    logger.info("Markdown 已写入: %s", md_path)
+    render_reports_from_sessions(sessions, output_dir)
     logger.info(
-        "[timing] load_or_scan=%s stats=%s context=%s excel=%s html=%s markdown=%s",
+        "[timing] load_or_scan=%s",
         format_stage_seconds(load_or_scan_elapsed),
-        format_stage_seconds(stats_elapsed),
-        format_stage_seconds(context_elapsed),
-        format_stage_seconds(excel_elapsed),
-        format_stage_seconds(html_elapsed),
-        format_stage_seconds(md_elapsed),
     )
     return {
         "session_dir": str(session_dir),
@@ -1371,6 +1433,8 @@ def main() -> None:
                         help="输出目录。单目录模式默认 <DIR>/stat；多目录模式会输出到 <OUTPUT_DIR>/<name>/")
     parser.add_argument("--recompute", action="store_true",
                         help="忽略已有分析缓存，重新扫描全部 session")
+    parser.add_argument("--refresh-quality", action="append", default=[], metavar="CODE",
+                        help="仅基于已有 session_analysis.json 增量刷新指定质量码；可重复传入或传 all")
     parser.add_argument("--worker-num", type=int, default=(os.cpu_count() or 1),
                         help="并行 worker 数，默认使用 CPU 核心数")
     parser.add_argument("--server-config-name", default="server_session.yaml",
@@ -1401,10 +1465,19 @@ def main() -> None:
     base_output_dir = Path(args.out).resolve() if args.out else None
     if multi_mode and base_output_dir is None:
         parser.error("多目录模式必须显式指定 --out，作为统一输出根目录")
+    if args.refresh_quality and args.recompute:
+        parser.error("--refresh-quality 与 --recompute 不能同时使用")
 
     raw_names = [_slugify_name(root.name) for root in session_roots]
     unique_names = _dedupe_names(raw_names)
     worker_num = max(1, args.worker_num)
+    try:
+        refresh_quality_codes = (
+            _validate_refreshable_quality_codes(args.refresh_quality)
+            if args.refresh_quality else None
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     source_entries: List[Dict[str, str]] = []
     for session_dir, session_name in zip(session_roots, unique_names):
@@ -1415,6 +1488,7 @@ def main() -> None:
             output_dir=output_dir,
             recompute=args.recompute,
             worker_num=worker_num,
+            refresh_quality_codes=refresh_quality_codes,
         )
         source_entries.append({
             "label": session_name,

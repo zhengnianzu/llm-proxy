@@ -18,6 +18,10 @@ cp .env.example .env
 这两个key配置后强制使用给定值，当值为空时，才选择用户传入的模型
 UPSTREAM_API_KEY=sk-xxx
 MODEL_ID=gpt-5
+
+# API_KEY 用于接口鉴权，支持多个 key，用逗号分隔
+# 不配置则跳过鉴权，任何请求都能访问
+API_KEY=key1,key2,key3
 ```
 
 ```shell

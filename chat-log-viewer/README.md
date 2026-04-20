@@ -275,25 +275,56 @@ report/
 
 ### analyze_sessions.py — 会话分析
 
-对会话目录进行统计分析，输出详细报告。
+对一个或多个会话目录进行统计分析，输出详细报告；多目录模式会同时生成可直接给 server 使用的 `server_session.yaml`。
 
 **用法：**
 
 ```bash
-python analyze_sessions.py <session_dir> [--out <output_dir>]
+# 单目录：默认输出到 <dir>/stat/
+python analyze_sessions.py --dir <dir>
+python analyze_sessions.py --dir <dir> --out <report_dir>
 
-# 示例
-python analyze_sessions.py ./sessions/key1
-python analyze_sessions.py ./sessions/key1 --out ./reports/key1
+# 多目录：每个目录单独分析，输出到 <output>/<目录名>/
+python analyze_sessions.py --dir ./sessions/key1 --dir ./sessions/key2 --out ./output
+
+# 父目录批量：父目录下的直接子目录都会作为待分析目录
+python analyze_sessions.py --dir-parent ./sessions --out ./output
 ```
 
-**输出文件（默认写入 `<session_dir>/stat/`）：**
+**输出文件：**
 
 | 文件 | 说明 |
 |------|------|
 | `session_report.xlsx` | 详情 + 分布统计（多 sheet） |
 | `session_report.html` | HTML 可视化报告 |
 | `session_report.md` | Markdown 报告 |
+| `session_analysis.json` | 分析缓存，支持后续增量刷新质量编码 |
+| `server_session.yaml` | server 会话模式配置，多目录模式写入 `--out` 顶层 |
+
+多目录示例输出结构：
+
+```text
+output/
+    key1/
+        session_analysis.json
+        session_report.xlsx
+        session_report.html
+        session_report.md
+    key2/
+        session_analysis.json
+        session_report.xlsx
+        session_report.html
+        session_report.md
+    server_session.yaml
+```
+
+生成的 `server_session.yaml` 可以直接启动会话浏览服务：
+
+```bash
+server start --config ./output/server_session.yaml
+# 或
+python3 -m src.cli server start --config ./output/server_session.yaml
+```
 
 **统计指标：**
 
@@ -330,12 +361,31 @@ python analyze_sessions.py ./sessions/key1 --out ./reports/key1
 
 **质量检查规则：**
 
-- `E001`
-  若 `messages content`、`thinking/reasoning_content` 或 `response.content` 中存在疑似乱码文本，则标记。
-- `E002`
-  若 `response.status_code == 200` 且 `response.content` 为空，则标记为空响应。
-- `E003`
-  若 `tool_use_count < 3`，则标记为工具调用过少。
+- `E001`: 乱码(行均字符过少)。若 `messages content`、`thinking/reasoning_content` 或 `response.content` 中存在疑似乱码文本，则标记。
+- `E002`: 200空响应。若 `response.status_code == 200` 且 `response.content` 为空，则标记。
+- `E003`: 工具调用过少(<3次)。若 `tool_use_count < 3`，则标记。
+- `E004`: write成功率低于30%。仅统计已经返回 `tool_result` 的 `write` 调用，按 `write_success / (write_success + write_fail) < 0.3` 判定；最后一轮仅发出 `write` 但尚未返回结果时，不计入失败分母。
+
+质量规则采用插件化加载，规则文件统一放在 `src/quality_rules/`，文件名形如 `rule_e004_write_success_lt30.py`，并暴露 `RULE` 对象。新增规则时不需要改注册表，loader 会自动加载所有 `rule_*.py`。
+
+**增量刷新质量编码：**
+
+当已有 `session_analysis.json`，只想更新某些质量规则时，可以使用 `--refresh-quality`。该模式不会重新扫描原始 session，只会加载缓存、重算指定质量码、回写缓存并重新生成 `xlsx/html/md` 报告。
+
+```bash
+# 只刷新 E004
+python analyze_sessions.py --dir ./sessions/key1 --refresh-quality E004
+
+# 多目录下刷新 E003 和 E004
+python analyze_sessions.py \
+  --dir ./sessions/key1 \
+  --dir ./sessions/key2 \
+  --out ./output \
+  --refresh-quality E003 \
+  --refresh-quality E004
+```
+
+当前仅依赖缓存字段的规则支持增量刷新，例如 `E003`、`E004`。依赖原始最后一轮快照的规则（如 `E001`、`E002`）不能仅通过缓存刷新；如果传入 `--refresh-quality all`，脚本会在包含这类规则时直接报错，避免静默算错。
 
 ---
 
@@ -568,10 +618,17 @@ python3 -m src.server --dir ./logs_anthropic --port 8080
 python export_sessions.py ./logs_anthropic --out ./sessions/key1
 
 # 分析
-python analyze_sessions.py ./sessions/key1
+python analyze_sessions.py --dir ./sessions/key1
 
 # 查看报告
 open ./sessions/key1/stat/session_report.html
+```
+
+多 key 批量分析：
+
+```bash
+python analyze_sessions.py --dir ./sessions/key1 --dir ./sessions/key2 --out ./output
+server start --config ./output/server_session.yaml
 ```
 
 ### 3. 浏览会话视图
