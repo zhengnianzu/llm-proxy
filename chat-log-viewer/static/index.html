@@ -1591,6 +1591,39 @@ function renderMessages(data, relPath, label) {
         }
 
         const displayRole = role === 'tool' ? 'user' : role;
+
+        // Split mixed messages: if a tool-use row also has text/thinking, render them separately
+        const textBlocks = [];
+        const toolBlocks = [];
+        if (isToolRow && toolRowType === 'use') {
+            for (const b of blocks) {
+                const bt = b.type || '';
+                if (bt === 'tool_use' || bt === '_oai_tool_call') {
+                    toolBlocks.push(b);
+                } else {
+                    textBlocks.push(b);
+                }
+            }
+        }
+
+        // Render text/thinking part as a normal row (not hidden in mode 2)
+        if (textBlocks.length > 0) {
+            const textRow = document.createElement('div');
+            textRow.className = `msg-row ${displayRole}`;
+            const avatar1 = document.createElement('div');
+            avatar1.className = `avatar ${displayRole}`;
+            avatar1.textContent = displayRole === 'user' ? '👤' : '🤖';
+            const col1 = document.createElement('div');
+            col1.className = 'msg-bubble-col';
+            textBlocks.forEach(b => { const el = renderBlock(b); if (el) col1.appendChild(el); });
+            if (displayRole === 'user') {
+                textRow.appendChild(avatar1); textRow.appendChild(col1);
+            } else {
+                textRow.appendChild(col1); textRow.appendChild(avatar1);
+            }
+            chatPanel.appendChild(textRow);
+        }
+
         const row  = document.createElement('div');
         row.className = `msg-row ${displayRole}`;
         if (isToolRow) {
@@ -1645,7 +1678,9 @@ function renderMessages(data, relPath, label) {
 
         const col = document.createElement('div');
         col.className = 'msg-bubble-col';
-        blocks.forEach(b => { const el = renderBlock(b); if (el) col.appendChild(el); });
+        // If we split text blocks out, only render tool blocks in this row
+        const renderBlocks = (textBlocks.length > 0 && toolBlocks.length > 0) ? toolBlocks : blocks;
+        renderBlocks.forEach(b => { const el = renderBlock(b); if (el) col.appendChild(el); });
 
         if (displayRole === 'user') {
             row.appendChild(avatar); row.appendChild(col);
@@ -2492,7 +2527,7 @@ function renderDiffRound(round, roundIdx) {
     const isLast = round.is_base;
 
     if (isLast) {
-        panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版完整对话）</div><div class="analysis-empty"><span class="spinner"></span>加载中…</div>';
+        panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版原始 JSON）</div><div class="analysis-empty"><span class="spinner"></span>加载中…</div>';
         // Load on demand
         const p = new URLSearchParams({ rel_path: round.rel_path });
         const dk = activeItem && activeItem.dir_key || currentDir;
@@ -2500,10 +2535,11 @@ function renderDiffRound(round, roundIdx) {
         fetch('/api/file?' + p.toString())
             .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
             .then(data => {
-                panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版完整对话）</div>';
-                const container = document.createElement('div');
-                renderMessagesToChatPanel(container, data, round.rel_path, '');
-                panel.appendChild(container);
+                panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版原始 JSON）</div>';
+                const pre = document.createElement('pre');
+                pre.style.cssText = 'background:#1e1e2e;color:#cdd6f4;padding:16px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.5;max-height:80vh;white-space:pre-wrap;word-break:break-all;';
+                pre.textContent = JSON.stringify(data, null, 2);
+                panel.appendChild(pre);
             })
             .catch(e => { panel.innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });
         return;
