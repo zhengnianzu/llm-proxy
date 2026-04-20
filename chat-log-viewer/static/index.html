@@ -262,6 +262,93 @@
         .reports-view.active, .analysis-view.active {
             display: block;
         }
+        .trajectory-hero {
+            background: linear-gradient(135deg, #173650 0%, #23607d 55%, #4d8da0 100%);
+            border-radius: 16px; padding: 24px 28px; color: #fff;
+            box-shadow: 0 8px 24px rgba(23, 54, 80, .18);
+            display: flex; align-items: center; justify-content: space-between; gap: 20px;
+        }
+        .trajectory-hero h2 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+        .trajectory-hero p { font-size: 13px; color: rgba(255,255,255,.8); }
+        .trajectory-stats { display: flex; gap: 12px; flex-wrap: wrap; }
+        .trajectory-stat {
+            min-width: 110px; background: rgba(255,255,255,.12); border-radius: 12px; padding: 12px 16px;
+            text-align: center; backdrop-filter: blur(4px);
+        }
+        .trajectory-stat-value { font-size: 24px; font-weight: 700; }
+        .trajectory-stat-label { font-size: 11px; color: rgba(255,255,255,.72); text-transform: uppercase; letter-spacing: .06em; }
+        .trajectory-timeline {
+            display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 18px; background: #fff;
+            border: 1px solid var(--border); border-radius: 14px;
+        }
+        .trajectory-step {
+            display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 999px;
+            border: 1px solid #d6e3ed; background: #f8fbfe; color: #426173; font-size: 12px;
+        }
+        .trajectory-step.compaction { background: #fff7ed; border-color: #f7c98c; color: #9a5a08; }
+        .trajectory-step.rewrite { background: #eef6fb; border-color: #c9dfeb; color: #21556d; }
+        .trajectory-step.meta { background: #f3f4f6; border-color: #dde1e6; color: #6b7280; }
+        .trajectory-step-dot {
+            width: 8px; height: 8px; border-radius: 50%; background: currentColor; opacity: .75;
+        }
+        .trajectory-events { display: flex; flex-direction: column; gap: 18px; }
+        .trajectory-card {
+            background: #fff; border: 1px solid var(--border); border-radius: 16px; padding: 18px 20px;
+            box-shadow: 0 2px 8px rgba(19, 37, 55, .04);
+        }
+        .trajectory-card.compaction { border-color: #f1c38c; box-shadow: 0 3px 14px rgba(217, 119, 6, .08); }
+        .trajectory-card-header {
+            display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px;
+        }
+        .trajectory-card-title { font-size: 15px; font-weight: 700; color: #173043; }
+        .trajectory-card-subtitle { font-size: 12px; color: #738899; margin-top: 4px; }
+        .trajectory-badges { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        .trajectory-badge {
+            display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;
+            font-size: 11px; font-weight: 700; border: 1px solid #d2e5ed; background: #eef6fb; color: #2e6676;
+        }
+        .trajectory-badge.compaction { background: #fff7ed; border-color: #f7c98c; color: #9a5a08; }
+        .trajectory-badge.meta { background: #f3f4f6; border-color: #dde1e6; color: #6b7280; }
+        .trajectory-sections {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;
+        }
+        .trajectory-section {
+            border: 1px solid #e5edf4; border-radius: 12px; background: #fbfdff; overflow: hidden;
+        }
+        .trajectory-section h3 {
+            padding: 10px 12px; font-size: 12px; font-weight: 700; color: #486172;
+            background: #f4f8fb; border-bottom: 1px solid #e5edf4; text-transform: uppercase; letter-spacing: .05em;
+        }
+        .trajectory-list { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+        .trajectory-empty { padding: 18px 12px; font-size: 12px; color: #92a1ae; }
+        .trajectory-msg {
+            border: 1px solid #e5edf4; border-radius: 10px; background: #fff; overflow: hidden;
+        }
+        .trajectory-msg-header {
+            display: flex; align-items: center; justify-content: space-between; gap: 10px;
+            padding: 8px 10px; background: #f8fbfe; border-bottom: 1px solid #edf3f8;
+            font-size: 11px; color: #5f7485;
+        }
+        .trajectory-msg-role { font-weight: 700; color: #274255; text-transform: uppercase; letter-spacing: .04em; }
+        .trajectory-msg-type {
+            display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+            font-size: 10px; font-weight: 700; border: 1px solid #dce8f1;
+        }
+        .trajectory-msg-type.compaction { background: #fff7ed; color: #9a5a08; border-color: #f6cf9d; }
+        .trajectory-msg-type.metadata_only { background: #f3f4f6; color: #6b7280; border-color: #dde1e6; }
+        .trajectory-msg-type.rewrite { background: #eef6fb; color: #1f5f7a; border-color: #d2e5ed; }
+        .trajectory-msg-body { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+        .trajectory-preview {
+            font-size: 12px; line-height: 1.6; color: #344b5d; white-space: pre-wrap; word-break: break-word;
+            background: #fbfdff; border: 1px solid #edf3f8; border-radius: 8px; padding: 10px;
+        }
+        .trajectory-before-after { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .trajectory-before-after-label { font-size: 11px; font-weight: 700; color: #597283; margin-bottom: 6px; }
+        .trajectory-before-after .trajectory-preview { min-height: 92px; }
+        @media (max-width: 900px) {
+            .trajectory-before-after { grid-template-columns: 1fr; }
+            .trajectory-hero { flex-direction: column; align-items: flex-start; }
+        }
         .analysis-layout { display: flex; flex-direction: column; gap: 20px; }
 
         /* -- Analysis Hero -- */
@@ -497,6 +584,39 @@
             padding: 12px 16px; white-space: pre-wrap;
         }
         .msg-row.assistant .block.text { background: #dcfce7; border-color: #bbf7d0; }
+        .tool-badge-row {
+            display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px;
+            margin: 2px 0; align-items: center; justify-content: center;
+            position: relative;
+        }
+        .tool-badge-row::before {
+            content: ''; position: absolute; left: 0; right: 0; top: 50%;
+            border-top: 1px solid #d1d5db; z-index: 0;
+        }
+        .tool-badge-chip {
+            display: inline-block; padding: 2px 10px; font-size: 11px; font-weight: 600;
+            background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db;
+            border-radius: 4px; font-family: monospace; position: relative; z-index: 1;
+        }
+        .tool-mode-bar {
+            display: flex; align-items: center; gap: 8px; margin: 0 0 12px 0; flex-wrap: wrap;
+        }
+        .tool-mode-bar .mode-btn {
+            padding: 4px 12px; font-size: 12px; border: 1px solid #d1d5db;
+            border-radius: 4px; background: #fff; cursor: pointer; color: #374151;
+        }
+        .tool-mode-bar .mode-btn:hover { background: #f3f4f6; }
+        .tool-mode-bar .mode-btn.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+        .tool-filter-chips {
+            display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 10px 0;
+        }
+        .tool-filter-chip {
+            padding: 2px 10px; font-size: 11px; border: 1px solid #d1d5db;
+            border-radius: 12px; background: #fff; cursor: pointer; color: #374151;
+            font-family: monospace;
+        }
+        .tool-filter-chip:hover { background: #f3f4f6; }
+        .tool-filter-chip.active { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
 
         /* — reasoning / thinking — */
         .block.reasoning { background: #faf5ff; border: 1px solid #e9d5ff; }
@@ -658,6 +778,71 @@
             cursor: pointer; transition: all .15s;
         }
         .btn-export:hover { background: var(--primary); color: #fff; }
+
+        /* Trajectory diff */
+        .traj-toolbar {
+            display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+            background: var(--surface-alt); border-bottom: 1px solid var(--border); flex-shrink: 0;
+        }
+        .traj-toggle {
+            padding: 5px 12px; font-size: 12px; font-weight: 600; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--surface); cursor: pointer; color: var(--text);
+        }
+        .traj-toggle.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+        .traj-stats { font-size: 12px; color: var(--muted); margin-left: auto; }
+        .traj-layout { display: flex; height: 100%; overflow: hidden; }
+        .traj-round-list {
+            width: 160px; min-width: 120px; border-right: 1px solid var(--border);
+            overflow-y: auto; background: var(--surface); flex-shrink: 0;
+        }
+        .traj-round-item {
+            padding: 8px 12px; font-size: 12px; cursor: pointer; border-bottom: 1px solid #f0f4f8;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .traj-round-item:hover { background: var(--surface-alt); }
+        .traj-round-item.active { background: var(--primary-soft); font-weight: 700; }
+        .traj-round-badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
+        .traj-round-badge.has-diff { background: #fef3c7; color: #92400e; }
+        .traj-round-badge.no-diff { background: #d1fae5; color: #065f46; }
+        .traj-main { flex: 1; overflow-y: auto; padding: 16px 20px; }
+        .diff-section-header {
+            font-size: 13px; font-weight: 700; color: var(--primary); margin: 20px 0 8px;
+            padding-bottom: 4px; border-bottom: 2px solid var(--primary-soft);
+        }
+        .diff-unchanged {
+            padding: 8px 14px; margin: 4px 0; background: #f9fafb; border: 1px solid #e5e7eb;
+            border-radius: 6px; font-size: 12px; color: #9ca3af; cursor: pointer;
+        }
+        .diff-unchanged:hover { background: #f3f4f6; }
+        .diff-block { margin: 8px 0; border: 2px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+        .diff-block-label {
+            padding: 6px 12px; font-size: 11px; font-weight: 700; background: #f3f4f6; color: #4b5563;
+            border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center;
+        }
+        .diff-block-body { display: flex; }
+        .diff-half {
+            flex: 1; min-width: 0; font-size: 13px; white-space: pre-wrap; word-break: break-word;
+            max-height: 500px; overflow-y: auto; display: flex; flex-direction: column;
+        }
+        .diff-half-header {
+            padding: 5px 12px; font-size: 11px; font-weight: 700; flex-shrink: 0;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .diff-half-body { padding: 10px 14px; flex: 1; line-height: 1.6; }
+        .diff-half.original { background: #fef2f2; border-right: 1px solid #e5e7eb; }
+        .diff-half.original .diff-half-header { background: #fee2e2; color: #991b1b; }
+        .diff-half.final { background: #f0fdf4; }
+        .diff-half.final .diff-half-header { background: #dcfce7; color: #166534; }
+        .diff-hl { background: #fde68a; border-radius: 2px; padding: 0 1px; }
+        .diff-del { background: #fecaca; text-decoration: line-through; border-radius: 2px; padding: 0 1px; }
+        .diff-ins { background: #bbf7d0; border-radius: 2px; padding: 0 1px; }
+        .diff-msg-role { font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 4px; }
+        .diff-summary-bar {
+            padding: 12px 16px; background: linear-gradient(90deg, #eff6ff, #f0fdf4);
+            border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px;
+            display: flex; gap: 20px; font-size: 13px; align-items: center;
+        }
+        .diff-summary-bar strong { color: var(--primary); }
     </style>
 </head>
 <body>
@@ -667,6 +852,7 @@
         <h1>Trace Analytics Platform</h1>
         <div class="nav-tabs">
             <button class="nav-tab active" data-view="sessions">Sessions</button>
+            <button class="nav-tab" data-view="trajectory">Trajectory</button>
             <button class="nav-tab" data-view="analysis">Analysis</button>
             <button class="nav-tab" data-view="summary">Summary</button>
             <button class="nav-tab" data-view="bookmark">Bookmark</button>
@@ -744,6 +930,15 @@
     <div class="view analysis-view" id="analysisView">
         <div class="analysis-layout" id="analysisContent">
             <div class="analysis-empty"><span class="spinner"></span>分析数据加载中…</div>
+        </div>
+    </div>
+
+    <div class="view reports-view" id="trajectoryView">
+        <div class="analysis-layout" id="trajectoryDiffContent">
+            <div class="analysis-empty">
+                <div class="empty-icon">🔍</div>
+                <p>先在 Sessions 里选择一条 session，再切到此处查看调用轮次间的消息差异。</p>
+            </div>
         </div>
     </div>
 
@@ -874,6 +1069,7 @@ const detailToggleBtn = document.getElementById('detailToggleBtn');
 const navTabs = Array.from(document.querySelectorAll('.nav-tab'));
 const presetChips = Array.from(document.querySelectorAll('.preset-chip[data-preset]'));
 const analysisContent = document.getElementById('analysisContent');
+const trajectoryDiffContent = document.getElementById('trajectoryDiffContent');
 const summaryView = document.getElementById('summaryView');
 const filterSummary = document.getElementById('filterSummary');
 const filterList = document.getElementById('filterList');
@@ -1198,6 +1394,9 @@ async function selectItem(item, el) {
         const res = await fetch('/api/file?' + params.toString());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         renderMessages(await res.json(), item.rel_path, item.label_short);
+        if (currentView === 'trajectory') {
+            loadTrajectoryDiff();
+        }
     } catch(e) {
         showError('加载失败：' + e.message);
     }
@@ -1234,6 +1433,117 @@ function renderMessages(data, relPath, label) {
     `;
     chatPanel.appendChild(meta);
 
+    // Tool display mode: 0=全部显示, 1=按工具筛选, 2=简化显示
+    let toolMode = 0;
+    let activeToolFilters = new Set(); // for mode 1
+
+    const modeBar = document.createElement('div');
+    modeBar.className = 'tool-mode-bar';
+    const modeLabels = ['全部显示', '按工具筛选', '简化显示'];
+    const modeBtns = modeLabels.map((label, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'mode-btn' + (i === 0 ? ' active' : '');
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+            toolMode = i;
+            modeBtns.forEach((b, j) => b.classList.toggle('active', j === i));
+            filterChipsContainer.style.display = i === 1 ? '' : 'none';
+            applyToolMode();
+        });
+        modeBar.appendChild(btn);
+        return btn;
+    });
+    chatPanel.appendChild(modeBar);
+
+    // Filter chips container (for mode 1)
+    const filterChipsContainer = document.createElement('div');
+    filterChipsContainer.className = 'tool-filter-chips';
+    filterChipsContainer.style.display = 'none';
+    chatPanel.appendChild(filterChipsContainer);
+
+    function collectToolNames() {
+        const names = new Set();
+        chatPanel.querySelectorAll('.tool-row').forEach(el => {
+            (el.dataset.toolNames || '').split(',').filter(Boolean).forEach(n => {
+                if (n !== 'tool_result' && n !== 'tool') names.add(n);
+            });
+        });
+        return [...names].sort();
+    }
+
+    function buildFilterChips() {
+        filterChipsContainer.innerHTML = '';
+        const allNames = collectToolNames();
+        activeToolFilters = new Set(allNames); // default: all selected
+        allNames.forEach(name => {
+            const chip = document.createElement('span');
+            chip.className = 'tool-filter-chip active';
+            chip.textContent = name;
+            chip.addEventListener('click', () => {
+                if (activeToolFilters.has(name)) {
+                    activeToolFilters.delete(name);
+                    chip.classList.remove('active');
+                } else {
+                    activeToolFilters.add(name);
+                    chip.classList.add('active');
+                }
+                applyToolMode();
+            });
+            filterChipsContainer.appendChild(chip);
+        });
+    }
+
+    function applyToolMode() {
+        // Remove old summary badges
+        chatPanel.querySelectorAll('.tool-badge-row').forEach(el => el.remove());
+
+        const allRows = [...chatPanel.querySelectorAll('.msg-row, .metadata')];
+        if (toolMode === 0) {
+            chatPanel.querySelectorAll('.tool-row').forEach(el => el.style.display = '');
+            return;
+        }
+        if (toolMode === 1) {
+            chatPanel.querySelectorAll('.tool-row').forEach(el => {
+                const names = (el.dataset.toolNames || '').split(',').filter(Boolean);
+                const match = names.some(n => activeToolFilters.has(n));
+                el.style.display = match ? '' : 'none';
+            });
+            return;
+        }
+        // Mode 2: hide all tool rows, insert merged summary badges
+        const toolRows = chatPanel.querySelectorAll('.tool-row');
+        toolRows.forEach(el => el.style.display = 'none');
+
+        // Group consecutive tool rows and insert a single summary badge per group
+        const children = [...chatPanel.children];
+        let i = 0;
+        while (i < children.length) {
+            const el = children[i];
+            if (!el.classList || !el.classList.contains('tool-row')) { i++; continue; }
+            // Collect consecutive tool rows
+            const counts = {};
+            let lastToolEl = el;
+            while (i < children.length && children[i].classList && children[i].classList.contains('tool-row')) {
+                const names = (children[i].dataset.toolNames || '').split(',').filter(Boolean);
+                names.forEach(n => { counts[n] = (counts[n] || 0) + 1; });
+                lastToolEl = children[i];
+                i++;
+            }
+            // Build summary: only count tool_use rows (not result), but use all names
+            const parts = Object.entries(counts)
+                .filter(([n]) => n !== 'tool' && n !== 'tool_result')
+                .map(([n, c]) => `<span class="tool-badge-chip">${esc(n)}${c > 1 ? ' ×' + c : ''}</span>`);
+            if (!parts.length) continue;
+            const badge = document.createElement('div');
+            badge.className = 'tool-badge-row';
+            badge.innerHTML = parts.join('');
+            lastToolEl.after(badge);
+        }
+    }
+
+    // Map tool_call_id → tool_name for associating tool_result with tool_use
+    const toolIdToName = {};
+
     messages.forEach(msg => {
         const role = msg.role || 'unknown';
 
@@ -1244,9 +1554,13 @@ function renderMessages(data, relPath, label) {
         }
 
         let blocks = [];
+        let isToolRow = false;
+        let toolRowType = ''; // 'use' or 'result'
 
         if (role === 'tool') {
             blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
+            isToolRow = true;
+            toolRowType = 'result';
         } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
             // content 可能是 string 或 block 数组
             if (Array.isArray(msg.content)) {
@@ -1255,8 +1569,16 @@ function renderMessages(data, relPath, label) {
                 blocks.push({ type: 'text', text: msg.content });
             }
             msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
+            isToolRow = true;
+            toolRowType = 'use';
         } else if (Array.isArray(msg.content)) {
             blocks = msg.content;
+            const hasUse = blocks.some(b => b.type === 'tool_use' || b.type === '_oai_tool_call');
+            const hasResult = blocks.some(b => b.type === 'tool_result' || b.type === '_oai_tool_result');
+            if (hasUse || hasResult) {
+                isToolRow = true;
+                toolRowType = hasUse ? 'use' : 'result';
+            }
         } else {
             blocks = [{ type: 'text', text: typeof msg.content === 'string'
                 ? msg.content
@@ -1271,6 +1593,51 @@ function renderMessages(data, relPath, label) {
         const displayRole = role === 'tool' ? 'user' : role;
         const row  = document.createElement('div');
         row.className = `msg-row ${displayRole}`;
+        if (isToolRow) {
+            row.classList.add('tool-row');
+            if (toolRowType === 'use') row.classList.add('tool-use-row');
+            if (toolRowType === 'result') row.classList.add('tool-result-row');
+            const toolNames = _extractToolNames(blocks, msg);
+            // For tool_use: record id→name mapping
+            if (toolRowType === 'use') {
+                for (const b of blocks) {
+                    if (b.type === 'tool_use' && b.id && b.name) toolIdToName[b.id] = b.name;
+                    if (b.type === '_oai_tool_call') {
+                        const tc = b.tool_call || {};
+                        const fn = tc.function || {};
+                        if (tc.id && fn.name) toolIdToName[tc.id] = fn.name;
+                    }
+                }
+                if (msg.tool_calls) {
+                    for (const tc of msg.tool_calls) {
+                        const fn = tc.function || {};
+                        if (tc.id && fn.name) toolIdToName[tc.id] = fn.name;
+                    }
+                }
+            }
+            // For tool_result: look up name from preceding tool_use
+            if (toolRowType === 'result') {
+                const resultNames = [];
+                for (const b of blocks) {
+                    if (b.type === 'tool_result' && b.tool_use_id && toolIdToName[b.tool_use_id]) {
+                        resultNames.push(toolIdToName[b.tool_use_id]);
+                    }
+                    if (b.type === '_oai_tool_result' && b.tool_call_id && toolIdToName[b.tool_call_id]) {
+                        resultNames.push(toolIdToName[b.tool_call_id]);
+                    }
+                }
+                if (role === 'tool' && msg.tool_call_id && toolIdToName[msg.tool_call_id]) {
+                    resultNames.push(toolIdToName[msg.tool_call_id]);
+                }
+                if (resultNames.length) {
+                    row.dataset.toolNames = resultNames.join(',');
+                } else {
+                    row.dataset.toolNames = toolNames.join(',');
+                }
+            } else {
+                row.dataset.toolNames = toolNames.join(',');
+            }
+        }
 
         const avatar = document.createElement('div');
         avatar.className = `avatar ${displayRole}`;
@@ -1287,12 +1654,18 @@ function renderMessages(data, relPath, label) {
         }
         chatPanel.appendChild(row);
     });
+
+    // Build filter chips after all rows are rendered
+    buildFilterChips();
 }
 
 function switchView(view) {
     currentView = view;
     document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `${view}View`));
     navTabs.forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
+    if (view === 'trajectory') {
+        loadTrajectoryDiff();
+    }
     if (view === 'analysis') {
         loadAnalysisSummary();
     }
@@ -1738,6 +2111,24 @@ function buildAnalysisFilter(kind, row) {
 // ----------------------------------------------------------------
 // Block renderers
 // ----------------------------------------------------------------
+function _extractToolNames(blocks, msg) {
+    const names = [];
+    for (const b of blocks) {
+        if (b.type === 'tool_use' && b.name) names.push(b.name);
+        if (b.type === '_oai_tool_call') {
+            const fn = (b.tool_call || {}).function || {};
+            if (fn.name) names.push(fn.name);
+        }
+    }
+    if (msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+            const fn = tc.function || {};
+            if (fn.name && !names.includes(fn.name)) names.push(fn.name);
+        }
+    }
+    return names.length ? names : ['tool'];
+}
+
 function renderBlock(block) {
     switch (block.type) {
         case 'text':             return renderTextBlock(block);
@@ -1965,6 +2356,483 @@ function escAttr(s) {
 
 function showError(msg) {
     chatPanel.innerHTML = `<div class="error-box"><strong>错误：</strong>${esc(msg)}</div>`;
+}
+
+// ----------------------------------------------------------------
+// Trajectory Diff
+// ----------------------------------------------------------------
+let trajMode = false;
+let trajRounds = [];      // [{round, file, rel_path, msg_count}]
+let trajDataCache = {};   // rel_path -> full json data
+let trajActiveRound = null;
+let trajActiveRoundEl = null;
+
+// Levenshtein-based similarity ratio (0~1), with early exit for long strings
+function _strSimilarity(a, b) {
+    if (a === b) return 1;
+    if (!a || !b) return 0;
+    // For very long strings, sample-compare to avoid O(n*m) cost
+    if (a.length > 5000 || b.length > 5000) {
+        const maxLen = Math.max(a.length, b.length);
+        const minLen = Math.min(a.length, b.length);
+        // Length ratio check first
+        if (minLen / maxLen < 0.9) return minLen / maxLen;
+        // Sample 500-char chunks at start, middle, end
+        const chunks = [0, Math.floor(minLen / 2) - 250, minLen - 500].filter(i => i >= 0);
+        let matchChars = 0, totalChars = 0;
+        for (const start of chunks) {
+            const len = Math.min(500, minLen - start);
+            const sa = a.substring(start, start + len);
+            const sb = b.substring(start, start + len);
+            for (let i = 0; i < len; i++) {
+                totalChars++;
+                if (sa[i] === sb[i]) matchChars++;
+            }
+        }
+        return totalChars > 0 ? matchChars / totalChars : 0;
+    }
+    // Short strings: full Levenshtein
+    const la = a.length, lb = b.length;
+    const d = Array.from({ length: la + 1 }, (_, i) => i);
+    for (let j = 1; j <= lb; j++) {
+        let prev = d[0]; d[0] = j;
+        for (let i = 1; i <= la; i++) {
+            const tmp = d[i];
+            d[i] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, d[i], d[i - 1]);
+            prev = tmp;
+        }
+    }
+    return 1 - d[la] / Math.max(la, lb);
+}
+
+function _normalizeMsg(msg) {
+    // Deep clone and strip cache_control + normalize whitespace for comparison
+    if (!msg) return '';
+    const clone = JSON.parse(JSON.stringify(msg));
+    if (Array.isArray(clone.content)) {
+        clone.content.forEach(b => {
+            delete b.cache_control;
+            if (typeof b.text === 'string') b.text = b.text.replace(/\s+/g, ' ').trim();
+            if (typeof b.thinking === 'string') b.thinking = b.thinking.replace(/\s+/g, ' ').trim();
+        });
+    } else if (typeof clone.content === 'string') {
+        clone.content = clone.content.replace(/\s+/g, ' ').trim();
+    }
+    delete clone.cache_control;
+    delete clone._isResponse;
+    return JSON.stringify(clone);
+}
+
+function _normalizeContent(content) {
+    if (!content) return '';
+    const clone = JSON.parse(JSON.stringify(content));
+    if (Array.isArray(clone)) {
+        clone.forEach(b => { delete b.cache_control; });
+    }
+    return JSON.stringify(clone);
+}
+
+function _buildFullMessages(data) {
+    // Build messages array including response as the last "assistant" message
+    const msgs = data.messages ? [...data.messages] : [];
+    const response = data.response;
+    if (response && response.content) {
+        msgs.push({ role: 'assistant', content: response.content, _isResponse: true });
+    }
+    return msgs;
+}
+
+async function enterTrajectoryMode() {
+    await loadTrajectoryDiff();
+}
+
+async function loadTrajectoryDiff() {
+    if (!activeItem) {
+        trajectoryDiffContent.innerHTML = `
+            <div class="analysis-empty">
+                <div class="empty-icon">🔍</div>
+                <p>先在 Sessions 里选择一条 session，再切到此处查看调用轮次间的消息差异。</p>
+            </div>
+        `;
+        return;
+    }
+    const session = activeItem.session || (activeItem.rel_path || '').split('/')[0];
+    if (!session) return;
+
+    trajRounds = [];
+    trajDataCache = {};
+    trajActiveRound = null;
+    trajActiveRoundEl = null;
+
+    trajectoryDiffContent.innerHTML = '<div class="analysis-empty"><span class="spinner"></span>调用轮次 Diff 加载中…</div>';
+
+    try {
+        const params = new URLSearchParams();
+        if (currentDir) params.set('dir', currentDir);
+        params.set('session', session);
+        const res = await fetch('/api/trajectory?' + params.toString());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        trajRounds = data.rounds || [];
+
+        if (trajRounds.length < 2) {
+            trajectoryDiffContent.innerHTML = '<div class="analysis-empty"><p>该 session 只有 1 个调用轮次，无需对比</p></div>';
+            return;
+        }
+
+        // Load all rounds in parallel
+        const loadPromises = trajRounds.map(async (r) => {
+            const p = new URLSearchParams({ rel_path: r.rel_path });
+            if (currentDir) p.set('dir', currentDir);
+            const resp = await fetch('/api/file?' + p.toString());
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            trajDataCache[r.rel_path] = await resp.json();
+        });
+        await Promise.all(loadPromises);
+
+        // Compute diffs for each round
+        const lastRound = trajRounds[trajRounds.length - 1];
+        const lastData = trajDataCache[lastRound.rel_path];
+        const lastMsgs = _buildFullMessages(lastData);
+
+        trajRounds.forEach((r, idx) => {
+            if (idx === trajRounds.length - 1) {
+                r.diffCount = 0;
+                r.diffs = [];
+                return;
+            }
+            const roundData = trajDataCache[r.rel_path];
+            const roundMsgs = _buildFullMessages(roundData);
+            const diffs = [];
+            for (let i = 0; i < roundMsgs.length; i++) {
+                const baseMsgNorm = i < lastMsgs.length ? _normalizeMsg(lastMsgs[i]) : null;
+                const roundMsgNorm = _normalizeMsg(roundMsgs[i]);
+                if (roundMsgNorm !== baseMsgNorm && _strSimilarity(roundMsgNorm, baseMsgNorm || '') < 0.95) {
+                    diffs.push({
+                        msgIndex: i,
+                        role: roundMsgs[i].role || 'unknown',
+                        original: roundMsgs[i],
+                        final: i < lastMsgs.length ? lastMsgs[i] : null,
+                        isResponse: !!roundMsgs[i]._isResponse,
+                    });
+                }
+            }
+            r.diffCount = diffs.length;
+            r.diffs = diffs;
+        });
+
+        renderTrajectoryDiff();
+    } catch (e) {
+        trajectoryDiffContent.innerHTML = `<div class="error-box"><strong>调用轮次 Diff 加载失败：</strong>${esc(e.message)}</div>`;
+    }
+}
+
+function exitTrajectoryMode() {
+    // no-op now, kept for compatibility
+}
+
+function renderTrajectoryDiff() {
+    const totalDiffs = trajRounds.reduce((s, r) => s + r.diffCount, 0);
+    const roundsWithDiffs = trajRounds.filter(r => r.diffCount > 0).length;
+
+    trajectoryDiffContent.innerHTML = '';
+
+    // Summary bar
+    const summary = document.createElement('div');
+    summary.className = 'diff-summary-bar';
+    summary.innerHTML = `
+        <span><strong>${trajRounds.length}</strong> 个调用轮次</span>
+        <span><strong>${roundsWithDiffs}</strong> 轮有变化</span>
+        <span><strong>${totalDiffs}</strong> 条消息被修改</span>
+    `;
+    trajectoryDiffContent.appendChild(summary);
+
+    // Layout: round list + main panel
+    const layout = document.createElement('div');
+    layout.className = 'traj-layout';
+    layout.style.height = 'calc(100% - 50px)';
+
+    // Round list
+    const roundList = document.createElement('div');
+    roundList.className = 'traj-round-list';
+    trajRounds.forEach((r, idx) => {
+        const el = document.createElement('div');
+        el.className = 'traj-round-item';
+        const isLast = idx === trajRounds.length - 1;
+        el.innerHTML = `
+            <span>调用 ${r.round} <span style="color:#9ca3af;font-size:10px">(${r.msg_count})</span></span>
+            ${isLast ? '<span class="traj-round-badge no-diff">base</span>'
+                : r.diffCount > 0 ? `<span class="traj-round-badge has-diff">${r.diffCount} diff</span>`
+                : '<span class="traj-round-badge no-diff">ok</span>'}
+        `;
+        el.addEventListener('click', () => {
+            if (trajActiveRoundEl) trajActiveRoundEl.classList.remove('active');
+            el.classList.add('active');
+            trajActiveRoundEl = el;
+            trajActiveRound = r;
+            renderDiffRound(r, idx);
+        });
+        roundList.appendChild(el);
+    });
+
+    // Main panel
+    const mainPanel = document.createElement('div');
+    mainPanel.className = 'traj-main';
+    mainPanel.id = 'trajMainPanel';
+    mainPanel.innerHTML = '<div class="empty-state"><p>点击左侧调用轮次查看详情</p></div>';
+
+    layout.appendChild(roundList);
+    layout.appendChild(mainPanel);
+    trajectoryDiffContent.appendChild(layout);
+
+    // Auto-select first round with diffs
+    const firstDiffRound = trajRounds.findIndex(r => r.diffCount > 0);
+    if (firstDiffRound >= 0) {
+        const el = roundList.children[firstDiffRound];
+        el.click();
+    }
+}
+
+function renderDiffRound(round, roundIdx) {
+    const panel = document.getElementById('trajMainPanel');
+    if (!panel) return;
+    const isLast = roundIdx === trajRounds.length - 1;
+
+    if (isLast) {
+        // Base round — show full messages
+        const data = trajDataCache[round.rel_path];
+        panel.innerHTML = '<div class="diff-section-header">Base 调用轮次（最终版完整对话）</div>';
+        const container = document.createElement('div');
+        container.style.cssText = 'padding: 0';
+        renderMessagesToChatPanel(container, data, round.rel_path, '');
+        panel.appendChild(container);
+        return;
+    }
+
+    panel.innerHTML = '';
+
+    // Mode toggle: diff vs raw
+    const toolbar = document.createElement('div');
+    toolbar.style.cssText = 'display:flex;gap:8px;margin-bottom:12px';
+    const diffBtn = document.createElement('button');
+    diffBtn.className = 'traj-toggle active';
+    diffBtn.textContent = 'Diff 模式';
+    const rawBtn = document.createElement('button');
+    rawBtn.className = 'traj-toggle';
+    rawBtn.textContent = '原始请求';
+
+    diffBtn.addEventListener('click', () => {
+        diffBtn.classList.add('active'); rawBtn.classList.remove('active');
+        renderDiffContent(panel, round, roundIdx, contentArea);
+    });
+    rawBtn.addEventListener('click', () => {
+        rawBtn.classList.add('active'); diffBtn.classList.remove('active');
+        renderRawContent(panel, round, contentArea);
+    });
+    toolbar.appendChild(diffBtn);
+    toolbar.appendChild(rawBtn);
+    panel.appendChild(toolbar);
+
+    const contentArea = document.createElement('div');
+    panel.appendChild(contentArea);
+
+    renderDiffContent(panel, round, roundIdx, contentArea);
+}
+
+function renderDiffContent(panel, round, roundIdx, contentArea) {
+    contentArea.innerHTML = '';
+    const diffs = round.diffs || [];
+    const roundData = trajDataCache[round.rel_path];
+    const roundMsgs = _buildFullMessages(roundData);
+
+    if (!diffs.length) {
+        contentArea.innerHTML = '<div class="diff-unchanged">该轮所有消息与最终版一致，无差异</div>';
+        return;
+    }
+
+    const diffIndices = new Set(diffs.map(d => d.msgIndex));
+    let i = 0;
+    while (i < roundMsgs.length) {
+        if (!diffIndices.has(i)) {
+            // Find consecutive unchanged range
+            let j = i;
+            while (j < roundMsgs.length && !diffIndices.has(j)) j++;
+            const count = j - i;
+            const el = document.createElement('div');
+            el.className = 'diff-unchanged';
+            el.textContent = `消息 ${i + 1}${count > 1 ? '-' + (j) : ''} 无变化 (${count} 条)`;
+            contentArea.appendChild(el);
+            i = j;
+        } else {
+            const diff = diffs.find(d => d.msgIndex === i);
+            contentArea.appendChild(_renderDiffBlock(diff, round.round));
+            i++;
+        }
+    }
+}
+
+function _renderDiffBlock(diff, roundNum) {
+    const block = document.createElement('div');
+    block.className = 'diff-block';
+
+    const label = diff.isResponse ? `Response (assistant)` : `消息 ${diff.msgIndex + 1} [${diff.role}]`;
+
+    // Top label bar
+    const labelBar = document.createElement('div');
+    labelBar.className = 'diff-block-label';
+    labelBar.innerHTML = `<span>${esc(label)}</span>`;
+    block.appendChild(labelBar);
+
+    // Get content blocks from both sides
+    const origBlocks = _getContentBlocks(diff.original);
+    const finalBlocks = diff.final ? _getContentBlocks(diff.final) : [];
+    const maxLen = Math.max(origBlocks.length, finalBlocks.length);
+
+    for (let i = 0; i < maxLen; i++) {
+        const ob = i < origBlocks.length ? origBlocks[i] : null;
+        const fb = i < finalBlocks.length ? finalBlocks[i] : null;
+        const origText = ob ? _blockToText(ob) : '';
+        const finalText = fb ? _blockToText(fb) : '';
+
+        // Skip if identical
+        if (origText === finalText) continue;
+
+        const blockType = (ob && ob.type) || (fb && fb.type) || '';
+        const typeLabel = blockType === 'text' ? '' : `[${blockType}] `;
+
+        const [origHtml, finalHtml] = _wordDiff(origText, finalText);
+
+        const body = document.createElement('div');
+        body.className = 'diff-block-body';
+
+        const origHalf = document.createElement('div');
+        origHalf.className = 'diff-half original';
+        origHalf.innerHTML = `
+            <div class="diff-half-header"><span>调用 ${roundNum} ${esc(typeLabel)}原文</span></div>
+            <div class="diff-half-body">${ob ? origHtml : '<em style="color:#9ca3af">(不存在)</em>'}</div>
+        `;
+
+        const finalHalf = document.createElement('div');
+        finalHalf.className = 'diff-half final';
+        finalHalf.innerHTML = `
+            <div class="diff-half-header"><span>最终版 ${esc(typeLabel)}</span></div>
+            <div class="diff-half-body">${fb ? finalHtml : '<em style="color:#9ca3af">(不存在)</em>'}</div>
+        `;
+
+        body.appendChild(origHalf);
+        body.appendChild(finalHalf);
+        block.appendChild(body);
+    }
+
+    return block;
+}
+
+function _getContentBlocks(msg) {
+    if (!msg) return [];
+    const c = msg.content;
+    if (typeof c === 'string') return [{ type: 'text', text: c }];
+    if (Array.isArray(c)) return c;
+    return [{ type: 'text', text: JSON.stringify(c, null, 2) }];
+}
+
+// Word-level diff: returns [leftHtml, rightHtml] with <span class="diff-del/ins"> highlights
+function _wordDiff(a, b) {
+    if (a === b) return [esc(a), esc(b)];
+    const wordsA = a.split(/(\s+)/);
+    const wordsB = b.split(/(\s+)/);
+
+    // Simple LCS-based word diff (Myers-like, but simplified for reasonable lengths)
+    const maxWords = 2000;
+    if (wordsA.length > maxWords || wordsB.length > maxWords) {
+        // Fallback: just highlight entire blocks for very long texts
+        return [`<span class="diff-del">${esc(a)}</span>`, `<span class="diff-ins">${esc(b)}</span>`];
+    }
+
+    // Build edit script using LCS
+    const n = wordsA.length, m = wordsB.length;
+    // Compute LCS table (space-optimized would be better but this is fine for <2000 words)
+    const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = 1; i <= n; i++) {
+        for (let j = 1; j <= m; j++) {
+            dp[i][j] = wordsA[i - 1] === wordsB[j - 1]
+                ? dp[i - 1][j - 1] + 1
+                : Math.max(dp[i - 1][j], dp[i][j - 1]);
+        }
+    }
+
+    // Backtrack to get diff
+    const ops = []; // {type: 'same'|'del'|'ins', word}
+    let i = n, j = m;
+    while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && wordsA[i - 1] === wordsB[j - 1]) {
+            ops.push({ type: 'same', wordA: wordsA[i - 1], wordB: wordsB[j - 1] });
+            i--; j--;
+        } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+            ops.push({ type: 'ins', wordB: wordsB[j - 1] });
+            j--;
+        } else {
+            ops.push({ type: 'del', wordA: wordsA[i - 1] });
+            i--;
+        }
+    }
+    ops.reverse();
+
+    let leftHtml = '', rightHtml = '';
+    for (const op of ops) {
+        if (op.type === 'same') {
+            leftHtml += esc(op.wordA);
+            rightHtml += esc(op.wordB);
+        } else if (op.type === 'del') {
+            leftHtml += `<span class="diff-del">${esc(op.wordA)}</span>`;
+        } else {
+            rightHtml += `<span class="diff-ins">${esc(op.wordB)}</span>`;
+        }
+    }
+    return [leftHtml, rightHtml];
+}
+
+function _msgToText(msg) {
+    if (!msg) return '';
+    const content = msg.content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        return content.map(b => _blockToText(b)).join('\n\n');
+    }
+    return JSON.stringify(content, null, 2);
+}
+
+function _blockToText(b) {
+    if (!b) return '';
+    if (b.type === 'text') return b.text || '';
+    if (b.type === 'thinking') return b.thinking || b.text || '';
+    if (b.type === 'tool_use') return `[tool_use: ${b.name || ''}]\n${JSON.stringify(b.input || {}, null, 2)}`;
+    if (b.type === 'tool_result') {
+        const c = b.content;
+        if (typeof c === 'string') return c;
+        if (Array.isArray(c)) return c.map(x => x.text || JSON.stringify(x)).join('\n');
+        return JSON.stringify(c, null, 2);
+    }
+    if (b.type === '_oai_tool_call') {
+        const tc = b.tool_call || {};
+        return `[tool_call: ${tc.function?.name || ''}]\n${tc.function?.arguments || ''}`;
+    }
+    if (b.type === '_oai_tool_result') {
+        return typeof b.content === 'string' ? b.content : JSON.stringify(b.content, null, 2);
+    }
+    return JSON.stringify(b, null, 2);
+}
+
+function renderRawContent(panel, round, contentArea) {
+    contentArea.innerHTML = '';
+    const data = trajDataCache[round.rel_path];
+    const header = document.createElement('div');
+    header.className = 'diff-section-header';
+    header.textContent = `调用 ${round.round} 原始 JSON (${round.msg_count} messages)`;
+    contentArea.appendChild(header);
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'background:#1e1e2e;color:#cdd6f4;padding:16px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.5;max-height:80vh;white-space:pre-wrap;word-break:break-all;';
+    pre.textContent = JSON.stringify(data, null, 2);
+    contentArea.appendChild(pre);
 }
 
 // ----------------------------------------------------------------

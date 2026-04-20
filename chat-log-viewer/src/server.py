@@ -32,6 +32,7 @@ from src.utils.message_utils import (
     load_json,
     parse_response,
 )
+from src.utils.trajectory_utils import build_session_trajectory
 
 logger = logging.getLogger("chat-log-viewer")
 
@@ -806,6 +807,32 @@ def api_file(rel_path: str = Query(...), dir: Optional[str] = Query(default=None
     return JSONResponse(data)
 
 
+@app.get("/api/session/trajectory")
+def api_session_trajectory(rel_path: str = Query(...), dir: Optional[str] = Query(default=None)):
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Trajectory is only available in session mode")
+
+    source = _get_source_by_key(dir)
+    session_name = str(rel_path).split("/", 1)[0]
+    if not session_name:
+        raise HTTPException(status_code=400, detail="Invalid session path")
+
+    session_dir = (source.session_dir / session_name).resolve()
+    try:
+        if source.session_dir not in session_dir.parents and session_dir != source.session_dir:
+            raise ValueError("path not under session dir")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session path")
+
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Session directory not found")
+
+    try:
+        return JSONResponse(build_session_trajectory(session_dir))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/report/meta")
 def api_report_meta(dir: Optional[str] = Query(default=None)):
     if not has_session_args:
@@ -1015,6 +1042,38 @@ def api_favorites_export(fmt: str = Query(default="csv")):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=bookmark_favorites.csv"},
     )
+
+
+@app.get("/api/trajectory")
+def api_trajectory(dir: Optional[str] = Query(default=None), session: Optional[str] = Query(default=None)):
+    """Return all round files for a session folder."""
+    if not has_session_args:
+        raise HTTPException(status_code=400, detail="Trajectory is only available in session mode")
+    if not session:
+        raise HTTPException(status_code=400, detail="Missing session parameter")
+
+    source = _get_source_by_key(dir)
+    session_folder = source.session_dir / session
+    if not session_folder.is_dir():
+        raise HTTPException(status_code=404, detail="Session folder not found")
+
+    # Collect all JSON files in the session folder
+    json_files = sorted([f for f in session_folder.iterdir() if f.suffix == ".json"])
+    rounds = []
+    for idx, file_path in enumerate(json_files):
+        try:
+            data = load_json(file_path)
+            msg_count = len(data.get("messages", []))
+            rounds.append({
+                "round": idx + 1,
+                "file": file_path.name,
+                "rel_path": f"{session}/{file_path.name}",
+                "msg_count": msg_count,
+            })
+        except Exception:
+            continue
+
+    return JSONResponse({"rounds": rounds})
 
 
 # ---------------------------------------------------------------------------

@@ -2,9 +2,9 @@
 analyze_sessions.py — 分析 session 格式对话日志
 
 用法:
-    python analyze_sessions.py <session目录>
+    python analyze_sessions.py --dir <目录A> --dir <目录B> --out output
 
-输出（自动写入 <session目录>/stat/）:
+输出（单目录默认写入 <目录>/stat/；多目录写入 --out/<目录名>/）:
     session_report.xlsx   — 每条 session 详情 + 分布统计（两个 sheet）
     session_report.md     — 汇总概览报告
 """
@@ -22,6 +22,8 @@ from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1187,34 +1189,89 @@ def load_analysis_cache(path: Path) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# 主入口
+# 多目录批量输出
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="分析 session 格式对话日志，输出 Excel + HTML + Markdown 到 <session目录>/stat/",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "示例:\n"
-            "  python analyze_sessions.py test_session\n"
-            "  python analyze_sessions.py test_session --out /tmp/report"
-        ),
+def _slugify_name(text: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", text.strip())
+    slug = re.sub(r"-+", "-", slug).strip("-_.")
+    return slug or "session"
+
+
+def _dedupe_names(names: List[str]) -> List[str]:
+    counter: Counter = Counter()
+    result: List[str] = []
+    for name in names:
+        counter[name] += 1
+        result.append(name if counter[name] == 1 else f"{name}-{counter[name]}")
+    return result
+
+
+def _discover_session_roots(paths: List[str], parent_paths: List[str]) -> List[Path]:
+    roots: List[Path] = []
+    seen: set[Path] = set()
+
+    for raw in paths:
+        path = Path(raw).resolve()
+        if not path.is_dir():
+            raise FileNotFoundError(f"目录不存在: {path}")
+        if path not in seen:
+            roots.append(path)
+            seen.add(path)
+
+    for raw in parent_paths:
+        parent = Path(raw).resolve()
+        if not parent.is_dir():
+            raise FileNotFoundError(f"父目录不存在: {parent}")
+        for child in sorted(p.resolve() for p in parent.iterdir() if p.is_dir()):
+            if child not in seen:
+                roots.append(child)
+                seen.add(child)
+
+    return roots
+
+
+def _resolve_output_dir(
+    session_dir: Path,
+    base_output_dir: Optional[Path],
+    session_name: Optional[str],
+    multi_mode: bool,
+) -> Path:
+    if base_output_dir is None:
+        return session_dir / "stat"
+    if multi_mode:
+        return base_output_dir / (session_name or _slugify_name(session_dir.name))
+    return base_output_dir
+
+
+def _write_server_session_config(
+    output_dir: Path,
+    session_sources: List[Dict[str, str]],
+    host: str,
+    port: int,
+    log_level: str,
+) -> Path:
+    config = {
+        "mode": "session",
+        "session_sources": session_sources,
+        "host": host,
+        "port": port,
+        "log_level": log_level,
+    }
+    config_path = output_dir / "server_session.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
     )
-    parser.add_argument("session_dir", metavar="SESSION_DIR",
-                        help="session 根目录（各 session 文件夹所在目录）")
-    parser.add_argument("--out", "-o", default=None, metavar="OUTPUT_DIR",
-                        help="输出目录，默认为 <SESSION_DIR>/stat")
-    parser.add_argument("--recompute", action="store_true",
-                        help="忽略已有分析缓存，重新扫描全部 session")
-    parser.add_argument("--worker-num", type=int, default=(os.cpu_count() or 1),
-                        help="并行 worker 数，默认使用 CPU 核心数")
-    args = parser.parse_args()
+    return config_path
 
-    session_dir = Path(args.session_dir).resolve()
-    if not session_dir.is_dir():
-        parser.error(f"目录不存在: {session_dir}")
 
-    output_dir = Path(args.out).resolve() if args.out else session_dir / "stat"
+def analyze_session_root(
+    session_dir: Path,
+    output_dir: Path,
+    recompute: bool,
+    worker_num: int,
+) -> Dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("扫描目录: %s", session_dir)
@@ -1227,18 +1284,17 @@ def main() -> None:
     analysis_cache_path = output_dir / "session_analysis.json"
     sessions: List[Dict]
     load_or_scan_start = time.perf_counter()
-    if analysis_cache_path.exists() and not args.recompute:
+    if analysis_cache_path.exists() and not recompute:
         logger.info("开始加载分析缓存: %s", analysis_cache_path)
         sessions = load_analysis_cache(analysis_cache_path)
         logger.info("复用分析缓存: %s", analysis_cache_path)
         logger.info("缓存中包含 %d 个 session", len(sessions))
     else:
         sessions = []
-        worker_num = max(1, args.worker_num)
         logger.info("开始并行解析 session，worker_num=%d", worker_num)
         with ProcessPoolExecutor(max_workers=worker_num) as executor:
             futures = {executor.submit(analyze_session, f): f for f in folders}
-            for future in tqdm(as_completed(futures), total=len(futures), desc="解析 session", unit="个"):
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"解析 {session_dir.name}", unit="个"):
                 r = future.result()
                 if r:
                     sessions.append(r)
@@ -1254,7 +1310,7 @@ def main() -> None:
     stats_elapsed = time.perf_counter() - stats_start
     logger.info("开始构建报告上下文")
     context_start = time.perf_counter()
-    ctx   = build_context(sessions, stats)
+    ctx = build_context(sessions, stats)
     context_elapsed = time.perf_counter() - context_start
 
     xlsx_path = output_dir / "session_report.xlsx"
@@ -1286,6 +1342,104 @@ def main() -> None:
         format_stage_seconds(html_elapsed),
         format_stage_seconds(md_elapsed),
     )
+    return {
+        "session_dir": str(session_dir),
+        "report_dir": str(output_dir),
+        "session_count": str(len(sessions)),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="分析对话日志目录，支持多个 --dir 批量输出报告，并生成 server_session.yaml",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "示例:\n"
+            "  python analyze_sessions.py --dir test_session\n"
+            "  python analyze_sessions.py --dir test_session --out /tmp/report\n"
+            "  python analyze_sessions.py --dir path_a --dir path_b --out output\n"
+            "  python analyze_sessions.py --dir-parent ./sessions --out output"
+        ),
+    )
+    parser.add_argument("paths", metavar="DIR", nargs="*",
+                        help="待分析目录（兼容旧用法，可传多个）")
+    parser.add_argument("--dir", dest="dirs", action="append", default=[], metavar="DIR",
+                        help="待分析目录，可重复传入")
+    parser.add_argument("--dir-parent", action="append", default=[], metavar="PARENT_DIR",
+                        help="父目录，其直接子目录都会作为待分析目录，可重复传入")
+    parser.add_argument("--out", "-o", default=None, metavar="OUTPUT_DIR",
+                        help="输出目录。单目录模式默认 <DIR>/stat；多目录模式会输出到 <OUTPUT_DIR>/<name>/")
+    parser.add_argument("--recompute", action="store_true",
+                        help="忽略已有分析缓存，重新扫描全部 session")
+    parser.add_argument("--worker-num", type=int, default=(os.cpu_count() or 1),
+                        help="并行 worker 数，默认使用 CPU 核心数")
+    parser.add_argument("--server-config-name", default="server_session.yaml",
+                        help="批量模式生成的 server 配置文件名，默认 server_session.yaml")
+    parser.add_argument("--server-host", default="0.0.0.0",
+                        help="生成 server 配置时写入的 host，默认 0.0.0.0")
+    parser.add_argument("--server-port", type=int, default=8080,
+                        help="生成 server 配置时写入的 port，默认 8080")
+    parser.add_argument("--server-log-level", default="INFO",
+                        help="生成 server 配置时写入的 log_level，默认 INFO")
+    args = parser.parse_args()
+
+    input_dirs = list(args.dirs) + list(args.paths)
+    parent_dirs = list(args.dir_parent)
+
+    if not input_dirs and not parent_dirs:
+        parser.error("至少指定一个 --dir/目录 或 --dir-parent")
+
+    try:
+        session_roots = _discover_session_roots(input_dirs, parent_dirs)
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+
+    if not session_roots:
+        parser.error("未发现可分析的目录")
+
+    multi_mode = len(session_roots) > 1 or bool(parent_dirs)
+    base_output_dir = Path(args.out).resolve() if args.out else None
+    if multi_mode and base_output_dir is None:
+        parser.error("多目录模式必须显式指定 --out，作为统一输出根目录")
+
+    raw_names = [_slugify_name(root.name) for root in session_roots]
+    unique_names = _dedupe_names(raw_names)
+    worker_num = max(1, args.worker_num)
+
+    source_entries: List[Dict[str, str]] = []
+    for session_dir, session_name in zip(session_roots, unique_names):
+        output_dir = _resolve_output_dir(session_dir, base_output_dir, session_name, multi_mode)
+        logger.info("开始分析 session 根目录: %s -> %s", session_dir, output_dir)
+        analyze_session_root(
+            session_dir=session_dir,
+            output_dir=output_dir,
+            recompute=args.recompute,
+            worker_num=worker_num,
+        )
+        source_entries.append({
+            "label": session_name,
+            "session_dir": str(session_dir),
+            "report_dir": str(output_dir),
+        })
+
+    config_output_dir = base_output_dir if multi_mode else _resolve_output_dir(session_roots[0], base_output_dir, unique_names[0], False)
+    config_output_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_output_dir / args.server_config_name
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mode": "session",
+                "session_sources": source_entries,
+                "host": args.server_host,
+                "port": args.server_port,
+                "log_level": args.server_log_level,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    logger.info("server 配置已写入: %s", config_path)
 
 
 if __name__ == "__main__":
