@@ -18,20 +18,19 @@
         .topbar {
             background: linear-gradient(135deg, #0f172a, #1d4ed8);
             color: #fff;
-            padding: 18px 20px 16px;
+            padding: 10px 20px;
             display: flex;
             justify-content: space-between;
-            align-items: flex-start;
-            gap: 16px;
+            align-items: center;
+            gap: 12px;
             flex-wrap: wrap;
         }
-        .brand-title { font-size: 28px; font-weight: 700; margin: 0; }
-        .brand-subtitle { color: rgba(255,255,255,.8); font-size: 13px; margin-top: 4px; }
-        .nav-pills-wrap { display: flex; gap: 10px; flex-wrap: wrap; }
+        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
+        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
         .nav-pill {
             display: inline-flex; align-items: center; justify-content: center;
-            padding: 8px 14px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 13px;
+            padding: 6px 12px; border-radius: 999px; text-decoration: none;
+            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
             border: 1px solid rgba(255,255,255,.14);
         }
         .nav-pill.active { background: #fff; color: #0f172a; }
@@ -63,10 +62,6 @@
         }
         .btn-green  { background: #10a37f; color: #fff; }
         .btn-green:hover { background: #0d8c6e; }
-        .btn-indigo { background: #6366f1; color: #fff; }
-        .btn-indigo:hover { background: #4f46e5; }
-        .upload-wrapper { position: relative; }
-        .upload-wrapper input[type="file"] { position: absolute; opacity: 0; width: 0; height: 0; }
         .folder-select {
             padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px;
             font-size: 13px; background: #fff; cursor: pointer; color: #374151;
@@ -227,10 +222,7 @@
 <body>
 
 <div class="topbar">
-    <div>
-        <h1 class="brand-title">服务代理监控系统</h1>
-        <div class="brand-subtitle">浏览 Anthropic / OpenAI 对话历史记录</div>
-    </div>
+    <h1 class="brand-title">服务代理监控系统</h1>
     <div class="nav-pills-wrap">
         <a class="nav-pill" href="/">监控总览</a>
         <a class="nav-pill" href="/query">查询统计</a>
@@ -241,7 +233,7 @@
 </div>
 
 <div class="header">
-    <h1>对话历史记录</h1>
+    <span class="min-msg-label" id="loadStatus" style="font-size:14px;font-weight:600;color:#1a202c;"></span>
     <div class="header-right">
         <span class="min-msg-label">文件夹</span>
         <select class="folder-select" id="folderSelect" onchange="resetAndLoad()">
@@ -257,11 +249,6 @@
             <option value="">全部</option>
         </select>
         <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
-        <div class="upload-wrapper">
-            <input type="file" id="fileInput" accept=".json" />
-            <label for="fileInput" class="btn btn-indigo">上传本地文件</label>
-        </div>
-        <span class="min-msg-label" id="loadStatus"></span>
     </div>
 </div>
 
@@ -417,8 +404,8 @@ async function loadFileList() {
                 }
 
                 let timestamp = '';
-                let taskText = rawText;
-                if (chain.chain_key) {
+                let taskText = chain.q1_preview || rawText;
+                if (!chain.q1_preview && chain.chain_key) {
                     const keyText = chain.chain_key.replace(/^(oq:|u:)/, '');
                     taskText = keyText;
                 }
@@ -643,6 +630,12 @@ function renderMessages(data, filename) {
 
         const col = document.createElement('div');
         col.className = 'msg-bubble-col';
+        if (msg._from_res) {
+            const tag = document.createElement('div');
+            tag.style.cssText = 'font-size:10px;color:#6366f1;font-weight:600;margin-bottom:4px;';
+            tag.textContent = '↓ 来自 res 文件的回复';
+            col.appendChild(tag);
+        }
         blocks.forEach(block => col.appendChild(renderBlock(block)));
 
         if (displayRole === 'user') {
@@ -838,22 +831,6 @@ function showError(msg) {
 }
 
 // File upload
-document.getElementById('fileInput').addEventListener('change', function(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-        try {
-            const data = JSON.parse(ev.target.result);
-            renderMessages(data, file.name);
-            renderDetailPanel({ model: data.model || '', message_count: (data.messages || []).length, filename: file.name });
-            if (activeItem) { activeItem.classList.remove('active'); activeItem = null; }
-        } catch(err) { showError('JSON 解析失败：' + err.message); }
-    };
-    reader.readAsText(file);
-    this.value = '';
-});
-
 // Init
 resetAndLoad();
 </script>

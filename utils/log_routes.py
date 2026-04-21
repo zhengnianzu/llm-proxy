@@ -110,10 +110,55 @@ def _extract_anthropic_res_content(res_path: Path):
     data = _load_json(res_path)
     if not data:
         return None
+
+    rtype = data.get("type")
+    if rtype == "anthropic_passthrough_sse_capture":
+        # 流式 SSE 响应：从 chunks 重建完整 message
+        chunks = data.get("chunks", [])
+        message = {}
+        blocks = {}
+        block_json_buf = {}
+        for chunk in chunks:
+            t = chunk.get("type")
+            if t == "anthropic_passthrough_sse_meta":
+                continue
+            if t == "message_start":
+                message = dict(chunk.get("message", {}))
+                message["content"] = []
+            elif t == "content_block_start":
+                idx = chunk.get("index", 0)
+                cb = dict(chunk.get("content_block", {}))
+                blocks[idx] = cb
+                if cb.get("type") == "tool_use":
+                    block_json_buf[idx] = ""
+            elif t == "content_block_delta":
+                idx = chunk.get("index", 0)
+                delta = chunk.get("delta", {})
+                dtype = delta.get("type")
+                if dtype == "text_delta":
+                    blocks.setdefault(idx, {"type": "text", "text": ""})
+                    blocks[idx]["text"] = blocks[idx].get("text", "") + delta.get("text", "")
+                elif dtype == "input_json_delta":
+                    block_json_buf[idx] = block_json_buf.get(idx, "") + delta.get("partial_json", "")
+            elif t == "content_block_stop":
+                idx = chunk.get("index", 0)
+                if idx in block_json_buf:
+                    try:
+                        blocks[idx]["input"] = json.loads(block_json_buf[idx])
+                    except json.JSONDecodeError:
+                        blocks[idx]["input"] = block_json_buf[idx]
+        if blocks:
+            message["content"] = [blocks[i] for i in sorted(blocks)]
+        content = message.get("content")
+        if content:
+            return content
+        return None
+
+    # 非流式响应
     if isinstance(data.get("json"), dict):
         msg = data["json"]
-        if msg.get("role") == "assistant":
-            return msg.get("content")
+        if msg.get("content") is not None:
+            return msg["content"]
     return None
 
 
@@ -216,6 +261,9 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
         chain_key = _anthropic_chain_key(messages)
     else:
         chain_key = _openai_chain_key(messages)
+
+    # Prepend api_key so different keys aggregate separately
+    chain_key = f"{api_key}||{chain_key}"
 
     q1_preview = (index_entry or {}).get("q1_preview", "")
 

@@ -12,16 +12,15 @@
         .page-shell { max-width: 1400px; margin: 0 auto; padding: 24px 16px 40px; }
         .topbar {
             background: linear-gradient(135deg, #0f172a, #1d4ed8);
-            color: #fff; border-radius: 18px; padding: 22px 24px; margin-bottom: 20px;
-            box-shadow: 0 18px 40px rgba(15, 23, 42, .18);
+            color: #fff; padding: 10px 20px; border-radius: 10px; margin-bottom: 16px;
+            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
         }
-        .brand-title { font-size: 1.9rem; font-weight: 700; margin: 0; }
-        .brand-subtitle { color: rgba(255,255,255,.8); font-size: .95rem; margin-top: 6px; }
-        .nav-pills-wrap { display: flex; gap: 10px; flex-wrap: wrap; }
+        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
+        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
         .nav-pill {
             display: inline-flex; align-items: center; justify-content: center;
-            padding: 9px 16px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: .92rem;
+            padding: 6px 12px; border-radius: 999px; text-decoration: none;
+            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
             border: 1px solid rgba(255,255,255,.14);
         }
         .nav-pill.active { background: #fff; color: #0f172a; }
@@ -54,18 +53,13 @@
 <body>
 <div id="app" class="page-shell">
     <div class="topbar">
-        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
-            <div>
-                <h1 class="brand-title">服务代理监控系统</h1>
-                <div class="brand-subtitle">实时监控请求趋势、模型负载和成功率变化</div>
-            </div>
-            <div class="nav-pills-wrap">
-                <a class="nav-pill active" href="/">监控总览</a>
-                <a class="nav-pill" href="/query">查询统计</a>
-                <a class="nav-pill" href="/history">对话历史记录</a>
-                <a class="nav-pill" href="/failures">失败历史记录</a>
-                <a class="nav-pill" href="/logout">退出登录</a>
-            </div>
+        <h1 class="brand-title">服务代理监控系统</h1>
+        <div class="nav-pills-wrap">
+            <a class="nav-pill active" href="/">监控总览</a>
+            <a class="nav-pill" href="/query">查询统计</a>
+            <a class="nav-pill" href="/history">对话历史记录</a>
+            <a class="nav-pill" href="/failures">失败历史记录</a>
+            <a class="nav-pill" href="/logout">退出登录</a>
         </div>
     </div>
 
