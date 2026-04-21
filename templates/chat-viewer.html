@@ -50,13 +50,6 @@
         }
         .header h1 { font-size: 17px; font-weight: 600; color: #1a202c; white-space: nowrap; }
         .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .header-meta {
-            padding: 8px 20px;
-            border-bottom: 1px solid #e5e7eb;
-            background: #fffbeb;
-            color: #92400e;
-            font-size: 13px;
-        }
         .min-msg-label { font-size: 13px; color: #6b7280; white-space: nowrap; }
         .min-msg-input {
             width: 60px; padding: 5px 8px;
@@ -79,7 +72,7 @@
             font-size: 13px; background: #fff; cursor: pointer; color: #374151;
         }
 
-        /* ========= Layout ========= */
+        /* ========= Three-column Layout ========= */
         .main { display: flex; flex: 1; overflow: hidden; }
 
         /* ========= Sidebar ========= */
@@ -99,7 +92,6 @@
         .file-list { flex: 1; overflow-y: auto; }
         .file-list::-webkit-scrollbar { width: 4px; }
         .file-list::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
-
         .file-item {
             padding: 11px 14px; cursor: pointer;
             border-bottom: 1px solid #f3f4f6;
@@ -110,20 +102,49 @@
         .file-item.active { background: #f0fdf4; border-left-color: #10a37f; }
         .file-item-name { font-size: 12px; color: #374151; word-break: break-all; line-height: 1.4; }
         .file-item-meta { margin-top: 3px; font-size: 11px; color: #9ca3af; }
-
         .sidebar-tip { padding: 20px 14px; font-size: 13px; color: #9ca3af; text-align: center; }
+        .load-more-status { padding: 8px 14px; font-size: 11px; color: #9ca3af; text-align: center; border-top: 1px solid #f3f4f6; flex-shrink: 0; }
 
         /* ========= Chat panel ========= */
         .chat-panel { flex: 1; overflow-y: auto; padding: 24px 28px; background: #f7f7f8; }
         .chat-panel::-webkit-scrollbar { width: 6px; }
         .chat-panel::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 3px; }
-
         .empty-state {
             display: flex; flex-direction: column; align-items: center;
             justify-content: center; height: 100%; color: #9ca3af; gap: 12px;
         }
         .empty-state svg { width: 52px; height: 52px; opacity: .22; stroke: #9ca3af; }
         .empty-state p { font-size: 15px; }
+
+        /* ========= Right detail panel ========= */
+        .detail-panel {
+            width: 300px; flex-shrink: 0;
+            background: #fff;
+            border-left: 1px solid #e5e7eb;
+            display: flex; flex-direction: column; overflow: hidden;
+            transition: width .2s;
+        }
+        .detail-panel.collapsed { width: 0; border-left: none; overflow: hidden; }
+        .detail-header {
+            padding: 12px 16px;
+            font-size: 14px; font-weight: 600; color: #1a202c;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex; justify-content: space-between; align-items: center;
+            flex-shrink: 0;
+        }
+        .detail-toggle {
+            background: none; border: none; cursor: pointer; font-size: 16px; color: #6b7280;
+            padding: 2px 6px; border-radius: 4px;
+        }
+        .detail-toggle:hover { background: #f3f4f6; }
+        .detail-body { flex: 1; overflow-y: auto; padding: 16px; }
+        .detail-body::-webkit-scrollbar { width: 4px; }
+        .detail-body::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+        .detail-item { padding: 8px 0; border-bottom: 1px solid #f3f4f6; }
+        .detail-item:last-child { border-bottom: none; }
+        .detail-label { font-size: 11px; color: #9ca3af; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+        .detail-value { font-size: 13px; color: #374151; word-break: break-all; }
+        .detail-empty { padding: 40px 16px; text-align: center; color: #9ca3af; font-size: 13px; }
 
         /* ========= Metadata bar ========= */
         .metadata {
@@ -137,24 +158,12 @@
         .metadata-item strong { color: #374151; min-width: 100px; }
 
         /* ========= Message row ========= */
-        .msg-row {
-            display: flex;
-            margin-bottom: 18px;
-            gap: 10px;
-        }
-        /* user: left; assistant: right */
+        .msg-row { display: flex; margin-bottom: 18px; gap: 10px; }
         .msg-row.user     { justify-content: flex-start; }
         .msg-row.assistant{ justify-content: flex-end; }
-
         .msg-row.user     .msg-bubble-col { align-items: flex-start; }
         .msg-row.assistant .msg-bubble-col { align-items: flex-end; }
-
-        .msg-bubble-col {
-            display: flex; flex-direction: column; gap: 6px;
-            max-width: 70%;
-        }
-
-        /* avatar */
+        .msg-bubble-col { display: flex; flex-direction: column; gap: 6px; max-width: 70%; }
         .avatar {
             width: 30px; height: 30px; border-radius: 50%;
             display: flex; align-items: center; justify-content: center;
@@ -164,125 +173,47 @@
         .avatar.assistant { background: linear-gradient(135deg,#10a37f,#0d8c6e); }
 
         /* ========= Block cards ========= */
-        .block {
-            border-radius: 10px;
-            overflow: hidden;
-            font-size: 14px;
-            line-height: 1.65;
-            word-break: break-word;
-        }
-
-        /* — tool_calls block (OpenAI) — */
-        .block.tool-calls {
-            background: #fff7ed;
-            border: 1px solid #fed7aa;
-        }
-
-        /* — tool role block (OpenAI) — */
-        .block.tool-role {
-            background: #f0fdf4;
-            border: 1px solid #bbf7d0;
-        }
+        .block { border-radius: 10px; overflow: hidden; font-size: 14px; line-height: 1.65; word-break: break-word; }
+        .block.tool-calls { background: #fff7ed; border: 1px solid #fed7aa; }
+        .block.tool-role { background: #f0fdf4; border: 1px solid #bbf7d0; }
         .block-hdr.tool-role-hdr { color: #166534; }
         .badge-tool-role { background: #22c55e; color: #fff; }
-
-        /* — text block — */
-        .block.text {
-            background: #dbeafe;          /* light blue */
-            border: 1px solid #bfdbfe;
-            padding: 12px 16px;
-            white-space: pre-wrap;
-        }
-
-        /* — tool_use block — */
-        .block.tool-use {
-            background: #fff7ed;          /* light orange */
-            border: 1px solid #fed7aa;
-        }
-
-        /* — tool_result block — */
-        .block.tool-result {
-            background: #fff7ed;
-            border: 1px solid #fed7aa;
-        }
-        .block.tool-result.is-error {
-            background: #fff1f2;
-            border-color: #fecdd3;
-        }
-
-        /* block header badge */
+        .block.text { background: #dbeafe; border: 1px solid #bfdbfe; padding: 12px 16px; white-space: pre-wrap; }
+        .block.tool-use { background: #fff7ed; border: 1px solid #fed7aa; }
+        .block.tool-result { background: #fff7ed; border: 1px solid #fed7aa; }
+        .block.tool-result.is-error { background: #fff1f2; border-color: #fecdd3; }
         .block-hdr {
             display: flex; align-items: center; gap: 6px;
-            padding: 6px 12px;
-            font-size: 11px; font-weight: 600;
-            border-bottom: 1px solid rgba(0,0,0,.07);
-            color: #92400e;
-            background: rgba(0,0,0,.03);
+            padding: 6px 12px; font-size: 11px; font-weight: 600;
+            border-bottom: 1px solid rgba(0,0,0,.07); color: #92400e; background: rgba(0,0,0,.03);
         }
-        .block-hdr .badge {
-            display: inline-block;
-            padding: 1px 7px;
-            border-radius: 999px;
-            font-size: 10px; font-weight: 700;
-            letter-spacing: .03em;
-        }
+        .block-hdr .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .03em; }
         .badge-tool-use    { background: #fb923c; color: #fff; }
         .badge-tool-result { background: #f97316; color: #fff; }
         .badge-error       { background: #f43f5e; color: #fff; }
-
         .block-hdr .tool-name  { color: #78350f; font-weight: 700; }
         .block-hdr .tool-id    { color: #b45309; font-size: 10px; font-family: monospace; }
-
-        /* block body */
         .block-body { padding: 10px 14px; }
-
-        /* command pre */
         .cmd-pre {
-            background: #1e1e2e;
-            color: #cdd6f4;
-            border-radius: 7px;
-            padding: 10px 14px;
+            background: #1e1e2e; color: #cdd6f4; border-radius: 7px; padding: 10px 14px;
             font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-            font-size: 12.5px;
-            white-space: pre-wrap;
-            word-break: break-all;
-            margin: 4px 0 0;
-            line-height: 1.6;
+            font-size: 12.5px; white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; line-height: 1.6;
         }
-        .cmd-label {
-            font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500;
-        }
-
-        /* tool result content */
+        .cmd-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; font-weight: 500; }
         .result-pre {
-            background: #fff;
-            border: 1px solid #e5e7eb;
-            border-radius: 7px;
-            padding: 8px 12px;
-            font-family: 'SFMono-Regular', Consolas, monospace;
-            font-size: 12px;
-            white-space: pre-wrap;
-            word-break: break-all;
-            color: #374151;
-            margin-top: 4px;
-            line-height: 1.55;
-            max-height: 260px;
-            overflow-y: auto;
+            background: #fff; border: 1px solid #e5e7eb; border-radius: 7px; padding: 8px 12px;
+            font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px;
+            white-space: pre-wrap; word-break: break-all; color: #374151; margin-top: 4px;
+            line-height: 1.55; max-height: 260px; overflow-y: auto;
         }
         .result-pre.is-error { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
-
-        /* other input fields */
         .input-kv { margin-top: 4px; }
         .input-kv .kv-row { display: flex; gap: 6px; font-size: 12.5px; margin-top: 3px; }
         .input-kv .kv-key { color: #92400e; font-weight: 600; min-width: 80px; }
         .input-kv .kv-val { color: #374151; white-space: pre-wrap; word-break: break-all; }
-
-        /* error / loading */
         .error-box {
-            background: #fee2e2; color: #991b1b;
-            padding: 14px 18px; border-radius: 10px;
-            border: 1px solid #fecaca; font-size: 14px;
-            margin-bottom: 16px;
+            background: #fee2e2; color: #991b1b; padding: 14px 18px; border-radius: 10px;
+            border: 1px solid #fecaca; font-size: 14px; margin-bottom: 16px;
         }
         .spinner {
             display: inline-block; width: 15px; height: 15px;
@@ -313,7 +244,7 @@
     <h1>对话历史记录</h1>
     <div class="header-right">
         <span class="min-msg-label">文件夹</span>
-        <select class="folder-select" id="folderSelect" onchange="loadFileList()">
+        <select class="folder-select" id="folderSelect" onchange="resetAndLoad()">
             <option value="anthropic_agg">logs_anthropic（聚合）</option>
             <option value="anthropic">logs_anthropic（单文件）</option>
             <option value="openai_agg">logs_openai（聚合）</option>
@@ -321,21 +252,21 @@
         </select>
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
-        <button class="btn btn-green" onclick="loadFileList()">刷新列表</button>
-        <button class="btn btn-green" onclick="refreshIncremental()">增量刷新</button>
+        <span class="min-msg-label">API Key</span>
+        <select class="folder-select" id="filterKey" onchange="resetAndLoad()">
+            <option value="">全部</option>
+        </select>
+        <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
         <div class="upload-wrapper">
             <input type="file" id="fileInput" accept=".json" />
             <label for="fileInput" class="btn btn-indigo">上传本地文件</label>
         </div>
+        <span class="min-msg-label" id="loadStatus"></span>
     </div>
-</div>
-<div class="header-meta">
-    当前仅展示最近 {{ recent_index_limit }} 条索引记录，用于保证大体量日志下的加载速度。
 </div>
 
 <div class="main">
-
-    <!-- 左侧文件列表 -->
+    <!-- Left: file list -->
     <div class="sidebar">
         <div class="sidebar-hdr" id="sidebarTitle">logs_anthropic</div>
         <div class="file-list" id="fileList">
@@ -343,7 +274,7 @@
         </div>
     </div>
 
-    <!-- 右侧对话 -->
+    <!-- Center: chat -->
     <div class="chat-panel" id="chatPanel">
         <div class="empty-state">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -355,51 +286,125 @@
             <p>从左侧选择一个对话文件</p>
         </div>
     </div>
+
+    <!-- Right: detail panel -->
+    <div class="detail-panel" id="detailPanel">
+        <div class="detail-header">
+            <span>详情</span>
+            <button class="detail-toggle" id="detailToggle" onclick="toggleDetail()" title="折叠/展开">▶</button>
+        </div>
+        <div class="detail-body" id="detailBody">
+            <div class="detail-empty">选择一条对话查看详情</div>
+        </div>
+    </div>
 </div>
 
 <script>
 // ----------------------------------------------------------------
-// Sidebar: file list
+// State
 // ----------------------------------------------------------------
-const fileListEl   = document.getElementById('fileList');
-const chatPanel    = document.getElementById('chatPanel');
+const PAGE_SIZE = 50;
+const fileListEl = document.getElementById('fileList');
+const chatPanel = document.getElementById('chatPanel');
 const sidebarTitle = document.getElementById('sidebarTitle');
 let activeItem = null;
-let aggChains = [];   // cache for aggregate mode
-let activeSelection = null;
+let aggChains = [];
+let offset = 0;
+let totalItems = 0;
+let isLoadingMore = false;
+let knownKeys = new Set();
 
 function currentFolder() {
     return document.getElementById('folderSelect').value;
 }
 
-async function loadFileList(options = {}) {
-    const preserveSelection = !!options.preserveSelection;
+function getKind() {
+    const f = currentFolder();
+    return f.startsWith('openai') ? 'openai' : 'anthropic';
+}
+
+function maskKey(key) {
+    if (!key || key.length <= 8) return key || '(未知)';
+    return key.slice(0, 4) + '...' + key.slice(-4);
+}
+
+function updateKeyDropdown() {
+    const sel = document.getElementById('filterKey');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">全部</option>';
+    const sorted = [...knownKeys].sort();
+    sorted.forEach(k => {
+        const label = k ? maskKey(k) : 'default';
+        const val = k || '__default__';
+        const opt = document.createElement('option');
+        opt.value = val;
+        opt.textContent = label;
+        sel.appendChild(opt);
+    });
+    sel.value = current;
+}
+
+function collectKeys(items) {
+    items.forEach(item => {
+        const k = item.api_key || '';
+        knownKeys.add(k);
+    });
+    updateKeyDropdown();
+}
+
+// ----------------------------------------------------------------
+// Sidebar: file list with pagination
+// ----------------------------------------------------------------
+function resetAndLoad() {
+    offset = 0;
+    totalItems = 0;
+    aggChains = [];
+    knownKeys = new Set();
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
+    document.getElementById('loadStatus').textContent = '';
+    loadFileList();
+}
+
+async function loadFileList() {
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
-    const previousSelection = preserveSelection ? activeSelection : null;
-    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
-    activeItem = null;
-    if (!preserveSelection) activeSelection = null;
+    const params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg') {
-        // ---- 聚合模式 ----
         const apiFolder = folder === 'anthropic_agg' ? 'anthropic' : 'openai';
         sidebarTitle.textContent = `logs_${apiFolder} 聚合 (≥${min} 条)`;
         try {
-            const res = await fetch(`/logs/${apiFolder}/aggregate?min_messages=${min}`);
+            const res = await fetch(`/logs/${apiFolder}/aggregate${params}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            aggChains = await res.json();
+            const data = await res.json();
+            const items = data.items || [];
+            totalItems = data.total || items.length;
+
+            if (offset === 0) {
+                aggChains = items;
+                fileListEl.innerHTML = '';
+            } else {
+                aggChains = aggChains.concat(items);
+            }
+            collectKeys(items);
+
             if (!aggChains.length) {
                 fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的对话</div>';
                 return;
             }
-            fileListEl.innerHTML = '';
-            let restored = false;
-            aggChains.forEach((chain, idx) => {
+
+            items.forEach((chain, idx) => {
+                const filterKey = document.getElementById('filterKey').value;
+                if (filterKey !== '') {
+                    const itemKey = chain.api_key || '';
+                    const matchKey = filterKey === '__default__' ? '' : filterKey;
+                    if (itemKey !== matchKey) return;
+                }
+
+                const globalIdx = offset + idx;
                 const el = document.createElement('div');
                 el.className = 'file-item';
 
-                // 提取 Q1 预览
                 let rawText = '';
                 const q1 = chain.messages?.[0];
                 if (q1) {
@@ -411,61 +416,60 @@ async function loadFileList(options = {}) {
                     }
                 }
 
-                // OpenAI: 从 chain_key 提取（去掉 oq: / u: 前缀）
                 let timestamp = '';
                 let taskText = rawText;
                 if (chain.chain_key) {
                     const keyText = chain.chain_key.replace(/^(oq:|u:)/, '');
-                    if (keyText.startsWith('oq:') || keyText.startsWith('u:')) {
-                        taskText = keyText.slice(3);
-                    } else {
-                        taskText = keyText;
-                    }
+                    taskText = keyText;
                 }
-
-                // Anthropic: 从 rawText 提取时间戳
                 const tsMatch = rawText.match(/\[([^\]]+GMT[^\]]*)\]\s*/);
                 if (tsMatch) {
                     timestamp = tsMatch[1];
                     taskText = rawText.slice(tsMatch.index + tsMatch[0].length)
-                        .replace(/^\[Subagent Context\]\s*/i, '')
-                        .trim();
+                        .replace(/^\[Subagent Context\]\s*/i, '').trim();
                 }
                 const preview = taskText.slice(0, 80) || rawText.slice(0, 80);
 
                 el.innerHTML = `
                     <div class="file-item-name">${esc(preview || '(空)')}</div>
                     <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${chain.model || '?'}</div>
-                    <div class="file-item-meta" style="font-size:10px;color:#b5bec8">${esc(timestamp || chain.first_time)}</div>
+                    <div class="file-item-meta" style="font-size:10px;color:#b5bec8">${esc(timestamp || chain.first_time || '')}</div>
                 `;
-                el.addEventListener('click', () => selectAggChain(idx, el));
+                el.addEventListener('click', () => selectAggChain(globalIdx, el));
                 fileListEl.appendChild(el);
-                if (previousSelection && previousSelection.type === 'agg' && previousSelection.folder === folder && previousSelection.chainId === chain.chain_id) {
-                    restored = true;
-                    selectAggChain(idx, el, { silentLoading: true });
-                }
             });
-            if (previousSelection && !restored) {
-                activeSelection = null;
-            }
+            updateLoadStatus();
+            isLoadingMore = false;
         } catch(e) {
-            fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
+            if (offset === 0) fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
+            isLoadingMore = false;
         }
     } else {
-        // ---- 单文件模式 ----
-        const apiFolder = folder; // 'anthropic' | 'openai'
+        const apiFolder = folder;
         sidebarTitle.textContent = `logs_${apiFolder} (≥${min} 条)`;
         try {
-            const res = await fetch(`/logs/${apiFolder}/list?min_messages=${min}`);
+            const res = await fetch(`/logs/${apiFolder}/list${params}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const files = await res.json();
-            if (!files.length) {
+            const data = await res.json();
+            const items = data.items || [];
+            totalItems = data.total || items.length;
+
+            if (offset === 0) fileListEl.innerHTML = '';
+            collectKeys(items);
+
+            if (!items.length && offset === 0) {
                 fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的文件</div>';
                 return;
             }
-            fileListEl.innerHTML = '';
-            let restored = false;
-            files.forEach(item => {
+
+            items.forEach(item => {
+                const filterKey = document.getElementById('filterKey').value;
+                if (filterKey !== '') {
+                    const itemKey = item.api_key || '';
+                    const matchKey = filterKey === '__default__' ? '' : filterKey;
+                    if (itemKey !== matchKey) return;
+                }
+
                 const el = document.createElement('div');
                 el.className = 'file-item';
                 const ts = item.filename.replace('-req.json', '').replace(/_/g, ' ');
@@ -473,70 +477,116 @@ async function loadFileList(options = {}) {
                     <div class="file-item-name">${ts}</div>
                     <div class="file-item-meta">${item.message_count} 条 · ${item.model || '未知模型'}</div>
                 `;
-                el.addEventListener('click', () => selectFile(item.filename, el, apiFolder));
+                el.addEventListener('click', () => selectFile(item, el, apiFolder));
                 fileListEl.appendChild(el);
-                if (previousSelection && previousSelection.type === 'file' && previousSelection.folder === apiFolder && previousSelection.filename === item.filename) {
-                    restored = true;
-                    selectFile(item.filename, el, apiFolder, { silentLoading: true });
-                }
             });
-            if (previousSelection && !restored) {
-                activeSelection = null;
-            }
+            updateLoadStatus();
+            isLoadingMore = false;
         } catch(e) {
-            fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
+            if (offset === 0) fileListEl.innerHTML = `<div class="sidebar-tip">加载失败：${e.message}</div>`;
+            isLoadingMore = false;
         }
     }
 }
 
-function refreshIncremental() {
-    loadFileList({ preserveSelection: true });
+function updateLoadStatus() {
+    const loaded = fileListEl.querySelectorAll('.file-item').length;
+    document.getElementById('loadStatus').textContent = `已加载 ${loaded} / 共 ${totalItems} 条`;
 }
 
-function selectAggChain(idx, el, options = {}) {
+function loadMore() {
+    const loaded = fileListEl.querySelectorAll('.file-item').length;
+    if (isLoadingMore || loaded >= totalItems) return;
+    isLoadingMore = true;
+    offset += PAGE_SIZE;
+    loadFileList();
+}
+
+// Infinite scroll
+document.getElementById('fileList').addEventListener('scroll', function() {
+    if (this.scrollHeight - this.scrollTop - this.clientHeight < 200) {
+        loadMore();
+    }
+});
+
+// ----------------------------------------------------------------
+// Selection handlers
+// ----------------------------------------------------------------
+function selectAggChain(idx, el) {
     if (activeItem) activeItem.classList.remove('active');
     el.classList.add('active');
     activeItem = el;
     const chain = aggChains[idx];
-    activeSelection = { type: 'agg', folder: currentFolder(), chainId: chain.chain_id };
     renderMessages(chain, `聚合链 #${chain.chain_id}  (${chain.file_count} 个文件)`);
+    renderDetailPanel({
+        api_key: chain.api_key || '',
+        model: chain.model || '',
+        message_count: chain.message_count || 0,
+        first_time: chain.first_time || '',
+        last_time: chain.last_time || '',
+        file_count: chain.file_count || 1,
+    });
 }
 
-async function selectFile(filename, el, folder, options = {}) {
+async function selectFile(item, el, folder) {
     if (activeItem) activeItem.classList.remove('active');
     el.classList.add('active');
     activeItem = el;
-    activeSelection = { type: 'file', folder, filename };
-    if (!options.silentLoading) {
-        chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
-    }
+    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
-        const res = await fetch(`/logs/${folder}/file?filename=${encodeURIComponent(filename)}`);
+        const res = await fetch(`/logs/${folder}/file?filename=${encodeURIComponent(item.filename)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        renderMessages(await res.json(), filename);
+        const data = await res.json();
+        renderMessages(data, item.filename);
+        renderDetailPanel({
+            api_key: item.api_key || '',
+            model: data.model || item.model || '',
+            message_count: (data.messages || []).length,
+            filename: item.filename,
+        });
     } catch(e) {
         showError(`加载失败：${e.message}`);
     }
 }
 
-// 本地上传备用
-document.getElementById('fileInput').addEventListener('change', function(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-        try {
-            renderMessages(JSON.parse(ev.target.result), file.name);
-            if (activeItem) { activeItem.classList.remove('active'); activeItem = null; }
-            activeSelection = null;
-        } catch(err) { showError('JSON 解析失败：' + err.message); }
-    };
-    reader.onerror = () => showError('文件读取失败');
-    reader.readAsText(file);
-});
+// ----------------------------------------------------------------
+// Detail panel
+// ----------------------------------------------------------------
+function renderDetailPanel(data) {
+    const body = document.getElementById('detailBody');
+    let html = '';
+    if (data.api_key) {
+        html += `<div class="detail-item"><div class="detail-label">API Key</div><div class="detail-value">${esc(maskKey(data.api_key))}</div></div>`;
+    }
+    if (data.model) {
+        html += `<div class="detail-item"><div class="detail-label">模型</div><div class="detail-value">${esc(data.model)}</div></div>`;
+    }
+    html += `<div class="detail-item"><div class="detail-label">消息数</div><div class="detail-value">${data.message_count || 0}</div></div>`;
+    if (data.first_time) {
+        html += `<div class="detail-item"><div class="detail-label">首次时间</div><div class="detail-value">${esc(data.first_time)}</div></div>`;
+    }
+    if (data.last_time) {
+        html += `<div class="detail-item"><div class="detail-label">最后时间</div><div class="detail-value">${esc(data.last_time)}</div></div>`;
+    }
+    if (data.file_count && data.file_count > 1) {
+        html += `<div class="detail-item"><div class="detail-label">关联文件数</div><div class="detail-value">${data.file_count}</div></div>`;
+    }
+    if (data.filename) {
+        html += `<div class="detail-item"><div class="detail-label">文件名</div><div class="detail-value">${esc(data.filename)}</div></div>`;
+    }
+    body.innerHTML = html || '<div class="detail-empty">无详情</div>';
+    document.getElementById('detailPanel').classList.remove('collapsed');
+}
+
+function toggleDetail() {
+    const panel = document.getElementById('detailPanel');
+    const btn = document.getElementById('detailToggle');
+    panel.classList.toggle('collapsed');
+    btn.textContent = panel.classList.contains('collapsed') ? '◀' : '▶';
+}
 
 // ----------------------------------------------------------------
-// Render
+// Render messages (original style)
 // ----------------------------------------------------------------
 function renderMessages(data, filename) {
     chatPanel.innerHTML = '';
@@ -551,7 +601,7 @@ function renderMessages(data, filename) {
         const meta = document.createElement('div');
         meta.className = 'metadata';
         meta.innerHTML = `
-            <div class="metadata-title">${isChain ? '🔗 聚合对话链' : '📋 请求信息'}</div>
+            <div class="metadata-title">${isChain ? '聚合对话链' : '请求信息'}</div>
             ${isChain ? `<div class="metadata-item"><strong>链 ID</strong><span>#${data.chain_id}</span></div>` : ''}
             ${isChain ? `<div class="metadata-item"><strong>时间范围</strong><span>${data.first_time} → ${data.last_time}</span></div>` : ''}
             ${isChain ? `<div class="metadata-item"><strong>文件数</strong><span>${data.file_count} 个 req 文件</span></div>` : ''}
@@ -566,15 +616,11 @@ function renderMessages(data, filename) {
 
     messages.forEach(msg => {
         const role = msg.role || 'unknown';
-
-        // 将消息内容统一为 block 数组
         let blocks = [];
 
         if (role === 'tool') {
-            // OpenAI tool result message
             blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
         } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-            // OpenAI assistant with tool_calls (content may be null, string, or block array)
             if (Array.isArray(msg.content)) {
                 blocks.push(...msg.content);
             } else if (msg.content) {
@@ -582,15 +628,12 @@ function renderMessages(data, filename) {
             }
             msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
         } else if (Array.isArray(msg.content)) {
-            // Anthropic-style content array
             blocks = msg.content;
         } else {
-            // Plain string content (OpenAI / simple)
             blocks = [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
         }
 
         const displayRole = role === 'tool' ? 'user' : role;
-
         const row = document.createElement('div');
         row.className = `msg-row ${displayRole}`;
 
@@ -600,7 +643,6 @@ function renderMessages(data, filename) {
 
         const col = document.createElement('div');
         col.className = 'msg-bubble-col';
-
         blocks.forEach(block => col.appendChild(renderBlock(block)));
 
         if (displayRole === 'user') {
@@ -615,7 +657,7 @@ function renderMessages(data, filename) {
 }
 
 // ----------------------------------------------------------------
-// Block renderers
+// Block renderers (original style)
 // ----------------------------------------------------------------
 function renderBlock(block) {
     switch (block.type) {
@@ -628,13 +670,77 @@ function renderBlock(block) {
     }
 }
 
-// OpenAI: assistant tool_call block
+function renderTextBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block text';
+    el.textContent = block.text || '';
+    return el;
+}
+
+function renderToolUseBlock(block) {
+    const el = document.createElement('div');
+    el.className = 'block tool-use';
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge badge-tool-use">tool_use</span>
+        <span class="tool-name">${esc(block.name || '')}</span>
+        <span class="tool-id">${esc(block.id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    const input = block.input || {};
+    if (input.command !== undefined) {
+        const lbl = document.createElement('div');
+        lbl.className = 'cmd-label';
+        lbl.textContent = '$ command';
+        const pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = input.command;
+        body.appendChild(lbl);
+        body.appendChild(pre);
+        const others = Object.entries(input).filter(([k]) => k !== 'command');
+        if (others.length) body.appendChild(renderKV(others));
+    } else if (Object.keys(input).length) {
+        body.appendChild(renderKV(Object.entries(input)));
+    } else {
+        body.textContent = '(no input)';
+    }
+    el.appendChild(body);
+    return el;
+}
+
+function renderToolResultBlock(block) {
+    const isError = block.is_error;
+    const el = document.createElement('div');
+    el.className = `block tool-result${isError ? ' is-error' : ''}`;
+    const hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = `
+        <span class="badge ${isError ? 'badge-error' : 'badge-tool-result'}">${isError ? 'error' : 'tool_result'}</span>
+        <span class="tool-id">${esc(block.tool_use_id || '')}</span>
+    `;
+    el.appendChild(hdr);
+
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    const rawContent = block.content;
+    const text = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent, null, 2);
+    const pre = document.createElement('pre');
+    pre.className = `result-pre${isError ? ' is-error' : ''}`;
+    pre.textContent = text || '(no output)';
+    body.appendChild(pre);
+    el.appendChild(body);
+    return el;
+}
+
 function renderOaiToolCallBlock(block) {
     const tc = block.tool_call || {};
     const fn = tc.function || {};
     const el = document.createElement('div');
     el.className = 'block tool-use';
-
     const hdr = document.createElement('div');
     hdr.className = 'block-hdr';
     hdr.innerHTML = `
@@ -646,18 +752,8 @@ function renderOaiToolCallBlock(block) {
 
     const body = document.createElement('div');
     body.className = 'block-body';
-
-    let args = fn.arguments || '';
-    if (typeof args === 'string') {
-        try { args = JSON.stringify(JSON.parse(args), null, 2); } catch(e) { /* keep raw */ }
-    } else {
-        args = JSON.stringify(args, null, 2);
-    }
-
-    // if args contain a "command" key, render nicely
     let parsed = null;
     try { parsed = JSON.parse(fn.arguments); } catch(e) {}
-
     if (parsed && parsed.command !== undefined) {
         const lbl = document.createElement('div');
         lbl.className = 'cmd-label';
@@ -672,21 +768,20 @@ function renderOaiToolCallBlock(block) {
     } else if (parsed && typeof parsed === 'object') {
         body.appendChild(renderKV(Object.entries(parsed)));
     } else {
+        let args = fn.arguments || '';
+        try { args = JSON.stringify(JSON.parse(args), null, 2); } catch(e) {}
         const pre = document.createElement('pre');
         pre.className = 'cmd-pre';
         pre.textContent = args;
         body.appendChild(pre);
     }
-
     el.appendChild(body);
     return el;
 }
 
-// OpenAI: tool role result block
 function renderOaiToolResultBlock(block) {
     const el = document.createElement('div');
     el.className = 'block tool-role';
-
     const hdr = document.createElement('div');
     hdr.className = 'block-hdr tool-role-hdr';
     hdr.innerHTML = `
@@ -694,95 +789,11 @@ function renderOaiToolResultBlock(block) {
         <span class="tool-id">${esc(block.tool_call_id || '')}</span>
     `;
     el.appendChild(hdr);
-
     const body = document.createElement('div');
     body.className = 'block-body';
     const pre = document.createElement('pre');
     pre.className = 'result-pre';
-    pre.textContent = typeof block.content === 'string'
-        ? block.content
-        : JSON.stringify(block.content, null, 2);
-    body.appendChild(pre);
-    el.appendChild(body);
-    return el;
-}
-
-function renderTextBlock(block) {
-    const el = document.createElement('div');
-    el.className = 'block text';
-    el.textContent = block.text || '';
-    return el;
-}
-
-function renderToolUseBlock(block) {
-    const el = document.createElement('div');
-    el.className = 'block tool-use';
-
-    // header
-    const hdr = document.createElement('div');
-    hdr.className = 'block-hdr';
-    hdr.innerHTML = `
-        <span class="badge badge-tool-use">tool_use</span>
-        <span class="tool-name">${esc(block.name || '')}</span>
-        <span class="tool-id">${esc(block.id || '')}</span>
-    `;
-    el.appendChild(hdr);
-
-    // body
-    const body = document.createElement('div');
-    body.className = 'block-body';
-    const input = block.input || {};
-
-    if (input.command !== undefined) {
-        // command: show as dark code block
-        const lbl = document.createElement('div');
-        lbl.className = 'cmd-label';
-        lbl.textContent = '$ command';
-        const pre = document.createElement('pre');
-        pre.className = 'cmd-pre';
-        pre.textContent = input.command;
-        body.appendChild(lbl);
-        body.appendChild(pre);
-
-        // other keys besides command
-        const others = Object.entries(input).filter(([k]) => k !== 'command');
-        if (others.length) body.appendChild(renderKV(others));
-    } else if (Object.keys(input).length) {
-        body.appendChild(renderKV(Object.entries(input)));
-    } else {
-        body.textContent = '(no input)';
-    }
-
-    el.appendChild(body);
-    return el;
-}
-
-function renderToolResultBlock(block) {
-    const isError = block.is_error;
-    const el = document.createElement('div');
-    el.className = `block tool-result${isError ? ' is-error' : ''}`;
-
-    // header
-    const hdr = document.createElement('div');
-    hdr.className = 'block-hdr';
-    hdr.innerHTML = `
-        <span class="badge ${isError ? 'badge-error' : 'badge-tool-result'}">${isError ? 'error' : 'tool_result'}</span>
-        <span class="tool-id">${esc(block.tool_use_id || '')}</span>
-    `;
-    el.appendChild(hdr);
-
-    // body
-    const body = document.createElement('div');
-    body.className = 'block-body';
-
-    const rawContent = block.content;
-    const text = typeof rawContent === 'string'
-        ? rawContent
-        : JSON.stringify(rawContent, null, 2);
-
-    const pre = document.createElement('pre');
-    pre.className = `result-pre${isError ? ' is-error' : ''}`;
-    pre.textContent = text || '(no output)';
+    pre.textContent = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
     body.appendChild(pre);
     el.appendChild(body);
     return el;
@@ -818,15 +829,33 @@ function renderKV(entries) {
 }
 
 function esc(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function showError(msg) {
     chatPanel.innerHTML = `<div class="error-box"><strong>错误：</strong>${msg}</div>`;
 }
 
-// init
-loadFileList();
+// File upload
+document.getElementById('fileInput').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+        try {
+            const data = JSON.parse(ev.target.result);
+            renderMessages(data, file.name);
+            renderDetailPanel({ model: data.model || '', message_count: (data.messages || []).length, filename: file.name });
+            if (activeItem) { activeItem.classList.remove('active'); activeItem = null; }
+        } catch(err) { showError('JSON 解析失败：' + err.message); }
+    };
+    reader.readAsText(file);
+    this.value = '';
+});
+
+// Init
+resetAndLoad();
 </script>
 </body>
 </html>

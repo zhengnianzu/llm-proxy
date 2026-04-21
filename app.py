@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from print_stats_summary import statistic_tokens
+from print_stats_summary import statistic_tokens, statistic_keys
 from auth import validate_api_key
 from utils.metrics import (
     record_request,
@@ -457,7 +457,60 @@ def _load_index_anthropic():
                     pass
 
 
-def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0, api_key: str = ""):
+def _extract_chain_key_anthropic(messages):
+    """提取 Anthropic chain_key（用于聚合判定同一会话）"""
+    if not messages:
+        return ""
+    content = messages[0].get("content", "")
+    if isinstance(content, list):
+        content = "|".join(
+            block.get("text") or block.get("id") or str(block)[:200]
+            for block in content if isinstance(block, dict)
+        )
+    return str(content)[:500]
+
+
+def _extract_chain_key_openai(messages):
+    """提取 OpenAI chain_key（用于聚合判定同一会话）"""
+    for msg in messages or []:
+        if msg.get("role") == "system":
+            match = re.search(r"# Origin_query\s*\n+(.*?)(\n---|\Z)", str(msg.get("content", "")), re.DOTALL)
+            if match:
+                return ("oq:" + match.group(1).strip())[:500]
+    for msg in messages or []:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = "|".join(block.get("text", "") for block in content if isinstance(block, dict))
+            return ("u:" + str(content))[:500]
+    return str((messages or [{}])[0].get("content", ""))[:500]
+
+
+def _extract_q1_preview(messages, kind="anthropic"):
+    """提取第一条消息的预览文本（前100字符）"""
+    if not messages:
+        return ""
+    if kind == "openai":
+        for msg in messages:
+            if msg.get("role") == "system":
+                match = re.search(r"# Origin_query\s*\n+(.*?)(\n---|\Z)", str(msg.get("content", "")), re.DOTALL)
+                if match:
+                    return match.group(1).strip()[:100]
+        for msg in messages:
+            if msg.get("role") == "user":
+                c = msg.get("content", "")
+                if isinstance(c, list):
+                    c = "|".join(block.get("text", "") for block in c if isinstance(block, dict))
+                return str(c)[:100]
+    content = messages[0].get("content", "")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return (block.get("text") or "")[:100]
+    return str(content)[:100]
+
+
+def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0, api_key: str = "", messages: list = None):
     """按日志根目录追加一条 Anthropic 请求记录到 index.jsonl，并更新内存计数。"""
     global _first_count, _total_count, _valid_count
     entry = {
@@ -470,6 +523,8 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         "tok_in": tok_in,
         "tok_out": tok_out,
         "api_key": api_key,
+        "chain_key": _extract_chain_key_anthropic(messages or []),
+        "q1_preview": _extract_q1_preview(messages or [], "anthropic"),
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
@@ -481,7 +536,7 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         _valid_count += 1
 
 
-def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True, api_key: str = ""):
+def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True, api_key: str = "", messages: list = None):
     """按日志根目录追加 OpenAI 请求记录到 index.jsonl。"""
     entry = {
         "ts": ts,
@@ -491,6 +546,8 @@ def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 
         "tok_out": tok_out,
         "success": success,
         "api_key": api_key,
+        "chain_key": _extract_chain_key_openai(messages or []),
+        "q1_preview": _extract_q1_preview(messages or [], "openai"),
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
@@ -749,7 +806,7 @@ async def anthropic_messages(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (anthropic non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key)
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []))
                 record_validity(False, model)
                 record_request(0, 0, success=False, model=model)
                 return Response(
@@ -761,7 +818,7 @@ async def anthropic_messages(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key)
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []))
                 record_validity(False, model)
                 return JSONResponse(
                     status_code=502,
@@ -778,7 +835,7 @@ async def anthropic_messages(req: Request):
             record_request(tok_in, tok_out, success=r.status_code < 400, model=model)
         except Exception:
             record_request(success=r.status_code < 400, model=model)
-        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, api_key=_api_key)
+        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, api_key=_api_key, messages=body.get("messages", []))
         record_validity(final_valid, model)
         return Response(
             content=r.content,
@@ -925,7 +982,7 @@ async def anthropic_messages(req: Request):
                         _tok_in = (_u.get("input_tokens") or 0) + (_u.get("cache_creation_input_tokens") or 0) + (_u.get("cache_read_input_tokens") or 0)
                         _tok_out = _u.get("output_tokens") or 0
             record_request(_tok_in, _tok_out, success=connection_established, model=model)
-            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, api_key=_api_key)
+            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, api_key=_api_key, messages=body.get("messages", []))
             record_validity(connection_established, model)
 
 
@@ -1049,7 +1106,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (openai non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key)
+                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []))
                 record_request(0, 0, success=False, model=model)
                 return Response(
                     content=r.content,
@@ -1060,7 +1117,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key)
+                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []))
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
@@ -1076,7 +1133,7 @@ async def openai_chat_completions(req: Request):
             record_request(tok_in, tok_out, success=r.status_code < 400, model=model)
         except Exception:
             record_request(success=r.status_code < 400, model=model)
-        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key)
+        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []))
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1176,7 +1233,7 @@ async def openai_chat_completions(req: Request):
                     _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
             record_request(_tok_in, _tok_out, success=connection_established, model=model)
-            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key)
+            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []))
 
     return StreamingResponse(sse_passthrough(), media_type="text/event-stream")
 
@@ -1200,7 +1257,6 @@ async def chat_viewer(request: Request):
         "chat-viewer.html",
         {
             "request": request,
-            "recent_index_limit": get_recent_index_limit(),
         },
     )
 
@@ -1212,6 +1268,12 @@ async def failure_viewer():
 @app.get("/statistic")
 def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部'):
     res = statistic_tokens(model=model, date_start=date_start, date_end=date_end, status=status)
+    return JSONResponse(res)
+
+
+@app.get("/statistic/keys")
+def statistic_keys_web(date_start: str = '', date_end: str = ''):
+    res = statistic_keys(date_start=date_start or '2000-01-01', date_end=date_end or '9999-12-31')
     return JSONResponse(res)
 
 

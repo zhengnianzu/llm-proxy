@@ -116,6 +116,33 @@
     </div>
     <div v-else class="alert alert-info py-2 small">暂无汇总数据</div>
 
+    <!-- Key 使用量列表 -->
+    <div class="panel mb-3" v-if="keyStats.length">
+        <h6 style="font-weight:600;margin-bottom:12px;">Key 使用量统计</h6>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>API Key</th>
+                        <th class="text-end">请求次数</th>
+                        <th class="text-end">会话数</th>
+                        <th class="text-end">输入 Token</th>
+                        <th class="text-end">输出 Token</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-for="(k, i) in keyStats" :key="i">
+                        <td><code>{{ k.key }}</code></td>
+                        <td class="text-end">{{ k.count }}</td>
+                        <td class="text-end">{{ k.sessions }}</td>
+                        <td class="text-end">{{ k.tok_in }}</td>
+                        <td class="text-end">{{ k.tok_out }}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <div class="panel">
         <div class="table-responsive">
             <table class="table table-striped table-hover align-middle mb-0">
@@ -155,7 +182,7 @@ new Vue({
     el: '#app',
     data: {
         histModel: '', startDate: '', endDate: '', statusFilter: '',
-        items: [], summaryList: [],
+        items: [], summaryList: [], keyStats: [],
         sortField: 'date_start', sortAsc: true, loading: false,
     },
     computed: {
@@ -171,20 +198,28 @@ new Vue({
             if (this.startDate) p.append('date_start', this.startDate);
             if (this.endDate) p.append('date_end', this.endDate);
             if (this.statusFilter) p.append('status', this.statusFilter);
-            fetch('/statistic?' + p.toString())
-                .then(r => r.json())
-                .then(d => {
-                    this.items = d.data || [];
-                    this.summaryList = d.summary || [];
-                    this.applySort();
-                })
-                .catch(e => alert('加载失败：' + e))
-                .finally(() => { this.loading = false; });
+
+            const pKeys = new URLSearchParams();
+            if (this.startDate) pKeys.append('date_start', this.startDate);
+            if (this.endDate) pKeys.append('date_end', this.endDate);
+
+            Promise.all([
+                fetch('/statistic?' + p.toString()).then(r => r.json()),
+                fetch('/statistic/keys?' + pKeys.toString()).then(r => r.json()),
+            ]).then(([d, kd]) => {
+                this.items = d.data || [];
+                this.summaryList = d.summary || [];
+                this.keyStats = kd.keys || [];
+                this.applySort();
+            }).catch(e => alert('加载失败：' + e))
+              .finally(() => { this.loading = false; });
         },
         resetFilter() {
+            const now = new Date();
+            const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+            this.startDate = oneMonthAgo.toISOString().slice(0, 10);
+            this.endDate = now.toISOString().slice(0, 10);
             this.histModel = '';
-            this.startDate = '';
-            this.endDate = '';
             this.statusFilter = '';
             this.fetchData();
         },
@@ -208,6 +243,11 @@ new Vue({
         },
     },
     mounted() {
+        // 默认时间范围：过去一个月到今天
+        const now = new Date();
+        const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+        this.startDate = oneMonthAgo.toISOString().slice(0, 10);
+        this.endDate = now.toISOString().slice(0, 10);
         this.fetchData();
     }
 });

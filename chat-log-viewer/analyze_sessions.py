@@ -136,7 +136,7 @@ def count_user_turns(messages: List[dict]) -> int:
         if m.get("role") != "user":
             continue
         blocks = list(iter_blocks(m.get("content", [])))
-        if any(b.get("type") != "tool_result" for b in blocks):
+        if not any(b.get("type") == "tool_result" for b in blocks):
             count += 1
     return count
 
@@ -438,14 +438,13 @@ def _record_tool_result(blk: dict, stats: Dict[str, Any]) -> None:
 
 
 def _analyze_user_message(content: Any, stats: Dict[str, Any]) -> None:
-    has_non_tool_result = False
+    has_tool_result = False
     for blk in iter_blocks(content):
         blk_type = blk.get("type")
-        if blk_type != "tool_result":
-            has_non_tool_result = True
         if blk_type == "tool_result":
+            has_tool_result = True
             _record_tool_result(blk, stats)
-    if has_non_tool_result:
+    if not has_tool_result:
         stats["user_turns"] += 1
 
 

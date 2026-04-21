@@ -18,8 +18,8 @@ from utils.log_paths import build_index_path, get_log_dir
 
 _CACHE_LOCK = threading.Lock()
 _LOG_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
-_RECENT_INDEX_LIMIT_DEFAULT = 1000
-_RECENT_INDEX_LIMIT_MAX = 5000
+_RECENT_INDEX_LIMIT_DEFAULT = 50000
+_RECENT_INDEX_LIMIT_MAX = 100000
 
 
 def get_recent_index_limit() -> int:
@@ -199,23 +199,46 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     ts = str((index_entry or {}).get("ts") or filename.replace("-req.json", ""))
     model = str(data.get("model", "") or (index_entry or {}).get("model", "") or "")
     message_count = len(messages)
+    api_key = str((index_entry or {}).get("api_key", "") or "")
 
     state["list_items"][filename] = {
         "filename": filename,
         "message_count": message_count,
         "model": model,
         "ts": ts,
+        "api_key": api_key,
     }
 
-    if kind == "anthropic":
+    # Prefer pre-computed chain_key from index_entry; fallback to parsing messages
+    if index_entry and index_entry.get("chain_key"):
+        chain_key = index_entry["chain_key"]
+    elif kind == "anthropic":
         chain_key = _anthropic_chain_key(messages)
-        res_content = _extract_anthropic_res_content(req_path.with_name(filename.replace("-req.json", "-res.json")))
     else:
         chain_key = _openai_chain_key(messages)
+
+    q1_preview = (index_entry or {}).get("q1_preview", "")
+
+    if kind == "anthropic":
+        res_content = _extract_anthropic_res_content(req_path.with_name(filename.replace("-req.json", "-res.json")))
+    else:
         res_content = _extract_openai_res_content(req_path.with_name(filename.replace("-req.json", "-res.json")))
 
     chain = state["agg_chains"].get(chain_key)
     full_message_count = message_count + (1 if res_content is not None else 0)
+
+    # Detect new session: if current request has fewer messages than the
+    # existing chain's best, it's a brand-new conversation starting over
+    # with the same q1 — split into a separate chain.
+    if chain is not None and message_count < chain["best_req_count"]:
+        suffix = 1
+        new_key = f"{chain_key}##session_{suffix}"
+        while new_key in state["agg_chains"]:
+            suffix += 1
+            new_key = f"{chain_key}##session_{suffix}"
+        chain_key = new_key
+        chain = None
+
     if chain is None:
         chain = {
             "chain_id": len(state["agg_chains"]),
@@ -228,6 +251,8 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
             "first_ts": ts,
             "last_ts": ts,
             "best_req_count": message_count,
+            "api_key": api_key,
+            "q1_preview": q1_preview,
         }
         state["agg_chains"][chain_key] = chain
     else:
@@ -283,7 +308,7 @@ def _refresh_state(kind: str, root_dir: str) -> None:
     state["initialized"] = True
 
 
-def _list_payload(kind: str, root_dir: str, min_messages: int) -> List[Dict[str, Any]]:
+def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
     with _CACHE_LOCK:
         _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
@@ -296,10 +321,12 @@ def _list_payload(kind: str, root_dir: str, min_messages: int) -> List[Dict[str,
             key=lambda item: current_state["list_items"][item["filename"]].get("ts", item["filename"]),
             reverse=True,
         )
-        return items
+        total = len(items)
+        paged = items[offset:offset + limit] if limit > 0 else items[offset:]
+        return {"items": paged, "total": total}
 
 
-def _aggregate_payload(kind: str, root_dir: str, min_messages: int) -> List[Dict[str, Any]]:
+def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
     with _CACHE_LOCK:
         _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
@@ -325,13 +352,17 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int) -> List[Dict
                 "message_count": len(full_messages),
                 "model": chain["model"],
                 "messages": full_messages,
+                "api_key": chain.get("api_key", ""),
+                "q1_preview": chain.get("q1_preview", ""),
             }
             if kind == "openai":
                 payload["chain_key"] = chain["chain_key"]
             chains.append(payload)
 
         chains.sort(key=lambda item: item["last_time"], reverse=True)
-        return chains
+        total = len(chains)
+        paged = chains[offset:offset + limit] if limit > 0 else chains[offset:]
+        return {"items": paged, "total": total}
 
 
 def register_log_routes(app: FastAPI) -> None:
@@ -342,8 +373,8 @@ def register_log_routes(app: FastAPI) -> None:
         return get_log_dir("logs_openai")
 
     @app.get("/logs/anthropic/list")
-    def logs_anthropic_list(min_messages: int = 10):
-        return JSONResponse(_list_payload("anthropic", anthropic_log_dir(), min_messages))
+    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50):
+        return JSONResponse(_list_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit))
 
     @app.get("/logs/anthropic/file")
     def logs_anthropic_file(filename: str):
@@ -354,15 +385,20 @@ def register_log_routes(app: FastAPI) -> None:
             return JSONResponse({"error": "file not found"}, status_code=404)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        # Append res content as assistant message
+        res_path = Path(path).with_name(filename.replace("-req.json", "-res.json"))
+        res_content = _extract_anthropic_res_content(res_path)
+        if res_content is not None and isinstance(data.get("messages"), list):
+            data["messages"].append({"role": "assistant", "content": res_content, "_from_res": True})
         return JSONResponse(data)
 
     @app.get("/logs/anthropic/aggregate")
-    def logs_anthropic_aggregate(min_messages: int = 1):
-        return JSONResponse(_aggregate_payload("anthropic", anthropic_log_dir(), min_messages))
+    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50):
+        return JSONResponse(_aggregate_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit))
 
     @app.get("/logs/openai/list")
-    def logs_openai_list(min_messages: int = 10):
-        return JSONResponse(_list_payload("openai", openai_log_dir(), min_messages))
+    def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50):
+        return JSONResponse(_list_payload("openai", openai_log_dir(), min_messages, offset, limit))
 
     @app.get("/logs/openai/file")
     def logs_openai_file(filename: str):
@@ -373,8 +409,13 @@ def register_log_routes(app: FastAPI) -> None:
             return JSONResponse({"error": "file not found"}, status_code=404)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        # Append res content as assistant message
+        res_path = Path(path).with_name(filename.replace("-req.json", "-res.json"))
+        res_content = _extract_openai_res_content(res_path)
+        if res_content is not None and isinstance(data.get("messages"), list):
+            data["messages"].append({**res_content, "_from_res": True})
         return JSONResponse(data)
 
     @app.get("/logs/openai/aggregate")
-    def logs_openai_aggregate(min_messages: int = 1):
-        return JSONResponse(_aggregate_payload("openai", openai_log_dir(), min_messages))
+    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50):
+        return JSONResponse(_aggregate_payload("openai", openai_log_dir(), min_messages, offset, limit))

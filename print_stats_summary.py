@@ -297,6 +297,53 @@ API 调用统计摘要
     return {"data": res_data, "summary": [summary_success.model_dump(), summary_error.model_dump()]}
 
 
+def _mask_api_key(key: str) -> str:
+    """脱敏 api_key：保留前4位和后4位，中间用 ... 代替。"""
+    if not key or len(key) <= 8:
+        return key or "(empty)"
+    return f"{key[:4]}...{key[-4:]}"
+
+
+def statistic_keys(date_start: str = '2000-01-01', date_end: str = '9999-12-31', dirs=None) -> dict:
+    """
+    按 API Key 维度聚合统计。
+    返回格式：{"keys": [{"key": "sk-a...xz9f", "count": N, "tok_in": N, "tok_out": N}]}
+    """
+    normalized_dirs = _normalize_dirs(dirs)
+    index_files = _collect_index_files(normalized_dirs)
+
+    key_data: dict = {}  # raw_key -> {count, tok_in, tok_out, sessions}
+
+    for index_file in index_files:
+        entries = _load_index_file(str(index_file))
+        if entries is None:
+            continue
+        for entry in entries:
+            entry_date = entry.get("ts", "")[:10]
+            if not (date_start <= entry_date <= date_end):
+                continue
+            raw_key = entry.get("api_key", "") or ""
+            if not raw_key:
+                raw_key = "(unknown)"
+            tok_in = entry.get("tok_in", 0) or 0
+            tok_out = entry.get("tok_out", 0) or 0
+            if raw_key not in key_data:
+                key_data[raw_key] = {"count": 0, "tok_in": 0, "tok_out": 0, "sessions": set()}
+            key_data[raw_key]["count"] += 1
+            key_data[raw_key]["tok_in"] += tok_in
+            key_data[raw_key]["tok_out"] += tok_out
+            chain_key = entry.get("chain_key", "")
+            if chain_key:
+                key_data[raw_key]["sessions"].add(chain_key)
+
+    keys_list = [
+        {"key": _mask_api_key(k), "count": v["count"], "tok_in": v["tok_in"], "tok_out": v["tok_out"], "sessions": len(v["sessions"]) or v["count"]}
+        for k, v in key_data.items()
+    ]
+    keys_list.sort(key=lambda x: x["count"], reverse=True)
+    return {"keys": keys_list}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个，支持空格分隔或逗号分隔），不指定则扫描当前目录下 logs_ 开头的目录")
