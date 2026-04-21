@@ -661,6 +661,8 @@ def api_list(
     filters: Optional[str] = Query(default=None),
     sort_field: Optional[str] = Query(default=None),
     sort_order: Optional[str] = Query(default="desc"),
+    limit: Optional[int] = Query(default=None),
+    offset: int = Query(default=0),
 ):
     if has_session_args:
         source = _get_source_by_key(dir)
@@ -690,7 +692,13 @@ def api_list(
         reverse = sort_order != "asc"
         items = sorted(items, key=lambda it: _sort_key(it, sort_field), reverse=reverse)
 
-    return JSONResponse({"items": items, "total": len(items)})
+    # --- pagination ---
+    total = len(items)
+    has_analysis = any(it.get("analysis_available") for it in items)
+    if limit is not None:
+        items = items[offset:offset + limit]
+
+    return JSONResponse({"items": items, "total": total, "has_analysis": has_analysis})
 
 
 def _match_filter(item: dict, f: dict) -> bool:

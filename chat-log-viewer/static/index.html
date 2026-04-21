@@ -1028,7 +1028,10 @@
 // State
 // ----------------------------------------------------------------
 let allItems = [];
-let filteredItems = [];
+let totalItems = 0;
+let isLoadingMore = false;
+let _listAbort = null;
+const PAGE_SIZE = 100;
 let activeEl  = null;
 let activeItem = null;
 let currentDir = null;
@@ -1102,6 +1105,15 @@ detailToggleBtn.addEventListener('click', () => {
 chatPanel.addEventListener('scroll', () => {
     const gap = chatPanel.scrollHeight - chatPanel.scrollTop - chatPanel.clientHeight;
     scrollBottomBtn.style.display = gap > 200 ? 'flex' : 'none';
+});
+
+// Infinite scroll on file list
+fileListEl.addEventListener('scroll', () => {
+    if (isLoadingMore || allItems.length >= totalItems) return;
+    const { scrollTop, scrollHeight, clientHeight } = fileListEl;
+    if (scrollHeight - scrollTop - clientHeight < 200) {
+        loadMore();
+    }
 });
 scrollBottomBtn.addEventListener('click', () => {
     chatPanel.scrollTo({ top: chatPanel.scrollHeight, behavior: 'smooth' });
@@ -1268,8 +1280,8 @@ searchInput.addEventListener('keydown', (e) => {
 });
 
 let _lastHasAnalysis = null;
-function _updateAnalysisOptions() {
-    const hasAnalysis = allItems.some(item => item.analysis_available);
+function _updateAnalysisOptions(hasAnalysis) {
+    if (hasAnalysis === undefined) hasAnalysis = allItems.some(item => item.analysis_available);
     if (hasAnalysis === _lastHasAnalysis) return;
     _lastHasAnalysis = hasAnalysis;
     document.querySelectorAll('.analysis-option').forEach(el => {
@@ -1282,8 +1294,15 @@ function _updateAnalysisOptions() {
     }
 }
 
-async function executeSearch() {
-    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>筛选中…</div>';
+async function executeSearch(append = false) {
+    if (_listAbort) _listAbort.abort();
+    _listAbort = new AbortController();
+
+    if (!append) {
+        fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>筛选中…</div>';
+        allItems = [];
+        totalItems = 0;
+    }
 
     const params = new URLSearchParams();
     if (currentDir) params.set('dir', currentDir);
@@ -1292,30 +1311,45 @@ async function executeSearch() {
     if (currentFilters.length) params.set('filters', JSON.stringify(currentFilters));
     if (currentSort.field) params.set('sort_field', currentSort.field);
     if (currentSort.order) params.set('sort_order', currentSort.order);
+    params.set('limit', PAGE_SIZE);
+    params.set('offset', allItems.length);
 
     try {
-        const res = await fetch('/api/list?' + params.toString());
+        const res = await fetch('/api/list?' + params.toString(), { signal: _listAbort.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        allItems = data.items;
-        _lastHasAnalysis = null;
-        filteredItems = allItems;
+        totalItems = data.total;
+
+        if (!append) {
+            _lastHasAnalysis = null;
+            fileListEl.innerHTML = '';
+        }
+
+        const frag = document.createDocumentFragment();
+        data.items.forEach(item => {
+            allItems.push(item);
+            frag.appendChild(_makeItemEl(item));
+        });
+        fileListEl.appendChild(frag);
+
+        if (!append) _updateAnalysisOptions(data.has_analysis);
+
+        statsChip.style.display = 'inline';
+        statsChip.textContent = `显示 ${allItems.length} / ${totalItems} 条对话`;
+        _renderFilterSummary();
+        _renderFilterList();
     } catch (e) {
-        fileListEl.innerHTML = `<div class="sidebar-tip">筛选失败：${esc(e.message)}</div>`;
-        return;
+        if (e.name === 'AbortError') return;
+        if (!append) {
+            fileListEl.innerHTML = `<div class="sidebar-tip">筛选失败：${esc(e.message)}</div>`;
+        }
     }
+}
 
-    _updateAnalysisOptions();
-
-    fileListEl.innerHTML = '';
-    const frag = document.createDocumentFragment();
-    filteredItems.forEach(item => frag.appendChild(_makeItemEl(item)));
-    fileListEl.appendChild(frag);
-
-    statsChip.style.display = 'inline';
-    statsChip.textContent = `${filteredItems.length} 条对话`;
-    _renderFilterSummary();
-    _renderFilterList();
+function loadMore() {
+    if (isLoadingMore || allItems.length >= totalItems) return;
+    isLoadingMore = true;
+    executeSearch(true).finally(() => { isLoadingMore = false; });
 }
 
 function _dirQuery() {
