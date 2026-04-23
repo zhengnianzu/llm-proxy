@@ -251,6 +251,7 @@ def _build_state(root_dir: str) -> Dict[str, Any]:
         "line_count": 0,
         "byte_offset": 0,
         "scanned": set(),
+        "known_keys": set(),
         "list_items": {},
         "agg_chains": OrderedDict(),
     }
@@ -279,6 +280,7 @@ def _save_state_to_disk(state: Dict[str, Any]) -> None:
             "line_count": state["line_count"],
             "list_items": state["list_items"],
             "scanned_list": list(state["scanned"]),
+            "known_keys": list(state["known_keys"]),
         }
         tmp = _state_file_path(root_dir) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -325,6 +327,7 @@ def _load_state_from_disk(state: Dict[str, Any]) -> bool:
     state["line_count"] = sp.get("line_count", 0)
     state["list_items"] = sp.get("list_items", {})
     state["scanned"] = set(sp.get("scanned_list", []))
+    state["known_keys"] = set(sp.get("known_keys", []))
 
     agg = OrderedDict()
     for pair in cp.get("chains", []):
@@ -376,6 +379,7 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
         "ts": ts,
         "api_key": api_key,
     }
+    state["known_keys"].add(api_key)
 
     # Prefer pre-computed chain_key from index_entry; fallback to parsing messages
     if index_entry and index_entry.get("chain_key"):
@@ -530,8 +534,7 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
         )
         total = len(items)
         paged = items[offset:offset + limit] if limit > 0 else items[offset:]
-        return {"items": paged, "total": total}
-
+        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"])}
 
 def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
@@ -571,8 +574,7 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
         chains.sort(key=lambda item: item["last_time"], reverse=True)
         total = len(chains)
         paged = chains[offset:offset + limit] if limit > 0 else chains[offset:]
-        return {"items": paged, "total": total}
-
+        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"])}
 
 def register_log_routes(app: FastAPI) -> None:
     def anthropic_log_dir() -> str:

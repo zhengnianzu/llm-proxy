@@ -261,7 +261,7 @@
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
         <span class="min-msg-label">API Key</span>
-        <select class="folder-select" id="filterKey" onchange="resetAndLoad()">
+        <select class="folder-select" id="filterKey" onchange="reloadWithKey()">
             <option value="">全部</option>
         </select>
         <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
@@ -349,11 +349,15 @@ function updateKeyDropdown() {
     sel.value = current;
 }
 
-function collectKeys(items) {
-    items.forEach(item => {
-        const k = item.api_key || '';
-        knownKeys.add(k);
-    });
+function collectKeys(data) {
+    // Prefer server-side known_keys if available
+    if (data.known_keys && Array.isArray(data.known_keys)) {
+        data.known_keys.forEach(k => knownKeys.add(k));
+    } else {
+        (data.items || []).forEach(item => {
+            knownKeys.add(item.api_key || '');
+        });
+    }
     updateKeyDropdown();
 }
 
@@ -365,6 +369,17 @@ function resetAndLoad() {
     totalItems = 0;
     aggChains = [];
     knownKeys = new Set();
+    _searchQuery = '';
+    document.getElementById('q1Search').value = '';
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
+    document.getElementById('loadStatus').textContent = '';
+    loadFileList();
+}
+
+function reloadWithKey() {
+    offset = 0;
+    totalItems = 0;
+    aggChains = [];
     _searchQuery = '';
     document.getElementById('q1Search').value = '';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
@@ -396,7 +411,7 @@ async function loadFileList() {
             } else {
                 aggChains = aggChains.concat(items);
             }
-            collectKeys(items);
+            collectKeys(data);
 
             if (!aggChains.length) {
                 fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的对话</div>';
@@ -458,7 +473,7 @@ async function loadFileList() {
             totalItems = data.total || items.length;
 
             if (offset === 0) fileListEl.innerHTML = '';
-            collectKeys(items);
+            collectKeys(data);
 
             if (!items.length && offset === 0) {
                 fileListEl.innerHTML = '<div class="sidebar-tip">没有满足条件的文件</div>';
