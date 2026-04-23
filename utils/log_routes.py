@@ -102,6 +102,49 @@ def _tail_index_entries(index_path: Path, root: Path, limit: int) -> List[Dict[s
     return rows
 
 
+def _read_new_index_entries(
+    index_path: Path, root: Path, byte_offset: int
+) -> Tuple[List[Dict[str, Any]], int]:
+    """从 byte_offset 处增量读取 index.jsonl 新增行。
+    返回 (rows, new_byte_offset)。
+    文件被截断时返回 ([], 0) 表示需要全量重建。
+    """
+    try:
+        file_size = index_path.stat().st_size
+    except OSError:
+        return [], 0
+
+    if byte_offset > file_size:
+        return [], 0
+
+    if byte_offset == file_size:
+        return [], byte_offset
+
+    rows: List[Dict[str, Any]] = []
+    try:
+        with index_path.open("rb") as f:
+            f.seek(byte_offset)
+            raw_data = f.read()
+            new_offset = f.tell()
+    except OSError:
+        return [], byte_offset
+
+    for raw_line in raw_data.split(b"\n"):
+        line = raw_line.decode("utf-8", errors="ignore").strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        req_path = _resolve_req_path(root, str(entry.get("req_file", "")))
+        if req_path is None:
+            continue
+        rows.append({"entry": entry, "req_path": req_path})
+
+    return rows, new_offset
+
+
 def _collect_req_files(root: Path) -> List[Path]:
     return sorted(root.glob("*-req.json"))
 
@@ -206,10 +249,90 @@ def _build_state(root_dir: str) -> Dict[str, Any]:
         "index_path": build_index_path(root_dir),
         "initialized": False,
         "line_count": 0,
+        "byte_offset": 0,
         "scanned": set(),
         "list_items": {},
         "agg_chains": OrderedDict(),
     }
+
+
+_STATE_FILE = ".session_state.json"
+_CHAINS_FILE = ".session_chain_keys.json"
+
+
+def _state_file_path(root_dir: str) -> str:
+    return os.path.join(root_dir, _STATE_FILE)
+
+
+def _chains_file_path(root_dir: str) -> str:
+    return os.path.join(root_dir, _CHAINS_FILE)
+
+
+def _save_state_to_disk(state: Dict[str, Any]) -> None:
+    """持久化计算状态到磁盘，供服务重启后恢复。"""
+    root_dir = state["root_dir"]
+    try:
+        os.makedirs(root_dir, exist_ok=True)
+
+        state_payload = {
+            "byte_offset": state["byte_offset"],
+            "line_count": state["line_count"],
+            "list_items": state["list_items"],
+            "scanned_list": list(state["scanned"]),
+        }
+        tmp = _state_file_path(root_dir) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state_payload, f, ensure_ascii=False)
+        os.replace(tmp, _state_file_path(root_dir))
+
+        chains_payload = {
+            "byte_offset": state["byte_offset"],
+            "chains": [[k, v] for k, v in state["agg_chains"].items()],
+        }
+        tmp = _chains_file_path(root_dir) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(chains_payload, f, ensure_ascii=False)
+        os.replace(tmp, _chains_file_path(root_dir))
+    except OSError:
+        pass
+
+
+def _load_state_from_disk(state: Dict[str, Any]) -> bool:
+    """从磁盘恢复持久化状态。成功返回 True，失败返回 False（调用方应全量重建）。"""
+    root_dir = state["root_dir"]
+    state_path = _state_file_path(root_dir)
+    chains_path = _chains_file_path(root_dir)
+
+    if not os.path.isfile(state_path) or not os.path.isfile(chains_path):
+        return False
+
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            sp = json.load(f)
+        with open(chains_path, "r", encoding="utf-8") as f:
+            cp = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if sp.get("byte_offset") != cp.get("byte_offset"):
+        return False
+
+    byte_offset = sp.get("byte_offset", 0)
+    if not isinstance(byte_offset, int) or byte_offset < 0:
+        return False
+
+    state["byte_offset"] = byte_offset
+    state["line_count"] = sp.get("line_count", 0)
+    state["list_items"] = sp.get("list_items", {})
+    state["scanned"] = set(sp.get("scanned_list", []))
+
+    agg = OrderedDict()
+    for pair in cp.get("chains", []):
+        if isinstance(pair, list) and len(pair) == 2:
+            agg[pair[0]] = pair[1]
+    state["agg_chains"] = agg
+
+    return True
 
 
 def _state_key(kind: str, root_dir: str) -> Tuple[str, str]:
@@ -334,24 +457,59 @@ def _refresh_state(kind: str, root_dir: str) -> None:
     root = Path(root_dir)
     index_path = Path(state["index_path"])
 
+    # Phase 1: 首次调用时尝试从磁盘恢复持久化状态
     if not state["initialized"]:
-        state["list_items"].clear()
-        state["agg_chains"].clear()
-        state["scanned"].clear()
-        state["line_count"] = 0
+        if not _load_state_from_disk(state):
+            state["list_items"].clear()
+            state["agg_chains"].clear()
+            state["scanned"].clear()
+            state["byte_offset"] = 0
+            state["line_count"] = 0
 
+    # Phase 2: 增量读取 index.jsonl
     if index_path.is_file():
-        # For very large index.jsonl files, only keep a recent working set so
-        # the history page stays responsive.
-        state["list_items"].clear()
-        state["agg_chains"].clear()
-        state["scanned"].clear()
-        rows = _tail_index_entries(index_path, root, get_recent_index_limit())
-        for row in rows:
-            _process_req_row(kind, state, row["req_path"], row["entry"])
+        rows, new_offset = _read_new_index_entries(index_path, root, state["byte_offset"])
+
+        if new_offset == 0 and state["byte_offset"] > 0:
+            # 文件被截断/轮转 — 全量重建
+            state["list_items"].clear()
+            state["agg_chains"].clear()
+            state["scanned"].clear()
+            state["byte_offset"] = 0
+            state["line_count"] = 0
+            rows = _tail_index_entries(index_path, root, get_recent_index_limit())
+            try:
+                new_offset = index_path.stat().st_size
+            except OSError:
+                new_offset = 0
+
+        if rows:
+            for row in rows:
+                _process_req_row(kind, state, row["req_path"], row["entry"])
+            state["line_count"] += len(rows)
+            state["byte_offset"] = new_offset
+            # Phase 3: 窗口裁剪 — 防止无限累积
+            recent_limit = get_recent_index_limit()
+            if state["line_count"] > int(recent_limit * 1.2):
+                state["list_items"].clear()
+                state["agg_chains"].clear()
+                state["scanned"].clear()
+                pruned_rows = _tail_index_entries(index_path, root, recent_limit)
+                for row in pruned_rows:
+                    _process_req_row(kind, state, row["req_path"], row["entry"])
+                state["line_count"] = len(pruned_rows)
+                try:
+                    state["byte_offset"] = index_path.stat().st_size
+                except OSError:
+                    pass
+            _save_state_to_disk(state)
+        elif new_offset != state["byte_offset"]:
+            state["byte_offset"] = new_offset
     else:
-        for req_path in _collect_req_files(root):
-            _process_req_row(kind, state, req_path)
+        # 无 index.jsonl — 降级为目录扫描（保持原有行为）
+        if not state["initialized"]:
+            for req_path in _collect_req_files(root):
+                _process_req_row(kind, state, req_path)
 
     state["initialized"] = True
 

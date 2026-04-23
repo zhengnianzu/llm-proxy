@@ -217,6 +217,22 @@
             vertical-align: middle; margin-right: 5px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ========= Search & Hide Tools ========= */
+        .search-box {
+            padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+            font-size: 13px; width: 180px; outline: none;
+        }
+        .search-box:focus { border-color: #3b82f6; }
+        .search-box::placeholder { color: #9ca3af; }
+        .toggle-label {
+            display: inline-flex; align-items: center; gap: 5px;
+            font-size: 13px; color: #6b7280; cursor: pointer; white-space: nowrap; user-select: none;
+        }
+        .toggle-label input { cursor: pointer; }
+        .chat-panel.hide-tools .block.tool-use,
+        .chat-panel.hide-tools .block.tool-result,
+        .chat-panel.hide-tools .block.tool-role { display: none; }
     </style>
 </head>
 <body>
@@ -249,6 +265,8 @@
             <option value="">全部</option>
         </select>
         <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
+        <input class="search-box" type="text" id="q1Search" placeholder="搜索对话内容..." oninput="filterSidebar()" />
+        <label class="toggle-label"><input type="checkbox" id="hideTools" onchange="toggleHideTools()">隐藏工具</label>
     </div>
 </div>
 
@@ -347,6 +365,8 @@ function resetAndLoad() {
     totalItems = 0;
     aggChains = [];
     knownKeys = new Set();
+    _searchQuery = '';
+    document.getElementById('q1Search').value = '';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
     loadFileList();
@@ -482,6 +502,7 @@ function updateLoadStatus() {
 }
 
 function loadMore() {
+    if (_searchQuery) return;
     const loaded = fileListEl.querySelectorAll('.file-item').length;
     if (isLoadingMore || loaded >= totalItems) return;
     isLoadingMore = true;
@@ -828,6 +849,38 @@ function esc(s) {
 
 function showError(msg) {
     chatPanel.innerHTML = `<div class="error-box"><strong>错误：</strong>${msg}</div>`;
+}
+
+// ----------------------------------------------------------------
+// Q1 search filter
+// ----------------------------------------------------------------
+let _searchQuery = '';
+function filterSidebar() {
+    _searchQuery = (document.getElementById('q1Search').value || '').trim().toLowerCase();
+    const items = fileListEl.querySelectorAll('.file-item');
+    let visible = 0;
+    items.forEach(el => {
+        if (!_searchQuery) {
+            el.style.display = '';
+            visible++;
+            return;
+        }
+        const name = (el.querySelector('.file-item-name')?.textContent || '').toLowerCase();
+        const match = name.includes(_searchQuery);
+        el.style.display = match ? '' : 'none';
+        if (match) visible++;
+    });
+    document.getElementById('loadStatus').textContent = _searchQuery
+        ? `搜索到 ${visible} 条 (共 ${totalItems})`
+        : `已加载 ${items.length} / 共 ${totalItems} 条`;
+}
+
+// ----------------------------------------------------------------
+// Hide tools toggle
+// ----------------------------------------------------------------
+function toggleHideTools() {
+    const hide = document.getElementById('hideTools').checked;
+    chatPanel.classList.toggle('hide-tools', hide);
 }
 
 // File upload
