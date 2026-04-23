@@ -514,7 +514,7 @@ def _refresh_state(kind: str, root_dir: str) -> None:
     state["initialized"] = True
 
 
-def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
@@ -522,6 +522,7 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
             {k: v for k, v in item.items() if k != "ts"}
             for item in current_state["list_items"].values()
             if item.get("message_count", 0) >= min_messages
+            and (not api_key or (item.get("api_key", "") or "") == api_key)
         ]
         items.sort(
             key=lambda item: current_state["list_items"][item["filename"]].get("ts", item["filename"]),
@@ -532,12 +533,14 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
         return {"items": paged, "total": total}
 
 
-def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
         chains = []
         for chain in current_state["agg_chains"].values():
+            if api_key and (chain.get("api_key", "") or "") != api_key:
+                continue
             full_messages = list(chain["messages"])
             if chain["res_content"] is not None:
                 if kind == "anthropic":
@@ -579,8 +582,8 @@ def register_log_routes(app: FastAPI) -> None:
         return get_log_dir("logs_openai")
 
     @app.get("/logs/anthropic/list")
-    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50):
-        return JSONResponse(_list_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit))
+    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = ""):
+        return JSONResponse(_list_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key))
 
     @app.get("/logs/anthropic/file")
     def logs_anthropic_file(filename: str):
@@ -599,12 +602,12 @@ def register_log_routes(app: FastAPI) -> None:
         return JSONResponse(data)
 
     @app.get("/logs/anthropic/aggregate")
-    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50):
-        return JSONResponse(_aggregate_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit))
+    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key))
 
     @app.get("/logs/openai/list")
-    def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50):
-        return JSONResponse(_list_payload("openai", openai_log_dir(), min_messages, offset, limit))
+    def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = ""):
+        return JSONResponse(_list_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key))
 
     @app.get("/logs/openai/file")
     def logs_openai_file(filename: str):
@@ -623,5 +626,5 @@ def register_log_routes(app: FastAPI) -> None:
         return JSONResponse(data)
 
     @app.get("/logs/openai/aggregate")
-    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50):
-        return JSONResponse(_aggregate_payload("openai", openai_log_dir(), min_messages, offset, limit))
+    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = ""):
+        return JSONResponse(_aggregate_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key))

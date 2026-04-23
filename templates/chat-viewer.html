@@ -375,7 +375,10 @@ function resetAndLoad() {
 async function loadFileList() {
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
-    const params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
+    const filterKey = document.getElementById('filterKey').value;
+    const resolvedKey = filterKey === '__default__' ? '' : filterKey;
+    let params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
+    if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg') {
         const apiFolder = folder === 'anthropic_agg' ? 'anthropic' : 'openai';
@@ -401,13 +404,6 @@ async function loadFileList() {
             }
 
             items.forEach((chain, idx) => {
-                const filterKey = document.getElementById('filterKey').value;
-                if (filterKey !== '') {
-                    const itemKey = chain.api_key || '';
-                    const matchKey = filterKey === '__default__' ? '' : filterKey;
-                    if (itemKey !== matchKey) return;
-                }
-
                 const globalIdx = offset + idx;
                 const el = document.createElement('div');
                 el.className = 'file-item';
@@ -470,13 +466,6 @@ async function loadFileList() {
             }
 
             items.forEach(item => {
-                const filterKey = document.getElementById('filterKey').value;
-                if (filterKey !== '') {
-                    const itemKey = item.api_key || '';
-                    const matchKey = filterKey === '__default__' ? '' : filterKey;
-                    if (itemKey !== matchKey) return;
-                }
-
                 const el = document.createElement('div');
                 el.className = 'file-item';
                 const ts = item.filename.replace('-req.json', '').replace(/_/g, ' ');
