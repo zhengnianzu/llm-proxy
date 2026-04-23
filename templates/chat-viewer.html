@@ -373,7 +373,7 @@ function resetAndLoad() {
     document.getElementById('q1Search').value = '';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
-    loadFileList();
+    loadFileList(true);
 }
 
 function reloadWithKey() {
@@ -387,13 +387,14 @@ function reloadWithKey() {
     loadFileList();
 }
 
-async function loadFileList() {
+async function loadFileList(refresh = false) {
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
     const filterKey = document.getElementById('filterKey').value;
     const resolvedKey = filterKey === '__default__' ? '' : filterKey;
     let params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
     if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
+    if (refresh) params += '&refresh=true';
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg') {
         const apiFolder = folder === 'anthropic_agg' ? 'anthropic' : 'openai';

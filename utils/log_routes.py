@@ -403,10 +403,11 @@ def _refresh_state(kind: str, root_dir: str) -> None:
     state["initialized"] = True
 
 
-def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "") -> Dict[str, Any]:
+def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False) -> Dict[str, Any]:
     with _CACHE_LOCK:
-        _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
+        if refresh or not current_state["initialized"]:
+            _refresh_state(kind, root_dir)
         # 从所有 session 的 trace_list 展开
         items = []
         for session in current_state["sessions"].values():
@@ -426,10 +427,11 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
         return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"])}
 
 
-def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "") -> Dict[str, Any]:
+def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False) -> Dict[str, Any]:
     with _CACHE_LOCK:
-        _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
+        if refresh or not current_state["initialized"]:
+            _refresh_state(kind, root_dir)
         root = Path(root_dir)
         sessions = []
         for session in current_state["sessions"].values():
@@ -490,8 +492,8 @@ def register_log_routes(app: FastAPI) -> None:
         return get_log_dir("logs_openai")
 
     @app.get("/logs/anthropic/list")
-    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = ""):
-        return JSONResponse(_list_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key))
+    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
+        return JSONResponse(_list_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key, refresh))
 
     @app.get("/logs/anthropic/file")
     def logs_anthropic_file(filename: str):
@@ -510,12 +512,12 @@ def register_log_routes(app: FastAPI) -> None:
         return JSONResponse(data)
 
     @app.get("/logs/anthropic/aggregate")
-    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key))
+    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
+        return JSONResponse(_aggregate_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key, refresh))
 
     @app.get("/logs/openai/list")
-    def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = ""):
-        return JSONResponse(_list_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key))
+    def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
+        return JSONResponse(_list_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key, refresh))
 
     @app.get("/logs/openai/file")
     def logs_openai_file(filename: str):
@@ -534,5 +536,5 @@ def register_log_routes(app: FastAPI) -> None:
         return JSONResponse(data)
 
     @app.get("/logs/openai/aggregate")
-    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = ""):
-        return JSONResponse(_aggregate_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key))
+    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
+        return JSONResponse(_aggregate_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key, refresh))
