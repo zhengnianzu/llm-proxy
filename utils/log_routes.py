@@ -432,7 +432,6 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
         current_state = _state(kind, root_dir)
         if refresh or not current_state["initialized"]:
             _refresh_state(kind, root_dir)
-        root = Path(root_dir)
         sessions = []
         for session in current_state["sessions"].values():
             if api_key and (session.get("api_key", "") or "") != api_key:
@@ -445,38 +444,15 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
         total = len(sessions)
         paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
 
-        # 只对当前页按需读取 messages
         items = []
         for session in paged:
-            best = session.get("latest_file", "")
-            req_path = root / best if best else None
-            messages = []
-            if req_path and req_path.is_file():
-                req_data = _load_json(req_path)
-                if req_data and isinstance(req_data.get("messages"), list):
-                    messages = req_data["messages"]
-            # 追加 res content
-            if best:
-                res_path = root / best.replace("-req.json", "-res.json")
-                if res_path.is_file():
-                    if kind == "anthropic":
-                        res_content = _extract_anthropic_res_content(res_path)
-                        if res_content is not None:
-                            messages = list(messages)
-                            messages.append({"role": "assistant", "content": res_content, "_from_res": True})
-                    else:
-                        res_content = _extract_openai_res_content(res_path)
-                        if res_content is not None:
-                            messages = list(messages)
-                            messages.append({**res_content, "_from_res": True})
-
             payload = {
                 "first_time": _format_time(session["first_ts"]),
                 "last_time": _format_time(session["last_ts"]),
                 "file_count": len(session.get("trace_list", [])),
-                "message_count": len(messages) if messages else session.get("msg_count", 0),
+                "message_count": session.get("msg_count", 0),
                 "model": session["model"],
-                "messages": messages,
+                "latest_file": session.get("latest_file", ""),
                 "api_key": session.get("api_key", ""),
                 "q1_preview": session.get("q1", ""),
             }

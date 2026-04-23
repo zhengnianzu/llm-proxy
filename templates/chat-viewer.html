@@ -525,12 +525,15 @@ document.getElementById('fileList').addEventListener('scroll', function() {
 // ----------------------------------------------------------------
 // Selection handlers
 // ----------------------------------------------------------------
-function selectAggChain(idx, el) {
+async function selectAggChain(idx, el) {
     if (activeItem) activeItem.classList.remove('active');
     el.classList.add('active');
     activeItem = el;
     const chain = aggChains[idx];
-    renderMessages(chain, `聚合链 #${chain.chain_id}  (${chain.file_count} 个文件)`);
+    const folder = currentFolder();
+    const apiFolder = folder === 'anthropic_agg' ? 'anthropic' : 'openai';
+
+    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     renderDetailPanel({
         api_key: chain.api_key || '',
         model: chain.model || '',
@@ -539,6 +542,19 @@ function selectAggChain(idx, el) {
         last_time: chain.last_time || '',
         file_count: chain.file_count || 1,
     });
+
+    if (chain.latest_file) {
+        try {
+            const res = await fetch(`/logs/${apiFolder}/file?filename=${encodeURIComponent(chain.latest_file)}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            renderMessages(data, `${chain.q1_preview || chain.latest_file}  (${chain.file_count} 个文件)`);
+        } catch(e) {
+            showError(`加载失败：${e.message}`);
+        }
+    } else {
+        chatPanel.innerHTML = '<div class="empty-state"><p>无可用文件</p></div>';
+    }
 }
 
 async function selectFile(item, el, folder) {
