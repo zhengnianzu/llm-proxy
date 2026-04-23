@@ -18,17 +18,6 @@ from utils.log_paths import build_index_path, get_log_dir
 
 _CACHE_LOCK = threading.Lock()
 _LOG_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
-_RECENT_INDEX_LIMIT_DEFAULT = 50000
-_RECENT_INDEX_LIMIT_MAX = 100000
-
-
-def get_recent_index_limit() -> int:
-    raw = os.getenv("LOG_RECENT_INDEX_LIMIT", str(_RECENT_INDEX_LIMIT_DEFAULT)).strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        value = _RECENT_INDEX_LIMIT_DEFAULT
-    return max(1, min(value, _RECENT_INDEX_LIMIT_MAX))
 
 
 def _resolve_req_path(root: Path, req_file: str) -> Optional[Path]:
@@ -62,44 +51,6 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
 
 def _format_time(ts: str) -> str:
     return ts.replace("_", " ", 1).replace("_", ".").replace("-", ":") if ts else ""
-
-
-def _tail_index_entries(index_path: Path, root: Path, limit: int) -> List[Dict[str, Any]]:
-    if limit <= 0:
-        return []
-
-    try:
-        with index_path.open("rb") as f:
-            f.seek(0, os.SEEK_END)
-            pos = f.tell()
-            if pos <= 0:
-                return []
-
-            buffer = b""
-            needed_newlines = limit + 1
-            chunk_size = 64 * 1024
-            while pos > 0 and buffer.count(b"\n") < needed_newlines:
-                read_size = min(chunk_size, pos)
-                pos -= read_size
-                f.seek(pos)
-                buffer = f.read(read_size) + buffer
-    except OSError:
-        return []
-
-    rows: List[Dict[str, Any]] = []
-    for raw in buffer.splitlines()[-limit:]:
-        line = raw.decode("utf-8", errors="ignore").strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        req_path = _resolve_req_path(root, str(entry.get("req_file", "")))
-        if req_path is None:
-            continue
-        rows.append({"entry": entry, "req_path": req_path})
-    return rows
 
 
 def _read_new_index_entries(
@@ -250,23 +201,17 @@ def _build_state(root_dir: str) -> Dict[str, Any]:
         "initialized": False,
         "line_count": 0,
         "byte_offset": 0,
-        "scanned": set(),
         "known_keys": set(),
-        "list_items": {},
-        "agg_chains": OrderedDict(),
+        "sessions": OrderedDict(),  # key=first_ts, value={q1, model, ...}
+        "_chain_map": {},  # chain_key -> first_ts (内存映射，不持久化)
     }
 
 
-_STATE_FILE = ".session_state.json"
-_CHAINS_FILE = ".session_chain_keys.json"
+_CACHE_FILE = ".session_cache.json"
 
 
-def _state_file_path(root_dir: str) -> str:
-    return os.path.join(root_dir, _STATE_FILE)
-
-
-def _chains_file_path(root_dir: str) -> str:
-    return os.path.join(root_dir, _CHAINS_FILE)
+def _cache_file_path(root_dir: str) -> str:
+    return os.path.join(root_dir, _CACHE_FILE)
 
 
 def _save_state_to_disk(state: Dict[str, Any]) -> None:
@@ -274,27 +219,20 @@ def _save_state_to_disk(state: Dict[str, Any]) -> None:
     root_dir = state["root_dir"]
     try:
         os.makedirs(root_dir, exist_ok=True)
-
-        state_payload = {
+        # sessions 持久化时去掉 _best_req_count（内部字段）
+        sessions_out = {}
+        for ts_key, s in state["sessions"].items():
+            sessions_out[ts_key] = {k: v for k, v in s.items() if not k.startswith("_")}
+        payload = {
             "byte_offset": state["byte_offset"],
             "line_count": state["line_count"],
-            "list_items": state["list_items"],
-            "scanned_list": list(state["scanned"]),
             "known_keys": list(state["known_keys"]),
+            "sessions": sessions_out,
         }
-        tmp = _state_file_path(root_dir) + ".tmp"
+        tmp = _cache_file_path(root_dir) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state_payload, f, ensure_ascii=False)
-        os.replace(tmp, _state_file_path(root_dir))
-
-        chains_payload = {
-            "byte_offset": state["byte_offset"],
-            "chains": [[k, v] for k, v in state["agg_chains"].items()],
-        }
-        tmp = _chains_file_path(root_dir) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(chains_payload, f, ensure_ascii=False)
-        os.replace(tmp, _chains_file_path(root_dir))
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, _cache_file_path(root_dir))
     except OSError:
         pass
 
@@ -302,21 +240,15 @@ def _save_state_to_disk(state: Dict[str, Any]) -> None:
 def _load_state_from_disk(state: Dict[str, Any]) -> bool:
     """从磁盘恢复持久化状态。成功返回 True，失败返回 False（调用方应全量重建）。"""
     root_dir = state["root_dir"]
-    state_path = _state_file_path(root_dir)
-    chains_path = _chains_file_path(root_dir)
+    cache_path = _cache_file_path(root_dir)
 
-    if not os.path.isfile(state_path) or not os.path.isfile(chains_path):
+    if not os.path.isfile(cache_path):
         return False
 
     try:
-        with open(state_path, "r", encoding="utf-8") as f:
+        with open(cache_path, "r", encoding="utf-8") as f:
             sp = json.load(f)
-        with open(chains_path, "r", encoding="utf-8") as f:
-            cp = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return False
-
-    if sp.get("byte_offset") != cp.get("byte_offset"):
         return False
 
     byte_offset = sp.get("byte_offset", 0)
@@ -325,15 +257,19 @@ def _load_state_from_disk(state: Dict[str, Any]) -> bool:
 
     state["byte_offset"] = byte_offset
     state["line_count"] = sp.get("line_count", 0)
-    state["list_items"] = sp.get("list_items", {})
-    state["scanned"] = set(sp.get("scanned_list", []))
     state["known_keys"] = set(sp.get("known_keys", []))
 
-    agg = OrderedDict()
-    for pair in cp.get("chains", []):
-        if isinstance(pair, list) and len(pair) == 2:
-            agg[pair[0]] = pair[1]
-    state["agg_chains"] = agg
+    sessions = OrderedDict()
+    chain_map = {}
+    raw_sessions = sp.get("sessions", {})
+    if isinstance(raw_sessions, dict):
+        for ts_key, s in raw_sessions.items():
+            sessions[ts_key] = s
+            # 重建 _chain_map: api_key||q1 -> ts_key
+            ck = f"{s.get('api_key', '')}||{s.get('q1', '')}"
+            chain_map[ck] = ts_key
+    state["sessions"] = sessions
+    state["_chain_map"] = chain_map
 
     return True
 
@@ -352,18 +288,12 @@ def _state(kind: str, root_dir: str) -> Dict[str, Any]:
 
 
 def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_entry: Optional[Dict[str, Any]] = None) -> bool:
-    req_key = str(req_path.resolve())
-    if req_key in state["scanned"]:
-        return False
-
     data = _load_json(req_path)
     if not data:
-        state["scanned"].add(req_key)
         return False
 
     messages = data.get("messages")
     if not isinstance(messages, list):
-        state["scanned"].add(req_key)
         return False
 
     filename = req_path.name
@@ -371,17 +301,8 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     model = str(data.get("model", "") or (index_entry or {}).get("model", "") or "")
     message_count = len(messages)
     api_key = str((index_entry or {}).get("api_key", "") or "")
-
-    state["list_items"][filename] = {
-        "filename": filename,
-        "message_count": message_count,
-        "model": model,
-        "ts": ts,
-        "api_key": api_key,
-    }
     state["known_keys"].add(api_key)
 
-    # Prefer pre-computed chain_key from index_entry; fallback to parsing messages
     if index_entry and index_entry.get("chain_key"):
         chain_key = index_entry["chain_key"]
     elif kind == "anthropic":
@@ -389,70 +310,54 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     else:
         chain_key = _openai_chain_key(messages)
 
-    # Prepend api_key so different keys aggregate separately
-    chain_key = f"{api_key}||{chain_key}"
-
+    lookup_key = f"{api_key}||{chain_key}"
     q1_preview = (index_entry or {}).get("q1_preview", "")
 
-    if kind == "anthropic":
-        res_content = _extract_anthropic_res_content(req_path.with_name(filename.replace("-req.json", "-res.json")))
-    else:
-        res_content = _extract_openai_res_content(req_path.with_name(filename.replace("-req.json", "-res.json")))
+    res_path = req_path.with_name(filename.replace("-req.json", "-res.json"))
+    has_res = res_path.is_file()
+    full_message_count = message_count + (1 if has_res else 0)
 
-    chain = state["agg_chains"].get(chain_key)
-    full_message_count = message_count + (1 if res_content is not None else 0)
+    trace_entry = {"filename": filename, "model": model, "msg_count": full_message_count, "ts": ts}
 
-    # Detect new session: if current request has fewer messages than the
-    # existing chain's best, it's a brand-new conversation starting over
-    # with the same q1 — split into a separate chain.
-    if chain is not None and message_count < chain["best_req_count"]:
+    chain_map = state["_chain_map"]
+    session_key = chain_map.get(lookup_key)
+    session = state["sessions"].get(session_key) if session_key else None
+
+    # Detect new session: message_count dropped means a new conversation with same q1
+    if session is not None and message_count < session.get("_best_req_count", 0):
         suffix = 1
-        new_key = f"{chain_key}##session_{suffix}"
-        while new_key in state["agg_chains"]:
+        new_lookup = f"{lookup_key}##session_{suffix}"
+        while new_lookup in chain_map:
             suffix += 1
-            new_key = f"{chain_key}##session_{suffix}"
-        chain_key = new_key
-        chain = None
+            new_lookup = f"{lookup_key}##session_{suffix}"
+        lookup_key = new_lookup
+        session = None
 
-    if chain is None:
-        chain = {
-            "chain_id": len(state["agg_chains"]),
-            "chain_key": chain_key if kind == "openai" else None,
-            "messages": list(messages),
-            "res_content": res_content,
-            "file_count": 0,
-            "message_count": full_message_count,
+    if session is None:
+        session_key = ts
+        session = {
+            "q1": q1_preview or chain_key[:200],
             "model": model,
+            "latest_file": filename,
+            "msg_count": full_message_count,
+            "api_key": api_key,
             "first_ts": ts,
             "last_ts": ts,
-            "best_req_count": message_count,
-            "api_key": api_key,
-            "q1_preview": q1_preview,
+            "trace_list": [trace_entry],
+            "_best_req_count": message_count,
         }
-        state["agg_chains"][chain_key] = chain
+        state["sessions"][session_key] = session
+        chain_map[lookup_key] = session_key
     else:
-        if ts and (not chain["first_ts"] or ts < chain["first_ts"]):
-            chain["first_ts"] = ts
-        if ts and (not chain["last_ts"] or ts > chain["last_ts"]):
-            chain["last_ts"] = ts
-        has_better_payload = (
-            message_count > chain["best_req_count"]
-            or (message_count == chain["best_req_count"] and res_content is not None and chain["res_content"] is None)
-        )
-        if has_better_payload:
-            chain["messages"] = list(messages)
-            chain["res_content"] = res_content
-            chain["best_req_count"] = message_count
-            chain["message_count"] = full_message_count
-            chain["model"] = model or chain["model"]
+        session["last_ts"] = ts
+        session["trace_list"].append(trace_entry)
+        if message_count > session.get("_best_req_count", 0) or \
+           (message_count == session.get("_best_req_count", 0) and has_res):
+            session["latest_file"] = filename
+            session["msg_count"] = full_message_count
+            session["_best_req_count"] = message_count
+            session["model"] = model or session["model"]
 
-    chain["file_count"] += 1
-    if full_message_count > chain["message_count"]:
-        chain["message_count"] = full_message_count
-    if model and not chain["model"]:
-        chain["model"] = model
-
-    state["scanned"].add(req_key)
     return True
 
 
@@ -464,9 +369,8 @@ def _refresh_state(kind: str, root_dir: str) -> None:
     # Phase 1: 首次调用时尝试从磁盘恢复持久化状态
     if not state["initialized"]:
         if not _load_state_from_disk(state):
-            state["list_items"].clear()
-            state["agg_chains"].clear()
-            state["scanned"].clear()
+            state["sessions"].clear()
+            state["_chain_map"].clear()
             state["byte_offset"] = 0
             state["line_count"] = 0
 
@@ -476,36 +380,17 @@ def _refresh_state(kind: str, root_dir: str) -> None:
 
         if new_offset == 0 and state["byte_offset"] > 0:
             # 文件被截断/轮转 — 全量重建
-            state["list_items"].clear()
-            state["agg_chains"].clear()
-            state["scanned"].clear()
+            state["sessions"].clear()
+            state["_chain_map"].clear()
             state["byte_offset"] = 0
             state["line_count"] = 0
-            rows = _tail_index_entries(index_path, root, get_recent_index_limit())
-            try:
-                new_offset = index_path.stat().st_size
-            except OSError:
-                new_offset = 0
+            rows, new_offset = _read_new_index_entries(index_path, root, 0)
 
         if rows:
             for row in rows:
                 _process_req_row(kind, state, row["req_path"], row["entry"])
             state["line_count"] += len(rows)
             state["byte_offset"] = new_offset
-            # Phase 3: 窗口裁剪 — 防止无限累积
-            recent_limit = get_recent_index_limit()
-            if state["line_count"] > int(recent_limit * 1.2):
-                state["list_items"].clear()
-                state["agg_chains"].clear()
-                state["scanned"].clear()
-                pruned_rows = _tail_index_entries(index_path, root, recent_limit)
-                for row in pruned_rows:
-                    _process_req_row(kind, state, row["req_path"], row["entry"])
-                state["line_count"] = len(pruned_rows)
-                try:
-                    state["byte_offset"] = index_path.stat().st_size
-                except OSError:
-                    pass
             _save_state_to_disk(state)
         elif new_offset != state["byte_offset"]:
             state["byte_offset"] = new_offset
@@ -522,59 +407,80 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
     with _CACHE_LOCK:
         _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
-        items = [
-            {k: v for k, v in item.items() if k != "ts"}
-            for item in current_state["list_items"].values()
-            if item.get("message_count", 0) >= min_messages
-            and (not api_key or (item.get("api_key", "") or "") == api_key)
-        ]
-        items.sort(
-            key=lambda item: current_state["list_items"][item["filename"]].get("ts", item["filename"]),
-            reverse=True,
-        )
+        # 从所有 session 的 trace_list 展开
+        items = []
+        for session in current_state["sessions"].values():
+            if api_key and (session.get("api_key", "") or "") != api_key:
+                continue
+            for trace in session.get("trace_list", []):
+                if trace.get("msg_count", 0) >= min_messages:
+                    items.append({
+                        "filename": trace["filename"],
+                        "message_count": trace["msg_count"],
+                        "model": trace.get("model", ""),
+                        "api_key": session.get("api_key", ""),
+                    })
+        items.sort(key=lambda x: x["filename"], reverse=True)
         total = len(items)
         paged = items[offset:offset + limit] if limit > 0 else items[offset:]
         return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"])}
+
 
 def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         _refresh_state(kind, root_dir)
         current_state = _state(kind, root_dir)
-        chains = []
-        for chain in current_state["agg_chains"].values():
-            if api_key and (chain.get("api_key", "") or "") != api_key:
+        root = Path(root_dir)
+        sessions = []
+        for session in current_state["sessions"].values():
+            if api_key and (session.get("api_key", "") or "") != api_key:
                 continue
-            full_messages = list(chain["messages"])
-            if chain["res_content"] is not None:
-                if kind == "anthropic":
-                    full_messages.append({
-                        "role": "assistant",
-                        "content": chain["res_content"],
-                        "_from_res": True,
-                    })
-                else:
-                    full_messages.append({**chain["res_content"], "_from_res": True})
-            if len(full_messages) < min_messages:
+            if session.get("msg_count", 0) < min_messages:
                 continue
-            payload = {
-                "chain_id": chain["chain_id"],
-                "first_time": _format_time(chain["first_ts"]),
-                "last_time": _format_time(chain["last_ts"]),
-                "file_count": chain["file_count"],
-                "message_count": len(full_messages),
-                "model": chain["model"],
-                "messages": full_messages,
-                "api_key": chain.get("api_key", ""),
-                "q1_preview": chain.get("q1_preview", ""),
-            }
-            if kind == "openai":
-                payload["chain_key"] = chain["chain_key"]
-            chains.append(payload)
+            sessions.append(session)
 
-        chains.sort(key=lambda item: item["last_time"], reverse=True)
-        total = len(chains)
-        paged = chains[offset:offset + limit] if limit > 0 else chains[offset:]
-        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"])}
+        sessions.sort(key=lambda s: s.get("last_ts", ""), reverse=True)
+        total = len(sessions)
+        paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
+
+        # 只对当前页按需读取 messages
+        items = []
+        for session in paged:
+            best = session.get("latest_file", "")
+            req_path = root / best if best else None
+            messages = []
+            if req_path and req_path.is_file():
+                req_data = _load_json(req_path)
+                if req_data and isinstance(req_data.get("messages"), list):
+                    messages = req_data["messages"]
+            # 追加 res content
+            if best:
+                res_path = root / best.replace("-req.json", "-res.json")
+                if res_path.is_file():
+                    if kind == "anthropic":
+                        res_content = _extract_anthropic_res_content(res_path)
+                        if res_content is not None:
+                            messages = list(messages)
+                            messages.append({"role": "assistant", "content": res_content, "_from_res": True})
+                    else:
+                        res_content = _extract_openai_res_content(res_path)
+                        if res_content is not None:
+                            messages = list(messages)
+                            messages.append({**res_content, "_from_res": True})
+
+            payload = {
+                "first_time": _format_time(session["first_ts"]),
+                "last_time": _format_time(session["last_ts"]),
+                "file_count": len(session.get("trace_list", [])),
+                "message_count": len(messages) if messages else session.get("msg_count", 0),
+                "model": session["model"],
+                "messages": messages,
+                "api_key": session.get("api_key", ""),
+                "q1_preview": session.get("q1", ""),
+            }
+            items.append(payload)
+
+        return {"items": items, "total": total, "known_keys": sorted(current_state["known_keys"])}
 
 def register_log_routes(app: FastAPI) -> None:
     def anthropic_log_dir() -> str:

@@ -32,7 +32,7 @@ from utils.metrics import (
     get_metrics_storage_info,
 )
 from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix
-from utils.log_routes import get_recent_index_limit, register_log_routes
+from utils.log_routes import register_log_routes
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
 
