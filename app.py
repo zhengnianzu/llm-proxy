@@ -32,7 +32,7 @@ from utils.metrics import (
     get_metrics_storage_info,
 )
 from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix
-from utils.log_routes import register_log_routes
+from utils.log_routes import register_log_routes, _get_text_from_content, _strip_sender_prefix, _find_real_user_query_anthropic
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
 
@@ -457,61 +457,6 @@ def _load_index_anthropic():
                     pass
 
 
-def _get_text_from_content(content):
-    """从 message content 中提取纯文本"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                return block.get("text", "")
-        return str(content[0])[:500] if content else ""
-    return str(content)[:500]
-
-
-def _strip_sender_prefix(text):
-    """去掉 OpenClaw 的 Sender (untrusted metadata) 前缀，提取时间戳后的真正用户内容"""
-    m = re.search(r'\[.*?\]\s*', text)
-    if m:
-        return text[m.end():].strip()
-    return text.strip()
-
-
-def _find_real_user_query_anthropic(messages):
-    """
-    找到真正的用户 query：
-    - 如果 messages[0] 是 /new 或 /reset 的固定文本，从后续消息中找第一个
-      包含 text 类型内容的 user 消息（跳过 tool_result 轮）
-    - 去掉 Sender (untrusted metadata) 前缀
-    """
-    if not messages:
-        return ""
-    first_text = _get_text_from_content(messages[0].get("content", ""))
-    is_new_session = first_text.startswith("A new session was started via /new") or first_text.startswith("A new session was started via /reset")
-
-    if is_new_session:
-        # 从 messages[1:] 找第一个 role=user 且包含 text block 的消息
-        for msg in messages[1:]:
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                # 跳过纯 tool_result 的 user 消息
-                has_text = any(b.get("type") == "text" for b in content if isinstance(b, dict))
-                if not has_text:
-                    continue
-            real_text = _get_text_from_content(content)
-            if real_text.startswith("Sender (untrusted metadata)"):
-                real_text = _strip_sender_prefix(real_text)
-            return real_text
-        return ""
-    else:
-        real_text = first_text
-        if real_text.startswith("Sender (untrusted metadata)"):
-            real_text = _strip_sender_prefix(real_text)
-        return real_text
-
-
 def _extract_chain_key_anthropic(messages):
     """提取 Anthropic chain_key（用于聚合判定同一会话）"""
     return _find_real_user_query_anthropic(messages)[:500]
@@ -568,6 +513,7 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         "api_key": api_key,
         "chain_key": _extract_chain_key_anthropic(messages or []),
         "q1_preview": _extract_q1_preview(messages or [], "anthropic"),
+        "start_turn": _find_real_user_query_anthropic(messages or [], return_index=True)[1],
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)

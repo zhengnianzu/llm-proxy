@@ -166,6 +166,55 @@ def _extract_openai_res_content(res_path: Path):
     return None
 
 
+def _get_text_from_content(content) -> str:
+    """从 message content 中提取纯文本"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text", "")
+        return str(content[0])[:500] if content else ""
+    return str(content)[:500]
+
+
+def _strip_sender_prefix(text: str) -> str:
+    """去掉 OpenClaw 的 Sender (untrusted metadata) 前缀"""
+    m = _re.search(r'\[.*?\]\s*', text)
+    if m:
+        return text[m.end():].strip()
+    return text.strip()
+
+
+def _find_real_user_query_anthropic(messages, return_index=False):
+    """找到真正的用户 query 及其在 messages 中的索引。
+    return_index=True 时返回 (text, index) 元组。
+    """
+    if not messages:
+        return ("", 0) if return_index else ""
+    first_text = _get_text_from_content(messages[0].get("content", ""))
+    is_new_session = first_text.startswith("A new session was started via /new") or first_text.startswith("A new session was started via /reset")
+
+    if is_new_session:
+        for i, msg in enumerate(messages[1:], 1):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                if not any(b.get("type") == "text" for b in content if isinstance(b, dict)):
+                    continue
+            real_text = _get_text_from_content(content)
+            if real_text.startswith("Sender (untrusted metadata)"):
+                real_text = _strip_sender_prefix(real_text)
+            return (real_text, i) if return_index else real_text
+        return ("", 0) if return_index else ""
+    else:
+        real_text = first_text
+        if real_text.startswith("Sender (untrusted metadata)"):
+            real_text = _strip_sender_prefix(real_text)
+        return (real_text, 0) if return_index else real_text
+
+
 def _anthropic_chain_key(messages: List[Dict[str, Any]]) -> str:
     if not messages:
         return ""
@@ -323,8 +372,18 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     session_key = chain_map.get(lookup_key)
     session = state["sessions"].get(session_key) if session_key else None
 
-    # Detect new session: message_count dropped means a new conversation with same q1
-    if session is not None and message_count < session.get("_best_req_count", 0):
+    # Detect new session: 真实轮次 = message_count - q1_base
+    # 真实轮次为 1（只有 q1 本身）且已有同 q1 的 session，说明是新会话
+    if kind == "anthropic":
+        st = (index_entry or {}).get("start_turn")
+        if st is not None:
+            q1_base = int(st)
+        else:
+            _, q1_base = _find_real_user_query_anthropic(messages, return_index=True)
+    else:
+        q1_base = 0
+    real_turns = message_count - q1_base
+    if session is not None and real_turns <= 1:
         suffix = 1
         new_lookup = f"{lookup_key}##session_{suffix}"
         while new_lookup in chain_map:
