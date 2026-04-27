@@ -36,6 +36,12 @@ from utils.log_routes import register_log_routes, _get_text_from_content, _strip
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
 
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+
 # 全局默认：是否屏蔽 Task 工具里的 "- Explore:" 行
 BAN_EXPLORE = os.getenv("BAN_EXPLORE", "false").lower() == "true"
 BAN_STREAM = os.getenv("BAN_STREAM", "false").lower() == "true"
@@ -69,6 +75,8 @@ LOGS_SESSION_ANTHROPIC = get_log_dir("logs_session_anthropic")
 LOGS_ANTHROPIC = get_log_dir("logs_anthropic")
 LOGS_SESSION_OPENAI = get_log_dir("logs_session_openai")
 LOGS_OPENAI = get_log_dir("logs_openai")
+LOGS_SESSION_RESPONSES = get_log_dir("logs_session_responses")
+LOGS_RESPONSES = get_log_dir("logs_responses")
 
 
 def _build_debug_dir() -> str:
@@ -418,6 +426,8 @@ def _index_path_for_req_file(req_file: str) -> str:
     anthropic_root = os.path.normpath(LOGS_ANTHROPIC)
     session_openai_root = os.path.normpath(LOGS_SESSION_OPENAI)
     openai_root = os.path.normpath(LOGS_OPENAI)
+    session_responses_root = os.path.normpath(LOGS_SESSION_RESPONSES)
+    responses_root = os.path.normpath(LOGS_RESPONSES)
 
     if req_path == session_anthropic_root or req_path.startswith(session_anthropic_root + os.sep):
         return _build_index_path(LOGS_SESSION_ANTHROPIC)
@@ -427,6 +437,10 @@ def _index_path_for_req_file(req_file: str) -> str:
         return _build_index_path(LOGS_SESSION_OPENAI)
     if req_path == openai_root or req_path.startswith(openai_root + os.sep):
         return _build_index_path(LOGS_OPENAI)
+    if req_path == session_responses_root or req_path.startswith(session_responses_root + os.sep):
+        return _build_index_path(LOGS_SESSION_RESPONSES)
+    if req_path == responses_root or req_path.startswith(responses_root + os.sep):
+        return _build_index_path(LOGS_RESPONSES)
 
     return _build_index_path(os.path.dirname(req_file) or ".")
 
@@ -537,6 +551,65 @@ def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 
         "api_key": api_key,
         "chain_key": _extract_chain_key_openai(messages or []),
         "q1_preview": _extract_q1_preview(messages or [], "openai"),
+    }
+    index_file = _index_path_for_req_file(req_file)
+    os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
+    with open(index_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _extract_chain_key_responses(input_data) -> str:
+    """提取 Responses API chain_key（用于聚合判定同一会话）"""
+    if isinstance(input_data, str):
+        return ("u:" + input_data)[:500]
+    if isinstance(input_data, list):
+        for item in input_data:
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") == "user":
+                content = item.get("content", "")
+                if isinstance(content, str):
+                    return ("u:" + content)[:500]
+                if isinstance(content, list):
+                    texts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "input_text":
+                            texts.append(part.get("text", ""))
+                    return ("u:" + "|".join(texts))[:500]
+    return ""
+
+
+def _extract_q1_preview_responses(input_data) -> str:
+    """提取 Responses API 第一条用户消息的预览文本"""
+    if isinstance(input_data, str):
+        return input_data[:100]
+    if isinstance(input_data, list):
+        for item in input_data:
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") == "user":
+                content = item.get("content", "")
+                if isinstance(content, str):
+                    return content[:100]
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "input_text":
+                            return part.get("text", "")[:100]
+    return ""
+
+
+def _append_index_responses(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True, api_key: str = "", input_data=None):
+    """按日志根目录追加 Responses API 请求记录到 index.jsonl。"""
+    entry = {
+        "ts": ts,
+        "req_file": req_file,
+        "model": model,
+        "tok_in": tok_in,
+        "tok_out": tok_out,
+        "success": success,
+        "api_key": api_key,
+        "chain_key": _extract_chain_key_responses(input_data),
+        "q1_preview": _extract_q1_preview_responses(input_data),
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
@@ -975,7 +1048,11 @@ async def anthropic_messages(req: Request):
             record_validity(connection_established, model)
 
 
-    return StreamingResponse(anthropic_sse_passthrough(), media_type="text/event-stream")
+    return StreamingResponse(
+        anthropic_sse_passthrough(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------- OpenAI Chat Completions ----------
@@ -1224,7 +1301,255 @@ async def openai_chat_completions(req: Request):
             record_request(_tok_in, _tok_out, success=connection_established, model=model)
             _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []))
 
-    return StreamingResponse(sse_passthrough(), media_type="text/event-stream")
+    return StreamingResponse(
+        sse_passthrough(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------- OpenAI Responses API ----------
+@app.post("/v1/responses")
+async def openai_responses(req: Request):
+    """
+    OpenAI Responses API endpoint:
+      - non-stream: upstream JSON pass-through
+      - stream: upstream SSE pass-through (event: xxx\ndata: {...})
+    """
+    _api_key = await validate_api_key(req)
+    body = await req.json()
+    stream = bool(body.get("stream", False))
+    body_model = body.get("model")
+    ban_explore = BAN_EXPLORE
+
+    model_from_body: Optional[str] = body_model if isinstance(body_model, str) else None
+    suffix = "--ban_explore"
+    if model_from_body and model_from_body.endswith(suffix):
+        ban_explore = True
+        base_model = model_from_body[: -len(suffix)]
+        model = _resolve_model_name(base_model or "byenv")
+    else:
+        model = _resolve_model_name(body_model)
+
+    # session相关
+    session_id = None
+    session_metadata = body.get("metadata")
+    if isinstance(session_metadata, dict):
+        user_id = session_metadata.get("user_id") or ""
+        m = re.search(r"session_([A-Za-z0-9-]+)", str(user_id))
+        if m:
+            session_id = m.group(1)
+    else:
+        session_id = req.headers.get("X-Session-Id")
+
+    # 保存请求/响应日志
+    if session_id:
+        os.makedirs(LOGS_SESSION_RESPONSES, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
+        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_RESPONSES, f"*_{session_id}")))
+        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_RESPONSES, f"{ts}_{session_id}")
+        os.makedirs(session_dir, exist_ok=True)
+        req_path = os.path.join(session_dir, f"{ts}-req.json")
+        res_path = os.path.join(session_dir, f"{ts}-res.json")
+        head_path = os.path.join(session_dir, f"{ts}-headers.json")
+    else:
+        os.makedirs(LOGS_RESPONSES, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
+        req_path = os.path.join(LOGS_RESPONSES, f"{ts}-req.json")
+        res_path = os.path.join(LOGS_RESPONSES, f"{ts}-res.json")
+        head_path = os.path.join(LOGS_RESPONSES, f"{ts}-headers.json")
+
+    upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/responses"
+    verify = _ssl_verify()
+
+    x_auth_token = await get_x_auth_token(req)
+    upstream_headers = build_upstream_headers(x_auth_token, model)
+    body["model"] = upstream_headers['Model-Id']
+
+    # ban_explore 处理 tools
+    tools = _strip_task_explore_line(body.get("tools"), ban_explore=ban_explore)
+    if tools is not None:
+        body["tools"] = tools
+    elif "tools" in body:
+        body.pop("tools", None)
+
+    headers = dict()
+    headers.update(upstream_headers)
+    _dump_json(head_path, headers)
+    _dump_json(req_path, body)
+
+    input_data = body.get("input")
+
+    # ---- non-stream ----
+    if not stream:
+        r = None
+        last_exception = None
+        success = False
+        upstream_attempts = 0
+        try:
+            async with httpx.AsyncClient(
+                    verify=verify,
+                    timeout=httpx.Timeout(500.0),
+                    trust_env=TRUST_ENV,
+            ) as client:
+                for attempt in range(MAX_RETRIES):
+                    upstream_attempts += 1
+                    try:
+                        r = await client.post(upstream_url, headers=upstream_headers, json=body)
+                        last_exception = None
+                        if r.status_code == 200:
+                            success = True
+                            break
+                        _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                        logging.warning(f"Attempt {attempt} non-200 (responses non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
+                    except Exception as e:
+                        last_exception = e
+                        logging.warning(f"Attempt {attempt} upstream error (responses non-stream): {e}")
+
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(0.5)
+                        x_auth_token = await get_x_auth_token(req)
+                        upstream_headers = build_upstream_headers(x_auth_token, model)
+        except Exception as e:
+            last_exception = e
+            logging.error(f"Failed to create httpx client (responses non-stream): {e}")
+
+        if not success:
+            if r is not None:
+                error_msg = f"HTTP {r.status_code}"
+                logging.error(f"All retries exhausted (responses non-stream), passing through: {error_msg}")
+                _dump_json(res_path, _resp_to_obj(r))
+                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data)
+                record_request(0, 0, success=False, model=model)
+                return Response(
+                    content=r.content,
+                    status_code=r.status_code,
+                    media_type=r.headers.get("content-type", "application/json"),
+                )
+            else:
+                error_msg = str(last_exception) if last_exception else "unknown"
+                logging.error(f"All retries exhausted (responses non-stream): {error_msg}")
+                _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data)
+                return JSONResponse(
+                    status_code=502,
+                    content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
+                )
+
+        _dump_json(res_path, _resp_to_obj(r))
+        tok_in, tok_out = 0, 0
+        try:
+            resp_json = r.json()
+            usage = resp_json.get("usage", {})
+            tok_in = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+            tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+            record_request(tok_in, tok_out, success=r.status_code < 400, model=model)
+        except Exception:
+            record_request(success=r.status_code < 400, model=model)
+        _append_index_responses(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data)
+        return Response(
+            content=r.content,
+            status_code=r.status_code,
+            media_type=r.headers.get("content-type", "application/json"),
+        )
+
+    # ---- stream SSE (Responses API pass-through) ----
+    async def responses_sse_passthrough() -> AsyncIterator[bytes]:
+        up_chunks: List[Any] = []
+        connection_established = False
+        upstream_attempts = 0
+        last_exception = None
+        last_retry_status = None
+        retry_headers = upstream_headers
+        retry_token = x_auth_token
+
+        try:
+            async with httpx.AsyncClient(
+                    verify=verify,
+                    timeout=httpx.Timeout(500.0),
+                    trust_env=TRUST_ENV,
+            ) as client:
+                for attempt in range(MAX_RETRIES):
+                    upstream_attempts += 1
+                    try:
+                        async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
+                            up_chunks.append({
+                                "type": "responses_passthrough_sse_meta",
+                                "status_code": r.status_code,
+                                "headers": dict(r.headers),
+                            })
+
+                            if r.status_code != 200:
+                                err = await r.aread()
+                                last_retry_err_text = err.decode("utf-8", errors="replace")
+                                last_retry_status = r.status_code
+                                up_chunks.append({"type": "error_body", "body": last_retry_err_text})
+                                _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
+                                logging.warning(f"Attempt {attempt} non-200 (responses stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
+                                if attempt < MAX_RETRIES - 1:
+                                    await asyncio.sleep(0.5)
+                                    retry_token = await get_x_auth_token(req)
+                                    retry_headers = build_upstream_headers(retry_token, model)
+                                continue
+
+                            connection_established = True
+
+                            # Pure pass-through: tee raw bytes to client and capture for logging
+                            raw_buf = bytearray()
+                            async for raw in r.aiter_bytes():
+                                raw_buf.extend(raw)
+                                yield raw
+
+                            # Parse captured SSE for logging (best-effort)
+                            for line in raw_buf.decode("utf-8", errors="replace").splitlines():
+                                if line.startswith("data:"):
+                                    data_part = line[5:].strip()
+                                    if data_part and data_part != "[DONE]":
+                                        try:
+                                            up_chunks.append(json.loads(data_part))
+                                        except json.JSONDecodeError:
+                                            pass
+                            return
+
+                    except Exception as e:
+                        if connection_established:
+                            logging.warning(f"Stream interrupted (responses stream): {e}")
+                            return
+                        last_exception = e
+                        logging.warning(f"Attempt {attempt} upstream error (responses stream): {e}")
+                        if attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(0.5)
+                            retry_token = await get_x_auth_token(req)
+                            retry_headers = build_upstream_headers(retry_token, model)
+
+                # All retries exhausted
+                error_msg = str(last_exception) if last_exception else (f"HTTP {last_retry_status}" if last_retry_status else "unknown")
+                logging.error(f"All retries exhausted (responses stream): {error_msg}")
+                error_data = {"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}}
+                yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+
+        except Exception as e:
+            logging.error(f"Failed to create httpx client (responses stream): {e}")
+            error_data = {"error": {"message": str(e), "type": "connection_error"}}
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+        finally:
+            _dump_json(res_path, {"type": "responses_passthrough_sse_capture", "chunks": up_chunks})
+            _tok_in, _tok_out = 0, 0
+            for _c in up_chunks:
+                if isinstance(_c, dict):
+                    _u = _c.get("usage") or {}
+                    _tok_in = _tok_in or (_u.get("input_tokens") or _u.get("prompt_tokens") or 0)
+                    _tok_out = _tok_out or (_u.get("output_tokens") or _u.get("completion_tokens") or 0)
+            record_request(_tok_in, _tok_out, success=connection_established, model=model)
+            _append_index_responses(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data)
+
+    return StreamingResponse(
+        responses_sse_passthrough(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ===============================================
