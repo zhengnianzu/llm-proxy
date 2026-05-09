@@ -1056,6 +1056,7 @@ async def anthropic_messages(req: Request):
 
 
 # ---------- OpenAI Chat Completions ----------
+@app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def openai_chat_completions(req: Request):
     """
