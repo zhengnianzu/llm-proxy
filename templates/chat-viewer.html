@@ -218,21 +218,92 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* ========= Search & Hide Tools ========= */
+        /* ========= Search ========= */
         .search-box {
             padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px;
             font-size: 13px; width: 180px; outline: none;
         }
         .search-box:focus { border-color: #3b82f6; }
         .search-box::placeholder { color: #9ca3af; }
-        .toggle-label {
-            display: inline-flex; align-items: center; gap: 5px;
-            font-size: 13px; color: #6b7280; cursor: pointer; white-space: nowrap; user-select: none;
+
+        /* ========= Tool mode bar ========= */
+        .tool-mode-bar {
+            display: flex; align-items: center; gap: 8px; margin: 0 0 12px 0; flex-wrap: wrap;
         }
-        .toggle-label input { cursor: pointer; }
-        .chat-panel.hide-tools .block.tool-use,
-        .chat-panel.hide-tools .block.tool-result,
-        .chat-panel.hide-tools .block.tool-role { display: none; }
+        .tool-mode-bar .mode-btn {
+            padding: 4px 12px; font-size: 12px; border: 1px solid #d1d5db;
+            border-radius: 4px; background: #fff; cursor: pointer; color: #374151;
+        }
+        .tool-mode-bar .mode-btn:hover { background: #f3f4f6; }
+        .tool-mode-bar .mode-btn.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+        .tool-filter-chips {
+            display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 10px 0;
+        }
+        .tool-filter-chip {
+            padding: 2px 10px; font-size: 11px; border: 1px solid #d1d5db;
+            border-radius: 12px; background: #fff; cursor: pointer; color: #374151;
+            font-family: monospace;
+        }
+        .tool-filter-chip:hover { background: #f3f4f6; }
+        .tool-filter-chip.active { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
+        .tool-badge-row {
+            background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db;
+            border-radius: 4px; font-family: monospace; position: relative; z-index: 1;
+            padding: 4px 10px; margin: 4px 0; font-size: 11px; display: flex; gap: 6px; flex-wrap: wrap;
+        }
+        .tool-badge-chip {
+            background: #e5e7eb; padding: 1px 8px; border-radius: 10px; font-size: 11px;
+        }
+
+        /* ========= Reasoning / thinking ========= */
+        .block.reasoning { background: #faf5ff; border: 1px solid #e9d5ff; border-radius: 10px; overflow: hidden; }
+        .reasoning-summary {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 14px; cursor: pointer; user-select: none;
+            font-size: 13px; color: #7c3aed; font-weight: 500;
+            background: rgba(0,0,0,.02);
+        }
+        .reasoning-summary:hover { background: rgba(124,58,237,.06); }
+        .reasoning-chevron { font-size: 10px; transition: transform .15s; }
+        .reasoning-chevron.collapsed { transform: rotate(-90deg); }
+        .reasoning-body {
+            padding: 10px 14px; font-size: 13px; color: #4c1d95;
+            white-space: pre-wrap; border-top: 1px solid #e9d5ff;
+            max-height: 380px; overflow-y: auto; background: #fff;
+        }
+        .reasoning-body.collapsed { display: none; }
+
+        /* ========= System prompt ========= */
+        .block.system-prompt { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; overflow: hidden; margin-bottom: 12px; }
+        .system-summary {
+            display: flex; align-items: center; gap: 8px;
+            padding: 7px 12px; cursor: pointer; user-select: none;
+            font-size: 12px; color: #475569; font-weight: 600;
+            background: #f1f5f9;
+        }
+        .system-summary:hover { background: #e2e8f0; }
+        .system-chevron { font-size: 10px; transition: transform .15s; }
+        .system-chevron.collapsed { transform: rotate(-90deg); }
+        .system-body {
+            padding: 10px 14px; font-size: 12px; color: #334155;
+            white-space: pre-wrap; border-top: 1px solid #cbd5e1;
+            max-height: 300px; overflow-y: auto;
+        }
+        .system-body.collapsed { display: none; }
+
+        /* ========= Scroll to bottom ========= */
+        .scroll-to-bottom {
+            position: absolute; bottom: 20px; right: 20px;
+            width: 36px; height: 36px; border-radius: 50%;
+            background: rgba(15, 23, 42, 0.7); color: #fff;
+            border: none; cursor: pointer; font-size: 16px;
+            display: none; align-items: center; justify-content: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,.2);
+            transition: opacity .2s;
+            z-index: 10;
+        }
+        .scroll-to-bottom:hover { background: rgba(15, 23, 42, 0.9); }
+        .chat-panel { position: relative; }
     </style>
 </head>
 <body>
@@ -253,10 +324,8 @@
     <div class="header-right">
         <span class="min-msg-label">文件夹</span>
         <select class="folder-select" id="folderSelect" onchange="resetAndLoad()">
-            <option value="anthropic_agg">logs_anthropic（聚合）</option>
-            <option value="anthropic">logs_anthropic（单文件）</option>
-            <option value="openai_agg">logs_openai（聚合）</option>
-            <option value="openai">logs_openai（单文件）</option>
+            <option value="agg">聚合视图</option>
+            <option value="list">单文件列表</option>
         </select>
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
@@ -265,15 +334,16 @@
             <option value="">全部</option>
         </select>
         <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
-        <input class="search-box" type="text" id="q1Search" placeholder="搜索对话内容..." oninput="filterSidebar()" />
-        <label class="toggle-label"><input type="checkbox" id="hideTools" onchange="toggleHideTools()">隐藏工具</label>
     </div>
 </div>
 
 <div class="main">
     <!-- Left: file list -->
     <div class="sidebar">
-        <div class="sidebar-hdr" id="sidebarTitle">logs_anthropic</div>
+        <div class="sidebar-hdr" id="sidebarTitle">对话日志</div>
+        <div style="padding:8px 10px; border-bottom:1px solid #f3f4f6;">
+            <input class="search-box" type="text" id="q1Search" placeholder="搜索对话内容..." oninput="filterSidebar()" style="width:100%;" />
+        </div>
         <div class="file-list" id="fileList">
             <div class="sidebar-tip"><span class="spinner"></span>加载中…</div>
         </div>
@@ -290,6 +360,7 @@
             </svg>
             <p>从左侧选择一个对话文件</p>
         </div>
+        <button class="scroll-to-bottom" id="scrollToBottom" onclick="chatPanel.scrollTo({top: chatPanel.scrollHeight, behavior: 'smooth'})">&#x2193;</button>
     </div>
 
     <!-- Right: detail panel -->
@@ -323,9 +394,8 @@ function currentFolder() {
     return document.getElementById('folderSelect').value;
 }
 
-function getKind() {
-    const f = currentFolder();
-    return f.startsWith('openai') ? 'openai' : 'anthropic';
+function isAggMode() {
+    return currentFolder() === 'agg';
 }
 
 function maskKey(key) {
@@ -396,11 +466,10 @@ async function loadFileList(refresh = false) {
     if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
     if (refresh) params += '&refresh=true';
 
-    if (folder === 'anthropic_agg' || folder === 'openai_agg') {
-        const apiFolder = folder === 'anthropic_agg' ? 'anthropic' : 'openai';
-        sidebarTitle.textContent = `logs_${apiFolder} 聚合 (≥${min} 条)`;
+    if (folder === 'anthropic_agg' || folder === 'openai_agg' || folder === 'agg') {
+        sidebarTitle.textContent = `对话聚合 (≥${min} 条)`;
         try {
-            const res = await fetch(`/logs/${apiFolder}/aggregate${params}`);
+            const res = await fetch(`/logs/aggregate${params}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             const items = data.items || [];
@@ -438,8 +507,7 @@ async function loadFileList(refresh = false) {
                 let timestamp = '';
                 let taskText = chain.q1_preview || rawText;
                 if (!chain.q1_preview && chain.chain_key) {
-                    const keyText = chain.chain_key.replace(/^(oq:|u:)/, '');
-                    taskText = keyText;
+                    taskText = chain.chain_key;
                 }
                 const tsMatch = rawText.match(/\[([^\]]+GMT[^\]]*)\]\s*/);
                 if (tsMatch) {
@@ -451,7 +519,7 @@ async function loadFileList(refresh = false) {
 
                 el.innerHTML = `
                     <div class="file-item-name">${esc(preview || '(空)')}</div>
-                    <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${chain.model || '?'}</div>
+                    <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${(chain.models || [chain.model]).filter(Boolean).join(', ') || '?'}</div>
                     <div class="file-item-meta" style="font-size:10px;color:#b5bec8">${esc(timestamp || chain.first_time || '')}</div>
                 `;
                 el.addEventListener('click', () => selectAggChain(globalIdx, el));
@@ -464,10 +532,9 @@ async function loadFileList(refresh = false) {
             isLoadingMore = false;
         }
     } else {
-        const apiFolder = folder;
-        sidebarTitle.textContent = `logs_${apiFolder} (≥${min} 条)`;
+        sidebarTitle.textContent = `单文件列表 (≥${min} 条)`;
         try {
-            const res = await fetch(`/logs/${apiFolder}/list${params}`);
+            const res = await fetch(`/logs/list${params}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             const items = data.items || [];
@@ -489,7 +556,7 @@ async function loadFileList(refresh = false) {
                     <div class="file-item-name">${ts}</div>
                     <div class="file-item-meta">${item.message_count} 条 · ${item.model || '未知模型'}</div>
                 `;
-                el.addEventListener('click', () => selectFile(item, el, apiFolder));
+                el.addEventListener('click', () => selectFile(item, el));
                 fileListEl.appendChild(el);
             });
             updateLoadStatus();
@@ -530,13 +597,11 @@ async function selectAggChain(idx, el) {
     el.classList.add('active');
     activeItem = el;
     const chain = aggChains[idx];
-    const folder = currentFolder();
-    const apiFolder = folder === 'anthropic_agg' ? 'anthropic' : 'openai';
 
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     renderDetailPanel({
         api_key: chain.api_key || '',
-        model: chain.model || '',
+        models: chain.models || (chain.model ? [chain.model] : []),
         message_count: chain.message_count || 0,
         first_time: chain.first_time || '',
         last_time: chain.last_time || '',
@@ -545,7 +610,7 @@ async function selectAggChain(idx, el) {
 
     if (chain.latest_file) {
         try {
-            const res = await fetch(`/logs/${apiFolder}/file?filename=${encodeURIComponent(chain.latest_file)}`);
+            const res = await fetch(`/logs/file?filename=${encodeURIComponent(chain.latest_file)}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             renderMessages(data, `${chain.q1_preview || chain.latest_file}  (${chain.file_count} 个文件)`);
@@ -557,19 +622,19 @@ async function selectAggChain(idx, el) {
     }
 }
 
-async function selectFile(item, el, folder) {
+async function selectFile(item, el) {
     if (activeItem) activeItem.classList.remove('active');
     el.classList.add('active');
     activeItem = el;
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
-        const res = await fetch(`/logs/${folder}/file?filename=${encodeURIComponent(item.filename)}`);
+        const res = await fetch(`/logs/file?filename=${encodeURIComponent(item.filename)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         renderMessages(data, item.filename);
         renderDetailPanel({
             api_key: item.api_key || '',
-            model: data.model || item.model || '',
+            models: [data.model || item.model].filter(Boolean),
             message_count: (data.messages || []).length,
             filename: item.filename,
         });
@@ -587,8 +652,8 @@ function renderDetailPanel(data) {
     if (data.api_key) {
         html += `<div class="detail-item"><div class="detail-label">API Key</div><div class="detail-value">${esc(maskKey(data.api_key))}</div></div>`;
     }
-    if (data.model) {
-        html += `<div class="detail-item"><div class="detail-label">模型</div><div class="detail-value">${esc(data.model)}</div></div>`;
+    if (data.models && data.models.length) {
+        html += `<div class="detail-item"><div class="detail-label">模型</div><div class="detail-value">${data.models.map(esc).join(', ')}</div></div>`;
     }
     html += `<div class="detail-item"><div class="detail-label">消息数</div><div class="detail-value">${data.message_count || 0}</div></div>`;
     if (data.first_time) {
@@ -615,8 +680,11 @@ function toggleDetail() {
 }
 
 // ----------------------------------------------------------------
-// Render messages (original style)
+// Render messages (enhanced: tool modes, thinking, system collapse)
 // ----------------------------------------------------------------
+let _toolMode = 0;
+let _activeToolFilters = new Set();
+
 function renderMessages(data, filename) {
     chatPanel.innerHTML = '';
     const messages = data.messages ?? (Array.isArray(data) ? data : null);
@@ -625,8 +693,9 @@ function renderMessages(data, filename) {
 
     // Metadata bar
     const isChain = data.chain_id !== undefined;
-    const showMeta = isChain || data.model || data.temperature !== undefined || data.max_tokens;
+    const showMeta = isChain || data.model || data.models || data.temperature !== undefined || data.max_tokens;
     if (showMeta) {
+        const modelDisplay = data.models ? data.models.join(', ') : (data.model || '');
         const meta = document.createElement('div');
         meta.className = 'metadata';
         meta.innerHTML = `
@@ -634,7 +703,7 @@ function renderMessages(data, filename) {
             ${isChain ? `<div class="metadata-item"><strong>链 ID</strong><span>#${data.chain_id}</span></div>` : ''}
             ${isChain ? `<div class="metadata-item"><strong>时间范围</strong><span>${data.first_time} → ${data.last_time}</span></div>` : ''}
             ${isChain ? `<div class="metadata-item"><strong>文件数</strong><span>${data.file_count} 个 req 文件</span></div>` : ''}
-            ${data.model ? `<div class="metadata-item"><strong>模型</strong><span>${data.model}</span></div>` : ''}
+            ${modelDisplay ? `<div class="metadata-item"><strong>模型</strong><span>${modelDisplay}</span></div>` : ''}
             ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${data.temperature}</span></div>` : ''}
             ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${data.max_tokens}</span></div>` : ''}
             <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
@@ -643,12 +712,50 @@ function renderMessages(data, filename) {
         chatPanel.appendChild(meta);
     }
 
+    // Tool mode bar
+    _toolMode = 0;
+    _activeToolFilters = new Set();
+    const modeBar = document.createElement('div');
+    modeBar.className = 'tool-mode-bar';
+    const modeLabels = ['全部显示', '按工具筛选', '简化显示'];
+    const modeBtns = modeLabels.map((label, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'mode-btn' + (i === 0 ? ' active' : '');
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+            _toolMode = i;
+            modeBtns.forEach((b, j) => b.classList.toggle('active', j === i));
+            filterChipsContainer.style.display = i === 1 ? '' : 'none';
+            applyToolMode();
+        });
+        modeBar.appendChild(btn);
+        return btn;
+    });
+    chatPanel.appendChild(modeBar);
+
+    const filterChipsContainer = document.createElement('div');
+    filterChipsContainer.className = 'tool-filter-chips';
+    filterChipsContainer.style.display = 'none';
+    chatPanel.appendChild(filterChipsContainer);
+
+    // Render messages
     messages.forEach(msg => {
         const role = msg.role || 'unknown';
+
+        // System prompt: collapsible
+        if (role === 'system') {
+            chatPanel.appendChild(renderSystemPrompt(msg.content));
+            return;
+        }
+
         let blocks = [];
+        let isToolRow = false;
+        let toolRowType = '';
 
         if (role === 'tool') {
             blocks = [{ type: '_oai_tool_result', tool_call_id: msg.tool_call_id, content: msg.content }];
+            isToolRow = true;
+            toolRowType = 'result';
         } else if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
             if (Array.isArray(msg.content)) {
                 blocks.push(...msg.content);
@@ -656,47 +763,256 @@ function renderMessages(data, filename) {
                 blocks.push({ type: 'text', text: msg.content });
             }
             msg.tool_calls.forEach(tc => blocks.push({ type: '_oai_tool_call', tool_call: tc }));
+            isToolRow = true;
+            toolRowType = 'use';
         } else if (Array.isArray(msg.content)) {
             blocks = msg.content;
+            const hasUse = blocks.some(b => b.type === 'tool_use' || b.type === '_oai_tool_call');
+            const hasResult = blocks.some(b => b.type === 'tool_result' || b.type === '_oai_tool_result');
+            if (hasUse || hasResult) {
+                isToolRow = true;
+                toolRowType = hasUse ? 'use' : 'result';
+            }
         } else {
             blocks = [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
         }
 
+        // OpenAI reasoning_content
+        if (msg.reasoning_content) {
+            blocks = [{ type: 'thinking', thinking: msg.reasoning_content }, ...blocks];
+        }
+
         const displayRole = role === 'tool' ? 'user' : role;
+
+        // Split: text/thinking vs tool blocks
+        const textBlocks = [];
+        const toolBlocks = [];
+        if (isToolRow && toolRowType === 'use') {
+            for (const b of blocks) {
+                const bt = b.type || '';
+                if (bt === 'tool_use' || bt === '_oai_tool_call') {
+                    toolBlocks.push(b);
+                } else {
+                    textBlocks.push(b);
+                }
+            }
+        }
+
+        // Render text/thinking part separately (not affected by tool mode)
+        if (textBlocks.length > 0) {
+            const textRow = document.createElement('div');
+            textRow.className = `msg-row ${displayRole}`;
+            const avatar1 = document.createElement('div');
+            avatar1.className = `avatar ${displayRole}`;
+            avatar1.textContent = displayRole === 'user' ? '👤' : '🤖';
+            const col1 = document.createElement('div');
+            col1.className = 'msg-bubble-col';
+            if (msg._from_res) {
+                const tag = document.createElement('div');
+                tag.style.cssText = 'font-size:10px;color:#6366f1;font-weight:600;margin-bottom:4px;';
+                tag.textContent = '↓ 来自 res 文件的回复';
+                col1.appendChild(tag);
+            }
+            textBlocks.forEach(b => { const el = renderBlock(b); if (el) col1.appendChild(el); });
+            if (displayRole === 'user') {
+                textRow.appendChild(avatar1); textRow.appendChild(col1);
+            } else {
+                textRow.appendChild(col1); textRow.appendChild(avatar1);
+            }
+            chatPanel.appendChild(textRow);
+        }
+
+        // Render tool/main row
         const row = document.createElement('div');
         row.className = `msg-row ${displayRole}`;
-
-        const avatar = document.createElement('div');
-        avatar.className = `avatar ${displayRole}`;
-        avatar.textContent = displayRole === 'user' ? '👤' : displayRole === 'assistant' ? '🤖' : '⚙️';
-
-        const col = document.createElement('div');
-        col.className = 'msg-bubble-col';
-        if (msg._from_res) {
-            const tag = document.createElement('div');
-            tag.style.cssText = 'font-size:10px;color:#6366f1;font-weight:600;margin-bottom:4px;';
-            tag.textContent = '↓ 来自 res 文件的回复';
-            col.appendChild(tag);
+        if (isToolRow) {
+            row.classList.add('tool-row');
+            if (toolRowType === 'use') row.classList.add('tool-use-row');
+            if (toolRowType === 'result') row.classList.add('tool-result-row');
+            // Collect tool names for filtering
+            const names = [];
+            const renderBlocks = toolBlocks.length > 0 ? toolBlocks : blocks;
+            renderBlocks.forEach(b => {
+                if (b.type === 'tool_use') names.push(b.name || 'unknown');
+                else if (b.type === '_oai_tool_call') names.push(b.tool_call?.function?.name || 'unknown');
+                else if (b.type === 'tool_result' || b.type === '_oai_tool_result') names.push('tool_result');
+            });
+            row.dataset.toolNames = names.join(',');
         }
-        blocks.forEach(block => col.appendChild(renderBlock(block)));
 
-        if (displayRole === 'user') {
-            row.appendChild(avatar);
-            row.appendChild(col);
-        } else {
-            row.appendChild(col);
-            row.appendChild(avatar);
+        // Skip rendering main row if text was already rendered separately
+        if (textBlocks.length > 0 && toolBlocks.length > 0) {
+            // Only render tool blocks
+            const avatar = document.createElement('div');
+            avatar.className = `avatar ${displayRole}`;
+            avatar.textContent = '🤖';
+            const col = document.createElement('div');
+            col.className = 'msg-bubble-col';
+            toolBlocks.forEach(b => { const el = renderBlock(b); if (el) col.appendChild(el); });
+            row.appendChild(col); row.appendChild(avatar);
+            chatPanel.appendChild(row);
+        } else if (textBlocks.length === 0) {
+            // Normal render (no split needed)
+            const avatar = document.createElement('div');
+            avatar.className = `avatar ${displayRole}`;
+            avatar.textContent = displayRole === 'user' ? '👤' : displayRole === 'assistant' ? '🤖' : '⚙️';
+            const col = document.createElement('div');
+            col.className = 'msg-bubble-col';
+            if (msg._from_res && !isToolRow) {
+                const tag = document.createElement('div');
+                tag.style.cssText = 'font-size:10px;color:#6366f1;font-weight:600;margin-bottom:4px;';
+                tag.textContent = '↓ 来自 res 文件的回复';
+                col.appendChild(tag);
+            }
+            blocks.forEach(b => { const el = renderBlock(b); if (el) col.appendChild(el); });
+            if (displayRole === 'user') {
+                row.appendChild(avatar); row.appendChild(col);
+            } else {
+                row.appendChild(col); row.appendChild(avatar);
+            }
+            chatPanel.appendChild(row);
         }
-        chatPanel.appendChild(row);
     });
+
+    // Build filter chips and apply initial mode
+    buildFilterChips(filterChipsContainer);
+    applyToolMode();
+
+    // Re-add scroll-to-bottom button
+    chatPanel.appendChild(document.getElementById('scrollToBottom') || createScrollBtn());
+}
+
+function createScrollBtn() {
+    const btn = document.createElement('button');
+    btn.className = 'scroll-to-bottom';
+    btn.id = 'scrollToBottom';
+    btn.innerHTML = '&#x2193;';
+    btn.onclick = () => chatPanel.scrollTo({top: chatPanel.scrollHeight, behavior: 'smooth'});
+    return btn;
 }
 
 // ----------------------------------------------------------------
-// Block renderers (original style)
+// Tool mode logic
+// ----------------------------------------------------------------
+function collectToolNames() {
+    const names = new Set();
+    chatPanel.querySelectorAll('.tool-row').forEach(el => {
+        (el.dataset.toolNames || '').split(',').filter(Boolean).forEach(n => {
+            if (n !== 'tool_result' && n !== 'tool') names.add(n);
+        });
+    });
+    return [...names].sort();
+}
+
+function buildFilterChips(container) {
+    container.innerHTML = '';
+    const allNames = collectToolNames();
+    _activeToolFilters = new Set(allNames);
+    allNames.forEach(name => {
+        const chip = document.createElement('span');
+        chip.className = 'tool-filter-chip active';
+        chip.textContent = name;
+        chip.addEventListener('click', () => {
+            if (_activeToolFilters.has(name)) {
+                _activeToolFilters.delete(name);
+                chip.classList.remove('active');
+            } else {
+                _activeToolFilters.add(name);
+                chip.classList.add('active');
+            }
+            applyToolMode();
+        });
+        container.appendChild(chip);
+    });
+}
+
+function applyToolMode() {
+    chatPanel.querySelectorAll('.tool-badge-row').forEach(el => el.remove());
+
+    if (_toolMode === 0) {
+        chatPanel.querySelectorAll('.tool-row').forEach(el => el.style.display = '');
+        return;
+    }
+    if (_toolMode === 1) {
+        chatPanel.querySelectorAll('.tool-row').forEach(el => {
+            const names = (el.dataset.toolNames || '').split(',').filter(Boolean);
+            const match = names.some(n => _activeToolFilters.has(n));
+            el.style.display = match ? '' : 'none';
+        });
+        return;
+    }
+    // Mode 2: simplified — hide tool rows, show summary badges
+    const toolRows = chatPanel.querySelectorAll('.tool-row');
+    toolRows.forEach(el => el.style.display = 'none');
+
+    const children = [...chatPanel.children];
+    let i = 0;
+    while (i < children.length) {
+        const el = children[i];
+        if (!el.classList || !el.classList.contains('tool-row')) { i++; continue; }
+        const counts = {};
+        let lastToolEl = el;
+        while (i < children.length && children[i].classList && children[i].classList.contains('tool-row')) {
+            const names = (children[i].dataset.toolNames || '').split(',').filter(Boolean);
+            names.forEach(n => { counts[n] = (counts[n] || 0) + 1; });
+            lastToolEl = children[i];
+            i++;
+        }
+        const parts = Object.entries(counts)
+            .filter(([n]) => n !== 'tool' && n !== 'tool_result')
+            .map(([n, c]) => `<span class="tool-badge-chip">${esc(n)}${c > 1 ? ' x' + c : ''}</span>`);
+        if (!parts.length) continue;
+        const badge = document.createElement('div');
+        badge.className = 'tool-badge-row';
+        badge.innerHTML = parts.join('');
+        lastToolEl.after(badge);
+    }
+}
+
+// ----------------------------------------------------------------
+// System prompt (collapsible)
+// ----------------------------------------------------------------
+function renderSystemPrompt(content) {
+    const text = typeof content === 'string' ? content
+        : Array.isArray(content) ? content.map(b => b.text || '').join('\n')
+        : JSON.stringify(content, null, 2);
+    const el = document.createElement('div');
+    el.className = 'block system-prompt';
+    const charCount = text.length;
+    el.innerHTML = `
+        <div class="system-summary" onclick="this.nextElementSibling.classList.toggle('collapsed'); this.querySelector('.system-chevron').classList.toggle('collapsed')">
+            <span class="system-chevron collapsed">&#9660;</span>
+            <span>System Prompt (${charCount} 字)</span>
+        </div>
+        <div class="system-body collapsed">${esc(text)}</div>
+    `;
+    return el;
+}
+
+// ----------------------------------------------------------------
+// Reasoning / thinking (collapsible)
+// ----------------------------------------------------------------
+function renderReasoningBlock(text) {
+    const el = document.createElement('div');
+    el.className = 'block reasoning';
+    const charCount = (text || '').length;
+    el.innerHTML = `
+        <div class="reasoning-summary" onclick="this.nextElementSibling.classList.toggle('collapsed'); this.querySelector('.reasoning-chevron').classList.toggle('collapsed')">
+            <span class="reasoning-chevron collapsed">&#9660;</span>
+            <span>思考过程 (${charCount} 字)</span>
+        </div>
+        <div class="reasoning-body collapsed">${esc(text || '')}</div>
+    `;
+    return el;
+}
+
+// ----------------------------------------------------------------
+// Block renderers
 // ----------------------------------------------------------------
 function renderBlock(block) {
     switch (block.type) {
         case 'text':            return renderTextBlock(block);
+        case 'thinking':        return renderReasoningBlock(block.thinking);
         case 'tool_use':        return renderToolUseBlock(block);
         case 'tool_result':     return renderToolResultBlock(block);
         case '_oai_tool_call':  return renderOaiToolCallBlock(block);
@@ -897,14 +1213,17 @@ function filterSidebar() {
 }
 
 // ----------------------------------------------------------------
-// Hide tools toggle
+// Scroll-to-bottom visibility
 // ----------------------------------------------------------------
-function toggleHideTools() {
-    const hide = document.getElementById('hideTools').checked;
-    chatPanel.classList.toggle('hide-tools', hide);
-}
+(function() {
+    const panel = document.getElementById('chatPanel');
+    const btn = document.getElementById('scrollToBottom');
+    panel.addEventListener('scroll', () => {
+        const nearBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 200;
+        btn.style.display = nearBottom ? 'none' : 'flex';
+    });
+})();
 
-// File upload
 // Init
 resetAndLoad();
 </script>

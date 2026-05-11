@@ -22,6 +22,7 @@ _SKIP_PREFIXES = (
     "[Startup context loaded by runtime]",
     "Bootstrap files like SOUL.md",
     "System (untrusted)",
+    "(session bootstrap)",
 )
 
 _SKIP_CLEANED_PREFIXES = (

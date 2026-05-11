@@ -5,7 +5,6 @@
 
 import json
 import os
-import re as _re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -137,25 +136,6 @@ def _get_text_from_content(content) -> str:
     return get_text_from_content(content)
 
 
-def _anthropic_chain_key(messages: List[Dict[str, Any]]) -> str:
-    return build_chain_key(messages)
-
-
-def _openai_chain_key(messages: List[Dict[str, Any]]) -> str:
-    for msg in messages:
-        if msg.get("role") == "system":
-            match = _re.search(r"# Origin_query\s*\n+(.*?)(\n---|\Z)", str(msg.get("content", "")), _re.DOTALL)
-            if match:
-                return "oq:" + match.group(1).strip()
-    for msg in messages:
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = "|".join(block.get("text", "") for block in content if isinstance(block, dict))
-            return "u:" + str(content)
-    return str(messages[0].get("content", "")) if messages else ""
-
-
 def _build_state(root_dir: str) -> Dict[str, Any]:
     return {
         "root_dir": root_dir,
@@ -169,7 +149,7 @@ def _build_state(root_dir: str) -> Dict[str, Any]:
     }
 
 
-_CACHE_FILE = ".session_cache.json"
+_CACHE_FILE = ".session_cache.jsonl"
 
 
 def _cache_file_path(root_dir: str) -> str:
@@ -177,30 +157,35 @@ def _cache_file_path(root_dir: str) -> str:
 
 
 def _save_state_to_disk(state: Dict[str, Any]) -> None:
-    """持久化计算状态到磁盘，供服务重启后恢复。"""
+    """持久化计算状态到磁盘（JSONL 格式）。
+    第一行：元信息（byte_offset, line_count, known_keys）
+    后续每行：一个 session 对象
+    """
     root_dir = state["root_dir"]
     try:
         os.makedirs(root_dir, exist_ok=True)
-        # sessions 持久化时去掉 _best_req_count（内部字段）
-        sessions_out = {}
-        for ts_key, s in state["sessions"].items():
-            sessions_out[ts_key] = {k: v for k, v in s.items() if not k.startswith("_")}
-        payload = {
-            "byte_offset": state["byte_offset"],
-            "line_count": state["line_count"],
-            "known_keys": list(state["known_keys"]),
-            "sessions": sessions_out,
-        }
         tmp = _cache_file_path(root_dir) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+            meta = {
+                "_meta": True,
+                "byte_offset": state["byte_offset"],
+                "line_count": state["line_count"],
+                "known_keys": sorted(state["known_keys"]),
+            }
+            f.write(json.dumps(meta, ensure_ascii=False))
+            f.write("\n")
+            for ts_key, s in state["sessions"].items():
+                row = {k: v for k, v in s.items() if not k.startswith("_")}
+                row["_key"] = ts_key
+                f.write(json.dumps(row, ensure_ascii=False))
+                f.write("\n")
         os.replace(tmp, _cache_file_path(root_dir))
     except OSError:
         pass
 
 
 def _load_state_from_disk(state: Dict[str, Any]) -> bool:
-    """从磁盘恢复持久化状态。成功返回 True，失败返回 False（调用方应全量重建）。"""
+    """从磁盘恢复持久化状态（JSONL 格式）。"""
     root_dir = state["root_dir"]
     cache_path = _cache_file_path(root_dir)
 
@@ -209,30 +194,51 @@ def _load_state_from_disk(state: Dict[str, Any]) -> bool:
 
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
-            sp = json.load(f)
-    except (OSError, json.JSONDecodeError):
+            lines = f.readlines()
+    except OSError:
         return False
 
-    byte_offset = sp.get("byte_offset", 0)
+    if not lines:
+        return False
+
+    try:
+        meta = json.loads(lines[0])
+    except json.JSONDecodeError:
+        return False
+
+    if not meta.get("_meta"):
+        return False
+
+    byte_offset = meta.get("byte_offset", 0)
     if not isinstance(byte_offset, int) or byte_offset < 0:
         return False
 
     state["byte_offset"] = byte_offset
-    state["line_count"] = sp.get("line_count", 0)
-    state["known_keys"] = set(sp.get("known_keys", []))
+    state["line_count"] = meta.get("line_count", 0)
+    state["known_keys"] = set(meta.get("known_keys", []))
 
     sessions = OrderedDict()
     chain_map = {}
-    raw_sessions = sp.get("sessions", {})
-    if isinstance(raw_sessions, dict):
-        for ts_key, s in raw_sessions.items():
-            sessions[ts_key] = s
-            # 重建 _chain_map: api_key||q1 -> ts_key
-            ck = f"{s.get('api_key', '')}||{s.get('q1', '')}"
-            chain_map[ck] = ts_key
+    for line in lines[1:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            s = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts_key = s.pop("_key", None)
+        if not ts_key:
+            continue
+        if "model" in s and "models" not in s:
+            m = s.pop("model")
+            s["models"] = [m] if m else []
+        sessions[ts_key] = s
+        ck = f"{s.get('api_key', '')}||{s.get('q1', '')}"
+        chain_map[ck] = ts_key
+
     state["sessions"] = sessions
     state["_chain_map"] = chain_map
-
     return True
 
 
@@ -267,13 +273,18 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
 
     if index_entry and index_entry.get("chain_key"):
         chain_key = index_entry["chain_key"]
-    elif kind == "anthropic":
-        chain_key = _anthropic_chain_key(messages)
     else:
-        chain_key = _openai_chain_key(messages)
+        chain_key = build_chain_key(messages)
+
+    # Fallback: if chain_key is a known noise prefix, re-extract from messages
+    _noise_prefixes = ("(session bootstrap)",)
+    if chain_key and any(chain_key.startswith(p) for p in _noise_prefixes):
+        chain_key = build_chain_key(messages)
 
     lookup_key = f"{api_key}||{chain_key}"
     q1_preview = (index_entry or {}).get("q1_preview", "")
+    if q1_preview and any(q1_preview.startswith(p) for p in _noise_prefixes):
+        q1_preview = get_first_user_text(messages)[:200]
 
     res_path = req_path.with_name(filename.replace("-req.json", "-res.json"))
     has_res = res_path.is_file()
@@ -304,7 +315,7 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
         session_key = ts
         session = {
             "q1": q1_preview or chain_key[:200],
-            "model": model,
+            "models": [model] if model else [],
             "latest_file": filename,
             "msg_count": full_message_count,
             "api_key": api_key,
@@ -319,6 +330,8 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     else:
         session["last_ts"] = ts
         session["trace_list"].append(trace_entry)
+        if model and model not in session.get("models", []):
+            session.setdefault("models", []).append(model)
         if real_user_turns > session.get("_max_real_turns", 0):
             session["_max_real_turns"] = real_user_turns
         if message_count > session.get("_best_req_count", 0) or \
@@ -326,7 +339,6 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
             session["latest_file"] = filename
             session["msg_count"] = full_message_count
             session["_best_req_count"] = message_count
-            session["model"] = model or session["model"]
 
     return True
 
@@ -416,12 +428,15 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
 
         items = []
         for session in paged:
+            models = session.get("models", [])
+            if not models and session.get("model"):
+                models = [session["model"]]
             payload = {
                 "first_time": _format_time(session["first_ts"]),
                 "last_time": _format_time(session["last_ts"]),
                 "file_count": len(session.get("trace_list", [])),
                 "message_count": session.get("msg_count", 0),
-                "model": session["model"],
+                "models": models,
                 "latest_file": session.get("latest_file", ""),
                 "api_key": session.get("api_key", ""),
                 "q1_preview": session.get("q1", ""),
@@ -431,56 +446,72 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
         return {"items": items, "total": total, "known_keys": sorted(current_state["known_keys"])}
 
 def register_log_routes(app: FastAPI) -> None:
+    def unified_log_dir() -> str:
+        return get_log_dir("logs_all")
+
     def anthropic_log_dir() -> str:
         return get_log_dir("logs_anthropic")
 
     def openai_log_dir() -> str:
         return get_log_dir("logs_openai")
 
-    @app.get("/logs/anthropic/list")
-    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_list_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key, refresh))
+    # --- 统一路由（新） ---
 
-    @app.get("/logs/anthropic/file")
-    def logs_anthropic_file(filename: str):
+    @app.get("/logs/list")
+    def logs_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
+        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+
+    @app.get("/logs/file")
+    def logs_file(filename: str):
         if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
-        path = os.path.join(anthropic_log_dir(), filename)
+        path = os.path.join(unified_log_dir(), filename)
         if not os.path.isfile(path):
-            return JSONResponse({"error": "file not found"}, status_code=404)
+            for legacy_dir in [anthropic_log_dir(), openai_log_dir()]:
+                alt = os.path.join(legacy_dir, filename)
+                if os.path.isfile(alt):
+                    path = alt
+                    break
+            else:
+                return JSONResponse({"error": "file not found"}, status_code=404)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Append res content as assistant message
         res_path = Path(path).with_name(filename.replace("-req.json", "-res.json"))
         res_content = _extract_anthropic_res_content(res_path)
         if res_content is not None and isinstance(data.get("messages"), list):
             data["messages"].append({"role": "assistant", "content": res_content, "_from_res": True})
+        elif isinstance(data.get("messages"), list):
+            openai_content = _extract_openai_res_content(res_path)
+            if openai_content is not None:
+                data["messages"].append({**openai_content, "_from_res": True})
         return JSONResponse(data)
+
+    @app.get("/logs/aggregate")
+    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+
+    # --- 旧路由（别名，向后兼容） ---
+
+    @app.get("/logs/anthropic/list")
+    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
+        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+
+    @app.get("/logs/anthropic/file")
+    def logs_anthropic_file(filename: str):
+        return logs_file(filename)
 
     @app.get("/logs/anthropic/aggregate")
     def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_aggregate_payload("anthropic", anthropic_log_dir(), min_messages, offset, limit, api_key, refresh))
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
 
     @app.get("/logs/openai/list")
     def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_list_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key, refresh))
+        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
 
     @app.get("/logs/openai/file")
     def logs_openai_file(filename: str):
-        if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
-            return JSONResponse({"error": "invalid filename"}, status_code=400)
-        path = os.path.join(openai_log_dir(), filename)
-        if not os.path.isfile(path):
-            return JSONResponse({"error": "file not found"}, status_code=404)
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Append res content as assistant message
-        res_path = Path(path).with_name(filename.replace("-req.json", "-res.json"))
-        res_content = _extract_openai_res_content(res_path)
-        if res_content is not None and isinstance(data.get("messages"), list):
-            data["messages"].append({**res_content, "_from_res": True})
-        return JSONResponse(data)
+        return logs_file(filename)
 
     @app.get("/logs/openai/aggregate")
     def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_aggregate_payload("openai", openai_log_dir(), min_messages, offset, limit, api_key, refresh))
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))

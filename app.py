@@ -72,12 +72,16 @@ MONITOR_AUTH_PUBLIC_PATHS = {
     "/logout",
 }
 
-LOGS_SESSION_ANTHROPIC = get_log_dir("logs_session_anthropic")
-LOGS_ANTHROPIC = get_log_dir("logs_anthropic")
-LOGS_SESSION_OPENAI = get_log_dir("logs_session_openai")
-LOGS_OPENAI = get_log_dir("logs_openai")
-LOGS_SESSION_RESPONSES = get_log_dir("logs_session_responses")
-LOGS_RESPONSES = get_log_dir("logs_responses")
+LOGS_DIR = get_log_dir("logs_all")
+LOGS_SESSION_DIR = get_log_dir("logs_session")
+
+# Legacy aliases for backward-compat (startup index loading)
+_LEGACY_LOGS_ANTHROPIC = get_log_dir("logs_anthropic")
+_LEGACY_LOGS_SESSION_ANTHROPIC = get_log_dir("logs_session_anthropic")
+_LEGACY_LOGS_OPENAI = get_log_dir("logs_openai")
+_LEGACY_LOGS_SESSION_OPENAI = get_log_dir("logs_session_openai")
+_LEGACY_LOGS_RESPONSES = get_log_dir("logs_responses")
+_LEGACY_LOGS_SESSION_RESPONSES = get_log_dir("logs_session_responses")
 
 
 def _build_debug_dir() -> str:
@@ -423,25 +427,13 @@ def _build_index_path(log_dir: str) -> str:
 
 def _index_path_for_req_file(req_file: str) -> str:
     req_path = os.path.normpath(req_file)
-    session_anthropic_root = os.path.normpath(LOGS_SESSION_ANTHROPIC)
-    anthropic_root = os.path.normpath(LOGS_ANTHROPIC)
-    session_openai_root = os.path.normpath(LOGS_SESSION_OPENAI)
-    openai_root = os.path.normpath(LOGS_OPENAI)
-    session_responses_root = os.path.normpath(LOGS_SESSION_RESPONSES)
-    responses_root = os.path.normpath(LOGS_RESPONSES)
+    session_root = os.path.normpath(LOGS_SESSION_DIR)
+    main_root = os.path.normpath(LOGS_DIR)
 
-    if req_path == session_anthropic_root or req_path.startswith(session_anthropic_root + os.sep):
-        return _build_index_path(LOGS_SESSION_ANTHROPIC)
-    if req_path == anthropic_root or req_path.startswith(anthropic_root + os.sep):
-        return _build_index_path(LOGS_ANTHROPIC)
-    if req_path == session_openai_root or req_path.startswith(session_openai_root + os.sep):
-        return _build_index_path(LOGS_SESSION_OPENAI)
-    if req_path == openai_root or req_path.startswith(openai_root + os.sep):
-        return _build_index_path(LOGS_OPENAI)
-    if req_path == session_responses_root or req_path.startswith(session_responses_root + os.sep):
-        return _build_index_path(LOGS_SESSION_RESPONSES)
-    if req_path == responses_root or req_path.startswith(responses_root + os.sep):
-        return _build_index_path(LOGS_RESPONSES)
+    if req_path == session_root or req_path.startswith(session_root + os.sep):
+        return _build_index_path(LOGS_SESSION_DIR)
+    if req_path == main_root or req_path.startswith(main_root + os.sep):
+        return _build_index_path(LOGS_DIR)
 
     return _build_index_path(os.path.dirname(req_file) or ".")
 
@@ -453,10 +445,16 @@ def _iter_existing_index_files(*roots: str):
             yield root_index
 
 
-def _load_index_anthropic():
-    """启动时从 Anthropic 各主日志目录的 index.jsonl 恢复历史计数。"""
+def _load_index():
+    """启动时从各日志目录的 index.jsonl 恢复历史计数。"""
     global _first_count, _total_count, _valid_count
-    for index_file in _iter_existing_index_files(LOGS_ANTHROPIC, LOGS_SESSION_ANTHROPIC):
+    dirs_to_scan = [LOGS_DIR, LOGS_SESSION_DIR]
+    for legacy in [_LEGACY_LOGS_ANTHROPIC, _LEGACY_LOGS_SESSION_ANTHROPIC,
+                   _LEGACY_LOGS_OPENAI, _LEGACY_LOGS_SESSION_OPENAI,
+                   _LEGACY_LOGS_RESPONSES, _LEGACY_LOGS_SESSION_RESPONSES]:
+        if os.path.isdir(legacy):
+            dirs_to_scan.append(legacy)
+    for index_file in _iter_existing_index_files(*dirs_to_scan):
         with open(index_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -466,68 +464,37 @@ def _load_index_anthropic():
                     entry = json.loads(line)
                     _first_count += 1
                     _total_count += entry.get("total_attempts", 1)
-                    if entry.get("valid"):
+                    if entry.get("valid") or entry.get("success"):
                         _valid_count += 1
                 except json.JSONDecodeError:
                     pass
 
 
-def _extract_chain_key_anthropic(messages):
-    """提取 Anthropic chain_key（用于聚合判定同一会话）"""
-    return build_chain_key(messages)
-
-
-def _extract_chain_key_openai(messages):
-    """提取 OpenAI chain_key（用于聚合判定同一会话）"""
-    for msg in messages or []:
-        if msg.get("role") == "system":
-            match = re.search(r"# Origin_query\s*\n+(.*?)(\n---|\Z)", str(msg.get("content", "")), re.DOTALL)
-            if match:
-                return ("oq:" + match.group(1).strip())[:500]
-    for msg in messages or []:
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = "|".join(block.get("text", "") for block in content if isinstance(block, dict))
-            return ("u:" + str(content))[:500]
-    return str((messages or [{}])[0].get("content", ""))[:500]
-
-
 def _extract_q1_preview(messages, kind="anthropic"):
     """提取第一条消息的预览文本（前100字符）"""
-    if not messages:
-        return ""
-    if kind == "openai":
-        for msg in messages:
-            if msg.get("role") == "system":
-                match = re.search(r"# Origin_query\s*\n+(.*?)(\n---|\Z)", str(msg.get("content", "")), re.DOTALL)
-                if match:
-                    return match.group(1).strip()[:100]
-        for msg in messages:
-            if msg.get("role") == "user":
-                c = msg.get("content", "")
-                if isinstance(c, list):
-                    c = "|".join(block.get("text", "") for block in c if isinstance(block, dict))
-                return str(c)[:100]
-    return get_first_user_text(messages)[:100]
+    return get_first_user_text(messages or [])[:100]
 
 
-def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0, api_key: str = "", messages: list = None):
-    """按日志根目录追加一条 Anthropic 请求记录到 index.jsonl，并更新内存计数。"""
+def _append_index(ts: str, req_file: str, provider: str, model: str = "",
+                  tok_in: int = 0, tok_out: int = 0, success: bool = True,
+                  api_key: str = "", chain_key: str = "", q1_preview: str = "",
+                  total_attempts: int = 1, start_turn: int = 0):
+    """统一追加请求记录到 index.jsonl，并更新内存计数。"""
     global _first_count, _total_count, _valid_count
     entry = {
         "ts": ts,
         "req_file": req_file,
+        "provider": provider,
         "model": model,
-        "total_attempts": total_attempts,
-        "retried": total_attempts > 1,
-        "valid": valid,
         "tok_in": tok_in,
         "tok_out": tok_out,
+        "success": success,
         "api_key": api_key,
-        "chain_key": _extract_chain_key_anthropic(messages or []),
-        "q1_preview": _extract_q1_preview(messages or [], "anthropic"),
-        "start_turn": get_first_user_text(messages or [], return_index=True)[1],
+        "chain_key": chain_key,
+        "q1_preview": q1_preview,
+        "total_attempts": total_attempts,
+        "retried": total_attempts > 1,
+        "start_turn": start_turn,
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
@@ -535,33 +502,14 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     _first_count += 1
     _total_count += total_attempts
-    if valid:
+    if success:
         _valid_count += 1
 
 
-def _append_index_openai(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True, api_key: str = "", messages: list = None):
-    """按日志根目录追加 OpenAI 请求记录到 index.jsonl。"""
-    entry = {
-        "ts": ts,
-        "req_file": req_file,
-        "model": model,
-        "tok_in": tok_in,
-        "tok_out": tok_out,
-        "success": success,
-        "api_key": api_key,
-        "chain_key": _extract_chain_key_openai(messages or []),
-        "q1_preview": _extract_q1_preview(messages or [], "openai"),
-    }
-    index_file = _index_path_for_req_file(req_file)
-    os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
-    with open(index_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-
 def _extract_chain_key_responses(input_data) -> str:
-    """提取 Responses API chain_key（用于聚合判定同一会话）"""
+    """提取 Responses API chain_key — 无前缀，与其他 provider 统一"""
     if isinstance(input_data, str):
-        return ("u:" + input_data)[:500]
+        return input_data[:500]
     if isinstance(input_data, list):
         for item in input_data:
             if not isinstance(item, dict):
@@ -569,13 +517,13 @@ def _extract_chain_key_responses(input_data) -> str:
             if item.get("role") == "user":
                 content = item.get("content", "")
                 if isinstance(content, str):
-                    return ("u:" + content)[:500]
+                    return content[:500]
                 if isinstance(content, list):
                     texts = []
                     for part in content:
                         if isinstance(part, dict) and part.get("type") == "input_text":
                             texts.append(part.get("text", ""))
-                    return ("u:" + "|".join(texts))[:500]
+                    return "|".join(texts)[:500]
     return ""
 
 
@@ -598,27 +546,42 @@ def _extract_q1_preview_responses(input_data) -> str:
     return ""
 
 
-def _append_index_responses(ts: str, req_file: str, model: str = "", tok_in: int = 0, tok_out: int = 0, success: bool = True, api_key: str = "", input_data=None):
-    """按日志根目录追加 Responses API 请求记录到 index.jsonl。"""
-    entry = {
-        "ts": ts,
-        "req_file": req_file,
-        "model": model,
-        "tok_in": tok_in,
-        "tok_out": tok_out,
-        "success": success,
-        "api_key": api_key,
-        "chain_key": _extract_chain_key_responses(input_data),
-        "q1_preview": _extract_q1_preview_responses(input_data),
-    }
-    index_file = _index_path_for_req_file(req_file)
-    os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
-    with open(index_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+def _append_index_anthropic(ts, req_path, total_attempts, valid, model="", tok_in=0, tok_out=0, api_key="", messages=None):
+    msgs = messages or []
+    _append_index(
+        ts, req_path, provider="anthropic", model=model,
+        tok_in=tok_in, tok_out=tok_out, success=valid,
+        api_key=api_key,
+        chain_key=build_chain_key(msgs),
+        q1_preview=_extract_q1_preview(msgs),
+        total_attempts=total_attempts,
+        start_turn=get_first_user_text(msgs, return_index=True)[1],
+    )
+
+
+def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", messages=None):
+    msgs = messages or []
+    _append_index(
+        ts, req_path, provider="openai", model=model,
+        tok_in=tok_in, tok_out=tok_out, success=success,
+        api_key=api_key,
+        chain_key=build_chain_key(msgs),
+        q1_preview=_extract_q1_preview(msgs),
+    )
+
+
+def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", input_data=None):
+    _append_index(
+        ts, req_path, provider="responses", model=model,
+        tok_in=tok_in, tok_out=tok_out, success=success,
+        api_key=api_key,
+        chain_key=_extract_chain_key_responses(input_data),
+        q1_preview=_extract_q1_preview_responses(input_data),
+    )
 
 
 # 启动时加载历史 index
-_load_index_anthropic()
+_load_index()
 load_metrics_from_disk()
 
 
@@ -774,22 +737,22 @@ async def anthropic_messages(req: Request):
 
     # 保存请求/响应日志（anthropic 直通）
     if session_id and not skip_session_logging:
-        os.makedirs(LOGS_SESSION_ANTHROPIC, exist_ok=True)
+        os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
         # 若该 session_id 已有目录则复用，否则按当前时间戳新建
-        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_ANTHROPIC, f"*_{session_id}")))
-        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_ANTHROPIC,
+        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_DIR, f"*_{session_id}")))
+        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_DIR,
                                                                           f"{ts}_{session_id}")
         os.makedirs(session_dir, exist_ok=True)
         req_path = os.path.join(session_dir, f"{ts}-req.json")
         res_path = os.path.join(session_dir, f"{ts}-res.json")
         head_path = os.path.join(session_dir, f"{ts}-headers.json")
     else:
-        os.makedirs(LOGS_ANTHROPIC, exist_ok=True)
+        os.makedirs(LOGS_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
-        req_path = os.path.join(LOGS_ANTHROPIC, f"{ts}-req.json")
-        res_path = os.path.join(LOGS_ANTHROPIC, f"{ts}-res.json")
-        head_path = os.path.join(LOGS_ANTHROPIC, f"{ts}-headers.json")
+        req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
+        res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
+        head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/messages"
     verify = _ssl_verify()
@@ -1097,21 +1060,21 @@ async def openai_chat_completions(req: Request):
 
     # 保存请求/响应日志（OpenAI 直通）
     if session_id and not skip_session_logging:
-        os.makedirs(LOGS_SESSION_OPENAI, exist_ok=True)
+        os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
         # 若该 session_id 已有目录则复用，否则按当前时间戳新建
-        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_OPENAI, f"*_{session_id}")))
-        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_OPENAI, f"{ts}_{session_id}")
+        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_DIR, f"*_{session_id}")))
+        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_DIR, f"{ts}_{session_id}")
         os.makedirs(session_dir, exist_ok=True)
         req_path = os.path.join(session_dir, f"{ts}-req.json")
         res_path = os.path.join(session_dir, f"{ts}-res.json")
         head_path = os.path.join(session_dir, f"{ts}-headers.json")
     else:
-        os.makedirs(LOGS_OPENAI, exist_ok=True)
+        os.makedirs(LOGS_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
-        req_path = os.path.join(LOGS_OPENAI, f"{ts}-req.json")
-        res_path = os.path.join(LOGS_OPENAI, f"{ts}-res.json")
-        head_path = os.path.join(LOGS_OPENAI, f"{ts}-headers.json")
+        req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
+        res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
+        head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/chat/completions"
     verify = _ssl_verify()
@@ -1345,20 +1308,20 @@ async def openai_responses(req: Request):
 
     # 保存请求/响应日志
     if session_id:
-        os.makedirs(LOGS_SESSION_RESPONSES, exist_ok=True)
+        os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
-        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_RESPONSES, f"*_{session_id}")))
-        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_RESPONSES, f"{ts}_{session_id}")
+        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_DIR, f"*_{session_id}")))
+        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_DIR, f"{ts}_{session_id}")
         os.makedirs(session_dir, exist_ok=True)
         req_path = os.path.join(session_dir, f"{ts}-req.json")
         res_path = os.path.join(session_dir, f"{ts}-res.json")
         head_path = os.path.join(session_dir, f"{ts}-headers.json")
     else:
-        os.makedirs(LOGS_RESPONSES, exist_ok=True)
+        os.makedirs(LOGS_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
-        req_path = os.path.join(LOGS_RESPONSES, f"{ts}-req.json")
-        res_path = os.path.join(LOGS_RESPONSES, f"{ts}-res.json")
-        head_path = os.path.join(LOGS_RESPONSES, f"{ts}-headers.json")
+        req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
+        res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
+        head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/responses"
     verify = _ssl_verify()
@@ -1613,8 +1576,8 @@ def index_stats():
         "total_count": _total_count,
         "valid_count": _valid_count,
         "success_rate": round(rate, 4),
-        "index_file": _build_index_path(LOGS_ANTHROPIC),
-        "session_index_file": _build_index_path(LOGS_SESSION_ANTHROPIC),
+        "index_file": _build_index_path(LOGS_DIR),
+        "session_index_file": _build_index_path(LOGS_SESSION_DIR),
         "debug_dir": LOGS_DEBUG,
         "rpm_log": metrics_info["rpm_log"],
         "rate_log": metrics_info["rate_log"],
