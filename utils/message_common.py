@@ -76,6 +76,46 @@ def count_user_messages(messages: List[dict]) -> int:
     return sum(1 for m in messages if m.get("role") == "user")
 
 
+def count_real_user_turns(messages: List[dict]) -> int:
+    """计算真实用户轮次数（排除噪声消息）。
+
+    跳过 session marker、bootstrap context、tool definitions、
+    internal requests 等非真实用户输入的 user 消息。
+    用于判断请求属于第几轮对话。
+    """
+    if not messages:
+        return 0
+
+    first_text = get_text_from_content(messages[0].get("content", ""))
+    is_new_session = any(first_text.startswith(p) for p in _SESSION_MARKER_PREFIXES)
+    start = 1 if is_new_session else 0
+
+    count = 0
+    for msg in messages[start:]:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            if not any(
+                isinstance(b, dict) and b.get("type") == "text"
+                for b in content
+            ):
+                continue
+        raw_text = get_text_from_content(content)
+
+        if any(raw_text.startswith(p) for p in _SKIP_PREFIXES):
+            continue
+        if any(pat.search(raw_text) for pat in _INTERNAL_REQUEST_PATTERNS):
+            continue
+
+        cleaned = raw_text.strip()
+        if cleaned and any(cleaned.startswith(p) for p in _SKIP_CLEANED_PREFIXES):
+            continue
+
+        count += 1
+    return count
+
+
 def get_text_from_content(content) -> str:
     """从 message content 提取纯文本，拼接所有 text block。"""
     if isinstance(content, str):
@@ -172,7 +212,7 @@ def get_first_user_text(messages: List[dict], return_index: bool = False) -> Uni
 
 
 def build_chain_key(messages: List[dict]) -> str:
-    """构建聚合用的 chain_key。"""
+    """构建聚合用的 chain_key：直接使用 Q1 文本。"""
     return get_first_user_text(messages)[:500]
 
 

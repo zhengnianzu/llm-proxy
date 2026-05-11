@@ -15,6 +15,15 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from utils.log_paths import build_index_path, get_log_dir
+from utils.message_common import (
+    build_chain_key,
+    count_real_user_turns,
+    get_first_user_text,
+    get_text_from_content,
+    load_json_safe,
+    parse_streaming_response_content,
+)
+from utils.q1_index import get_effective_q1, should_update_q1, update_q1
 
 _CACHE_LOCK = threading.Lock()
 _LOG_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -41,12 +50,7 @@ def _resolve_req_path(root: Path, req_file: str) -> Optional[Path]:
 
 
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+    return load_json_safe(path)
 
 
 def _format_time(ts: str) -> str:
@@ -107,48 +111,11 @@ def _extract_anthropic_res_content(res_path: Path):
 
     rtype = data.get("type")
     if rtype == "anthropic_passthrough_sse_capture":
-        # 流式 SSE 响应：从 chunks 重建完整 message
         chunks = data.get("chunks", [])
-        message = {}
-        blocks = {}
-        block_json_buf = {}
-        for chunk in chunks:
-            t = chunk.get("type")
-            if t == "anthropic_passthrough_sse_meta":
-                continue
-            if t == "message_start":
-                message = dict(chunk.get("message", {}))
-                message["content"] = []
-            elif t == "content_block_start":
-                idx = chunk.get("index", 0)
-                cb = dict(chunk.get("content_block", {}))
-                blocks[idx] = cb
-                if cb.get("type") == "tool_use":
-                    block_json_buf[idx] = ""
-            elif t == "content_block_delta":
-                idx = chunk.get("index", 0)
-                delta = chunk.get("delta", {})
-                dtype = delta.get("type")
-                if dtype == "text_delta":
-                    blocks.setdefault(idx, {"type": "text", "text": ""})
-                    blocks[idx]["text"] = blocks[idx].get("text", "") + delta.get("text", "")
-                elif dtype == "input_json_delta":
-                    block_json_buf[idx] = block_json_buf.get(idx, "") + delta.get("partial_json", "")
-            elif t == "content_block_stop":
-                idx = chunk.get("index", 0)
-                if idx in block_json_buf:
-                    try:
-                        blocks[idx]["input"] = json.loads(block_json_buf[idx])
-                    except json.JSONDecodeError:
-                        blocks[idx]["input"] = block_json_buf[idx]
-        if blocks:
-            message["content"] = [blocks[i] for i in sorted(blocks)]
-        content = message.get("content")
-        if content:
-            return content
-        return None
+        return parse_streaming_response_content(
+            [c for c in chunks if c.get("type") != "anthropic_passthrough_sse_meta"]
+        )
 
-    # 非流式响应
     if isinstance(data.get("json"), dict):
         msg = data["json"]
         if msg.get("content") is not None:
@@ -167,65 +134,11 @@ def _extract_openai_res_content(res_path: Path):
 
 
 def _get_text_from_content(content) -> str:
-    """从 message content 中提取纯文本"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                return block.get("text", "")
-        return str(content[0])[:500] if content else ""
-    return str(content)[:500]
-
-
-def _strip_sender_prefix(text: str) -> str:
-    """去掉 OpenClaw 的 Sender (untrusted metadata) 前缀"""
-    m = _re.search(r'\[.*?\]\s*', text)
-    if m:
-        return text[m.end():].strip()
-    return text.strip()
-
-
-def _find_real_user_query_anthropic(messages, return_index=False):
-    """找到真正的用户 query 及其在 messages 中的索引。
-    return_index=True 时返回 (text, index) 元组。
-    """
-    if not messages:
-        return ("", 0) if return_index else ""
-    first_text = _get_text_from_content(messages[0].get("content", ""))
-    is_new_session = first_text.startswith("A new session was started via /new") or first_text.startswith("A new session was started via /reset")
-
-    if is_new_session:
-        for i, msg in enumerate(messages[1:], 1):
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                if not any(b.get("type") == "text" for b in content if isinstance(b, dict)):
-                    continue
-            real_text = _get_text_from_content(content)
-            if real_text.startswith("Sender (untrusted metadata)"):
-                real_text = _strip_sender_prefix(real_text)
-            return (real_text, i) if return_index else real_text
-        return ("", 0) if return_index else ""
-    else:
-        real_text = first_text
-        if real_text.startswith("Sender (untrusted metadata)"):
-            real_text = _strip_sender_prefix(real_text)
-        return (real_text, 0) if return_index else real_text
+    return get_text_from_content(content)
 
 
 def _anthropic_chain_key(messages: List[Dict[str, Any]]) -> str:
-    if not messages:
-        return ""
-    content = messages[0].get("content", "")
-    if isinstance(content, list):
-        content = "|".join(
-            block.get("text") or block.get("id") or str(block)[:200]
-            for block in content
-            if isinstance(block, dict)
-        )
-    return str(content)
+    return build_chain_key(messages)
 
 
 def _openai_chain_key(messages: List[Dict[str, Any]]) -> str:
@@ -372,18 +285,13 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     session_key = chain_map.get(lookup_key)
     session = state["sessions"].get(session_key) if session_key else None
 
-    # Detect new session: 真实轮次 = message_count - q1_base
-    # 真实轮次为 1（只有 q1 本身）且已有同 q1 的 session，说明是新会话
-    if kind == "anthropic":
-        st = (index_entry or {}).get("start_turn")
-        if st is not None:
-            q1_base = int(st)
-        else:
-            _, q1_base = _find_real_user_query_anthropic(messages, return_index=True)
-    else:
-        q1_base = 0
-    real_turns = message_count - q1_base
-    if session is not None and real_turns <= 1:
+    # 用真实用户轮次判断是否为新会话
+    real_user_turns = count_real_user_turns(messages)
+
+    # 新会话检测：real_user_turns 回退到 <= 1 说明是全新对话
+    # 同一轮的工具调用（real_user_turns 不变但 message_count 增长）不应拆分
+    if session is not None and real_user_turns <= 1 and \
+       real_user_turns < session.get("_max_real_turns", 1):
         suffix = 1
         new_lookup = f"{lookup_key}##session_{suffix}"
         while new_lookup in chain_map:
@@ -404,12 +312,15 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
             "last_ts": ts,
             "trace_list": [trace_entry],
             "_best_req_count": message_count,
+            "_max_real_turns": real_user_turns,
         }
         state["sessions"][session_key] = session
         chain_map[lookup_key] = session_key
     else:
         session["last_ts"] = ts
         session["trace_list"].append(trace_entry)
+        if real_user_turns > session.get("_max_real_turns", 0):
+            session["_max_real_turns"] = real_user_turns
         if message_count > session.get("_best_req_count", 0) or \
            (message_count == session.get("_best_req_count", 0) and has_res):
             session["latest_file"] = filename
