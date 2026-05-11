@@ -32,7 +32,8 @@ from utils.metrics import (
     get_metrics_storage_info,
 )
 from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix
-from utils.log_routes import register_log_routes, _get_text_from_content, _strip_sender_prefix, _find_real_user_query_anthropic
+from utils.log_routes import register_log_routes
+from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
 
@@ -473,7 +474,7 @@ def _load_index_anthropic():
 
 def _extract_chain_key_anthropic(messages):
     """提取 Anthropic chain_key（用于聚合判定同一会话）"""
-    return _find_real_user_query_anthropic(messages)[:500]
+    return build_chain_key(messages)
 
 
 def _extract_chain_key_openai(messages):
@@ -508,8 +509,7 @@ def _extract_q1_preview(messages, kind="anthropic"):
                 if isinstance(c, list):
                     c = "|".join(block.get("text", "") for block in c if isinstance(block, dict))
                 return str(c)[:100]
-    # Anthropic: 使用与 chain_key 相同的逻辑找到真正的用户 query
-    return _find_real_user_query_anthropic(messages)[:100]
+    return get_first_user_text(messages)[:100]
 
 
 def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: bool, model: str = "", tok_in: int = 0, tok_out: int = 0, api_key: str = "", messages: list = None):
@@ -527,7 +527,7 @@ def _append_index_anthropic(ts: str, req_file: str, total_attempts: int, valid: 
         "api_key": api_key,
         "chain_key": _extract_chain_key_anthropic(messages or []),
         "q1_preview": _extract_q1_preview(messages or [], "anthropic"),
-        "start_turn": _find_real_user_query_anthropic(messages or [], return_index=True)[1],
+        "start_turn": get_first_user_text(messages or [], return_index=True)[1],
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
