@@ -23,6 +23,8 @@ _SKIP_PREFIXES = (
     "Bootstrap files like SOUL.md",
     "System (untrusted)",
     "(session bootstrap)",
+    "A new session was started via /new",
+    "A new session was started via /reset",
 )
 
 _SKIP_CLEANED_PREFIXES = (
