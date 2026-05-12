@@ -35,6 +35,7 @@ _SKIP_CLEANED_PREFIXES = (
 
 _INTERNAL_REQUEST_PATTERNS = [
     re.compile(r"generate a short 1-2 word filename slug", re.IGNORECASE),
+    re.compile(r"^Based on this conversation", re.IGNORECASE),
 ]
 
 _NOISE_PATTERNS = [
