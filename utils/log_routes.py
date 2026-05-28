@@ -385,18 +385,23 @@ def _refresh_state(kind: str, root_dir: str) -> None:
     state["initialized"] = True
 
 
-def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False) -> Dict[str, Any]:
+def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         current_state = _state(kind, root_dir)
         if refresh or not current_state["initialized"]:
             _refresh_state(kind, root_dir)
-        # 从所有 session 的 trace_list 展开
         items = []
+        known_models: set = set()
         for session in current_state["sessions"].values():
             if api_key and (session.get("api_key", "") or "") != api_key:
                 continue
+            for m in session.get("models", []):
+                if m:
+                    known_models.add(m)
             for trace in session.get("trace_list", []):
                 if trace.get("msg_count", 0) >= min_messages:
+                    if model and trace.get("model", "") != model:
+                        continue
                     items.append({
                         "filename": trace["filename"],
                         "message_count": trace["msg_count"],
@@ -406,19 +411,25 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
         items.sort(key=lambda x: x["filename"], reverse=True)
         total = len(items)
         paged = items[offset:offset + limit] if limit > 0 else items[offset:]
-        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"])}
+        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models)}
 
 
-def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False) -> Dict[str, Any]:
+def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         current_state = _state(kind, root_dir)
         if refresh or not current_state["initialized"]:
             _refresh_state(kind, root_dir)
         sessions = []
+        known_models: set = set()
         for session in current_state["sessions"].values():
             if api_key and (session.get("api_key", "") or "") != api_key:
                 continue
+            for m in session.get("models", []):
+                if m:
+                    known_models.add(m)
             if session.get("msg_count", 0) < min_messages:
+                continue
+            if model and model not in session.get("models", []):
                 continue
             sessions.append(session)
 
@@ -443,7 +454,7 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
             }
             items.append(payload)
 
-        return {"items": items, "total": total, "known_keys": sorted(current_state["known_keys"])}
+        return {"items": items, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models)}
 
 def register_log_routes(app: FastAPI) -> None:
     def unified_log_dir() -> str:
@@ -458,8 +469,8 @@ def register_log_routes(app: FastAPI) -> None:
     # --- 统一路由（新） ---
 
     @app.get("/logs/list")
-    def logs_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+    def logs_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
+        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
 
     @app.get("/logs/file")
     def logs_file(filename: str):
@@ -487,31 +498,31 @@ def register_log_routes(app: FastAPI) -> None:
         return JSONResponse(data)
 
     @app.get("/logs/aggregate")
-    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
 
     # --- 旧路由（别名，向后兼容） ---
 
     @app.get("/logs/anthropic/list")
-    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+    def logs_anthropic_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
+        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
 
     @app.get("/logs/anthropic/file")
     def logs_anthropic_file(filename: str):
         return logs_file(filename)
 
     @app.get("/logs/anthropic/aggregate")
-    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
 
     @app.get("/logs/openai/list")
-    def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+    def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
+        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
 
     @app.get("/logs/openai/file")
     def logs_openai_file(filename: str):
         return logs_file(filename)
 
     @app.get("/logs/openai/aggregate")
-    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh))
+    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))

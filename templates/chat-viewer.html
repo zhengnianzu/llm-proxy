@@ -333,6 +333,10 @@
         <select class="folder-select" id="filterKey" onchange="reloadWithKey()">
             <option value="">全部</option>
         </select>
+        <span class="min-msg-label">模型</span>
+        <select class="folder-select" id="filterModel" onchange="reloadWithModel()">
+            <option value="">全部</option>
+        </select>
         <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
     </div>
 </div>
@@ -389,6 +393,7 @@ let offset = 0;
 let totalItems = 0;
 let isLoadingMore = false;
 let knownKeys = new Set();
+let knownModels = new Set();
 
 function currentFolder() {
     return document.getElementById('folderSelect').value;
@@ -419,6 +424,19 @@ function updateKeyDropdown() {
     sel.value = current;
 }
 
+function updateModelDropdown() {
+    const sel = document.getElementById('filterModel');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">全部</option>';
+    [...knownModels].sort().forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        sel.appendChild(opt);
+    });
+    sel.value = current;
+}
+
 function collectKeys(data) {
     // Prefer server-side known_keys if available
     if (data.known_keys && Array.isArray(data.known_keys)) {
@@ -429,6 +447,15 @@ function collectKeys(data) {
         });
     }
     updateKeyDropdown();
+
+    if (data.known_models && Array.isArray(data.known_models)) {
+        data.known_models.forEach(m => knownModels.add(m));
+    } else {
+        (data.items || []).forEach(item => {
+            (item.models || [item.model]).filter(Boolean).forEach(m => knownModels.add(m));
+        });
+    }
+    updateModelDropdown();
 }
 
 // ----------------------------------------------------------------
@@ -439,6 +466,7 @@ function resetAndLoad() {
     totalItems = 0;
     aggChains = [];
     knownKeys = new Set();
+    knownModels = new Set();
     _searchQuery = '';
     document.getElementById('q1Search').value = '';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
@@ -457,13 +485,26 @@ function reloadWithKey() {
     loadFileList();
 }
 
+function reloadWithModel() {
+    offset = 0;
+    totalItems = 0;
+    aggChains = [];
+    _searchQuery = '';
+    document.getElementById('q1Search').value = '';
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
+    document.getElementById('loadStatus').textContent = '';
+    loadFileList();
+}
+
 async function loadFileList(refresh = false) {
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
     const filterKey = document.getElementById('filterKey').value;
+    const filterModel = document.getElementById('filterModel').value;
     const resolvedKey = filterKey === '__default__' ? '' : filterKey;
     let params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
     if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
+    if (filterModel) params += `&model=${encodeURIComponent(filterModel)}`;
     if (refresh) params += '&refresh=true';
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg' || folder === 'agg') {
@@ -710,6 +751,16 @@ function renderMessages(data, filename) {
             <div class="metadata-item"><strong>文件</strong><span>${filename}</span></div>
         `;
         chatPanel.appendChild(meta);
+    }
+
+    // Top-level system prompt (Anthropic API puts system at request body root)
+    if (data.system) {
+        const sysContent = data.system;
+        let sysText = '';
+        if (typeof sysContent === 'string') sysText = sysContent;
+        else if (Array.isArray(sysContent)) sysText = sysContent.map(b => (typeof b === 'string' ? b : b.text || '')).join('\n');
+        else sysText = JSON.stringify(sysContent, null, 2);
+        if (sysText) chatPanel.appendChild(renderSystemPrompt(sysText));
     }
 
     // Tool mode bar

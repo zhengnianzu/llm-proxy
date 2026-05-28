@@ -31,7 +31,7 @@ from utils.metrics import (
     load_metrics_from_disk,
     get_metrics_storage_info,
 )
-from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix
+from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix, STARTUP_DATE_TAG
 from utils.log_routes import register_log_routes
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
@@ -96,7 +96,7 @@ def _build_debug_dir() -> str:
     if upstream:
         parts.append(upstream)
     suffix = "-".join(parts) if parts else "default"
-    return os.path.join("logs", f"debug-{suffix}")
+    return os.path.join("logs", "debug", suffix, STARTUP_DATE_TAG)
 
 
 LOGS_DEBUG = _build_debug_dir()
@@ -1597,18 +1597,53 @@ def rate_history(hours: int = 2):
     return JSONResponse(history)
 
 
-@app.get("/logs/debug/list")
-def logs_debug_list(limit: int = 200, keyword: str = ""):
-    root = Path(LOGS_DEBUG)
-    if not root.exists():
+@app.get("/logs/debug/envs")
+def logs_debug_envs():
+    debug_root = Path("logs", "debug")
+    if not debug_root.is_dir():
         return JSONResponse([])
+    envs = []
+    for env_dir in sorted(debug_root.iterdir()):
+        if not env_dir.is_dir():
+            continue
+        for hour_dir in sorted(env_dir.iterdir(), reverse=True):
+            if hour_dir.is_dir():
+                envs.append(f"{env_dir.name}/{hour_dir.name}")
+        if not any(hour_dir.is_dir() for hour_dir in env_dir.iterdir()):
+            envs.append(env_dir.name)
+    return JSONResponse(envs)
 
+
+def _iter_debug_txt_files(env_filter: str = ""):
+    debug_root = Path("logs", "debug")
+    if not debug_root.is_dir():
+        return
+    if env_filter:
+        target = debug_root / env_filter
+        if target.is_dir():
+            yield from sorted(target.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return
+    for path in sorted(debug_root.rglob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True):
+        yield path
+
+
+def _debug_env_label(path: Path) -> str:
+    debug_root = Path("logs", "debug")
+    try:
+        rel = path.parent.relative_to(debug_root)
+        return str(rel) if str(rel) != "." else ""
+    except ValueError:
+        return ""
+
+
+@app.get("/logs/debug/list")
+def logs_debug_list(limit: int = 200, keyword: str = "", env: str = ""):
     safe_limit = max(1, min(limit, 1000))
     keyword_lower = keyword.strip().lower()
     items = []
     pattern = re.compile(r"(?P<ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_attempt(?P<attempt>\d+)_(?P<payload>.+)\.txt$")
 
-    for path in sorted(root.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for path in _iter_debug_txt_files(env):
         name = path.name
         match = pattern.match(name)
         model = ""
@@ -1630,13 +1665,16 @@ def logs_debug_list(limit: int = 200, keyword: str = ""):
         if keyword_lower and keyword_lower not in name.lower() and keyword_lower not in model.lower() and keyword_lower not in reason.lower():
             continue
 
+        env_label = _debug_env_label(path)
+        rel_name = f"{env_label}/{name}" if env_label else name
         items.append({
-            "filename": name,
+            "filename": rel_name,
             "created_at": created_at,
             "attempt": attempt,
             "model": model,
             "reason": reason,
             "size": path.stat().st_size,
+            "env": env_label,
         })
         if len(items) >= safe_limit:
             break
@@ -1646,11 +1684,15 @@ def logs_debug_list(limit: int = 200, keyword: str = ""):
 
 @app.get("/logs/debug/file")
 def logs_debug_file(filename: str):
-    if "/" in filename or "\\" in filename or ".." in filename or not filename.endswith(".txt"):
+    if ".." in filename or not filename.endswith(".txt"):
         return JSONResponse({"error": "invalid filename"}, status_code=400)
-    path = Path(LOGS_DEBUG) / filename
+    path = Path("logs", "debug") / filename
     if not path.is_file():
-        return JSONResponse({"error": "file not found"}, status_code=404)
+        old_path = Path(LOGS_DEBUG) / Path(filename).name
+        if old_path.is_file():
+            path = old_path
+        else:
+            return JSONResponse({"error": "file not found"}, status_code=404)
     try:
         content = path.read_text(encoding="utf-8")
     except Exception as ex:

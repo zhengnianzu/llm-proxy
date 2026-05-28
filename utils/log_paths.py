@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterator
 
 INDEX_FILENAME = "index.jsonl"
-STARTUP_DATE_TAG = datetime.now().strftime("%y%m%d")
+STARTUP_DATE_TAG = datetime.now().strftime("%y%m%d%H")
 
 
 def _first_configured_upstream_key() -> str:
@@ -37,11 +37,16 @@ def get_log_task_tag() -> str:
     return tag
 
 
-def get_log_dir(base_name: str) -> str:
+def _env_key_segment() -> str:
     task_tag = get_log_task_tag()
+    key_prefix = get_upstream_key_prefix()
     if task_tag:
-        return f"{base_name}_{task_tag}_{get_upstream_key_prefix()}_{STARTUP_DATE_TAG}"
-    return f"{base_name}_{get_upstream_key_prefix()}_{STARTUP_DATE_TAG}"
+        return f"{task_tag}-{key_prefix}"
+    return key_prefix
+
+
+def get_log_dir(base_name: str) -> str:
+    return os.path.join(base_name, _env_key_segment(), STARTUP_DATE_TAG)
 
 
 def build_index_path(log_dir: str) -> str:
@@ -55,10 +60,13 @@ def iter_matching_log_dirs(base_name: str, root: str = ".") -> Iterator[Path]:
         yield current_dir
         return
 
-    prefix = f"{base_name}_"
-    matches = sorted(
-        path for path in root_path.iterdir()
-        if path.is_dir() and path.name.startswith(prefix)
-    )
-    for path in matches:
-        yield path
+    base_dir = root_path / base_name
+    if not base_dir.is_dir():
+        return
+
+    for env_dir in sorted(base_dir.iterdir()):
+        if not env_dir.is_dir():
+            continue
+        for hour_dir in sorted(env_dir.iterdir()):
+            if hour_dir.is_dir():
+                yield hour_dir
