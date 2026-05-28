@@ -45,13 +45,20 @@ chat-log-viewer/
 
 ### 原始三元组日志（triplet）
 
-每次 API 调用产生三个文件，存放在 `logs_anthropic/` 目录下：
+每次 API 调用产生三个文件，存放在日志目录下：
 
 ```
 <timestamp>-req.json      # 请求体
 <timestamp>-headers.json  # 请求头
 <timestamp>-res.json      # 响应体
 ```
+
+支持两种 API 格式，通过 `res.json` 自动识别：
+
+| 格式 | req.json 特征 | res.json 特征 |
+|------|-------------|-------------|
+| Anthropic | `system` 在顶层，`messages` 中有 `tool_use`/`tool_result` block | `type: "message"` 或流式 `type: "anthropic_passthrough_sse_capture"` |
+| OpenAI | `system` 在 `messages` 中作为 `role: "system"`，工具调用用 `tool_calls` 数组 | `object: "chat.completion"` 或流式 `type: "openai_passthrough_sse_capture"` |
 
 ### index.jsonl
 
@@ -275,7 +282,7 @@ report/
 
 ### analyze_sessions.py — 会话分析
 
-对一个或多个会话目录进行统计分析，输出详细报告；多目录模式会同时生成可直接给 server 使用的 `server_session.yaml`。
+对一个或多个会话目录进行统计分析，输出详细报告。支持 Anthropic 和 OpenAI 两种 API 格式的数据，自动识别并处理格式差异。多目录模式会同时生成可直接给 server 使用的 `server_session.yaml`。
 
 **用法：**
 
@@ -341,18 +348,22 @@ python3 -m src.cli server start --config ./output/server_session.yaml
 - `q1`
   第一条 `role == "user"` 的消息文本，去除头部噪声后得到首问。
 - `user_turns`
-  对每条 `user` 消息，只要其 `content` 中存在非 `tool_result` block，就记为一个用户轮次。
+  对每条 `user` 消息，只要其 `content` 中存在非 `tool_result` block，就记为一个用户轮次。OpenAI 格式中 `role: "tool"` 的消息不计入用户轮次。
 - `tool_use_count`
-  统计两部分中的 `tool_use` block：
-  `messages` 里所有 `assistant` 消息的 `content`；
-  `response.content` 中的最终响应块。
+  统计两部分中的工具调用：
+  Anthropic 格式：`messages` 里所有 `assistant` 消息的 `content` 中的 `tool_use` block + `response.content` 中的最终响应块；
+  OpenAI 格式：`assistant` 消息的 `tool_calls` 数组中的每个调用。
 - `tool_result_count`
-  仅统计 `user` 消息中的 `tool_result` block。
+  Anthropic 格式：仅统计 `user` 消息中的 `tool_result` block；
+  OpenAI 格式：统计 `role: "tool"` 的消息。
 - `tool_success` / `tool_fail_flag` / `tool_fail_keyword`
-  `tool_result` 若 `is_error=true`，记入 `tool_fail_flag`；
+  Anthropic 格式：`tool_result` 若 `is_error=true`，记入 `tool_fail_flag`；
+  OpenAI 格式：`role: "tool"` 消息无 `is_error` 标志，仅通过错误关键字检测判断成功/失败；
   否则提取文本并按错误关键字规则检测，命中则记入 `tool_fail_keyword`，未命中则记为成功。
 - `tool_use_detail` / `tool_success_detail` / `tool_fail_detail`
-  `tool_use` 先按 `id -> name` 建立映射，后续 `tool_result` 通过 `tool_use_id` 回查对应工具名；缺失时记为 `unknown`。
+  Anthropic 格式：`tool_use` 先按 `id -> name` 建立映射，后续 `tool_result` 通过 `tool_use_id` 回查对应工具名；
+  OpenAI 格式：从 `tool_calls[].function.name` 获取工具名，`role: "tool"` 消息通过 `tool_call_id` 回查；
+  缺失时记为 `unknown`。
 - `skills_used`
   仅识别工具名为 `read` 的 `tool_use`，并从 `input.file_path` 或 `input.path` 中匹配
   `.openclaw/skills/<skill>/SKILL.md`，按 `<skill>` 聚合计数。
@@ -361,7 +372,7 @@ python3 -m src.cli server start --config ./output/server_session.yaml
 
 **质量检查规则：**
 
-- `E001`: 乱码(行均字符过少)。若 `messages content`、`thinking/reasoning_content` 或 `response.content` 中存在疑似乱码文本，则标记。
+- `E001`: 乱码(行均字符过少)。若 `messages content`、`thinking/reasoning_content` 或 `response.content` 中存在疑似乱码文本，则标记。OpenAI 格式中也检查 `response.choices[0].message` 和 `reasoning_content` 字段。
 - `E002`: 200空响应。若 `response.status_code == 200` 且 `response.content` 为空，则标记。
 - `E003`: 工具调用过少(<3次)。若 `tool_use_count < 3`，则标记。
 - `E004`: write成功率低于30%。仅统计已经返回 `tool_result` 的 `write` 调用，按 `write_success / (write_success + write_fail) < 0.3` 判定；最后一轮仅发出 `write` 但尚未返回结果时，不计入失败分母。
@@ -391,7 +402,7 @@ python analyze_sessions.py \
 
 ### export_sessions.py — 会话导出
 
-将 `logs_anthropic/` 下的原始三元组日志按 Q1（首条用户消息）分组，导出为会话目录格式。
+将原始三元组日志按 Q1（首条用户消息）分组，导出为会话目录格式。支持 Anthropic 和 OpenAI 两种 API 格式，通过 `parse_response()` 统一处理响应解析。
 
 **用法：**
 
@@ -560,7 +571,7 @@ bash update_dir/obsutil/setup.sh
 | `extract_messages(data)` | 从请求数据中提取消息列表 |
 | `get_first_user_text(messages)` | 获取第一条用户消息的文本内容 |
 | `count_user_messages(messages)` | 统计用户消息数量 |
-| `parse_response(data)` | 解析响应数据，提取 assistant content |
+| `parse_response(data)` | 统一解析 res.json（自动识别 Anthropic/OpenAI/Responses 格式），返回规范化的 response 对象 |
 
 ### src/utils/triplet_collector.py
 

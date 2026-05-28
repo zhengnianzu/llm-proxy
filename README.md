@@ -74,16 +74,18 @@ LOG_TASK_TAG=env-prod
 因此日志目录会从：
 
 ```text
-logs_anthropic_wy92_260407
+logs_all/nokey/26040713
 ```
 
 变成：
 
 ```text
-logs_anthropic_env-prod_wy92_260407
+logs_all/env-prod-wy92/26040713
 ```
 
-如果不是通过 `./app` CLI 启动，而是直接 `python app.py`，那就不会自动带这个标记，目录名仍保持原样。
+日志目录采用嵌套结构 `{base}/{tag}-{key_prefix}/{YYMMDDHH}`，按环境和小时自动分组，减少根目录下的文件夹数量。
+
+如果不是通过 `./app` CLI 启动，而是直接 `python app.py`，那就不会自动带这个标记，目录名仍保持原样（只有 key_prefix 部分）。
 
 ### 监控后台登录保护
 

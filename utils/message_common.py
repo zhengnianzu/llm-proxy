@@ -282,22 +282,190 @@ def parse_streaming_response_content(chunks: List[dict]) -> Optional[list]:
     return content if content else None
 
 
-def parse_response(res_data: dict) -> dict:
-    """统一解析 res.json，返回规范化的 response 对象。"""
-    rtype = res_data.get("type")
+def parse_openai_streaming_response(chunks: List[dict]) -> dict:
+    """从 openai_passthrough_sse_capture 的 chunks 中重建完整 message。
 
+    OpenAI SSE delta 结构: choices[0].delta.{role, content, tool_calls}
+    """
+    message: dict = {"role": "assistant", "content": ""}
+    tool_calls_buf: dict = {}
+    usage: dict = {}
+
+    for chunk in chunks:
+        if chunk.get("type") in ("openai_passthrough_sse_meta",):
+            continue
+
+        choices = chunk.get("choices", [])
+        if not choices:
+            if chunk.get("usage"):
+                usage.update(chunk["usage"])
+            continue
+
+        choice = choices[0]
+        delta = choice.get("delta", {})
+
+        if delta.get("role"):
+            message["role"] = delta["role"]
+
+        if delta.get("content"):
+            message["content"] = (message.get("content") or "") + delta["content"]
+
+        if delta.get("reasoning_content"):
+            message["reasoning_content"] = (message.get("reasoning_content") or "") + delta["reasoning_content"]
+
+        if delta.get("tool_calls"):
+            for tc in delta["tool_calls"]:
+                idx = tc.get("index", 0)
+                if idx not in tool_calls_buf:
+                    tool_calls_buf[idx] = {
+                        "id": tc.get("id", ""),
+                        "type": tc.get("type", "function"),
+                        "function": {"name": "", "arguments": ""},
+                    }
+                buf = tool_calls_buf[idx]
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    buf["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    buf["function"]["arguments"] += fn["arguments"]
+                if tc.get("id"):
+                    buf["id"] = tc["id"]
+
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            message["finish_reason"] = finish_reason
+
+        if chunk.get("usage"):
+            usage.update(chunk["usage"])
+
+        if chunk.get("model"):
+            message["model"] = chunk["model"]
+
+    if tool_calls_buf:
+        message["tool_calls"] = [tool_calls_buf[i] for i in sorted(tool_calls_buf)]
+
+    if usage:
+        message["usage"] = usage
+
+    return message
+
+
+def _detect_provider(res_data: dict) -> str:
+    """从 res.json 的内容判断 provider 类型。"""
+    rtype = res_data.get("type", "")
     if rtype == "anthropic_passthrough_sse_capture":
-        chunks = res_data.get("chunks", [])
-        status_code = 200
-        for c in chunks:
-            if c.get("type") == "anthropic_passthrough_sse_meta":
-                status_code = c.get("status_code", 200)
-                break
-        msg = parse_streaming_response(
-            [c for c in chunks if c.get("type") != "anthropic_passthrough_sse_meta"]
-        )
-        return {"status_code": status_code, **msg}
-    else:
-        body = dict(res_data.get("json") or {})
-        body["status_code"] = res_data.get("status_code", 200)
-        return body
+        return "anthropic"
+    if rtype == "openai_passthrough_sse_capture":
+        return "openai"
+    if rtype == "responses_passthrough_sse_capture":
+        return "responses"
+
+    body = res_data.get("json") or {}
+    if body.get("type") == "message":
+        return "anthropic"
+    if body.get("object") == "chat.completion":
+        return "openai"
+    if body.get("object") == "response":
+        return "responses"
+    if "choices" in body:
+        return "openai"
+    if isinstance(body.get("content"), list):
+        return "anthropic"
+    return "unknown"
+
+
+def _normalize_openai_response(body: dict) -> dict:
+    """将 OpenAI 响应结构规范化为统一格式（content 为列表）。"""
+    msg = {}
+    choices = body.get("choices", [])
+    if choices:
+        msg = dict(choices[0].get("message") or choices[0].get("delta") or {})
+
+    content_blocks = []
+    if msg.get("reasoning_content"):
+        content_blocks.append({"type": "thinking", "thinking": msg["reasoning_content"]})
+    text = msg.get("content")
+    if text:
+        content_blocks.append({"type": "text", "text": text})
+
+    if msg.get("tool_calls"):
+        for tc in msg["tool_calls"]:
+            fn = tc.get("function", {})
+            try:
+                inp = json.loads(fn.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                inp = fn.get("arguments", "")
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tc.get("id", ""),
+                "name": fn.get("name", ""),
+                "input": inp,
+            })
+
+    result = {
+        "role": msg.get("role", "assistant"),
+        "content": content_blocks,
+        "model": body.get("model", ""),
+    }
+    if msg.get("finish_reason") or (choices and choices[0].get("finish_reason")):
+        result["stop_reason"] = msg.get("finish_reason") or choices[0].get("finish_reason")
+    if body.get("usage"):
+        u = body["usage"]
+        result["usage"] = {
+            "input_tokens": u.get("prompt_tokens", 0),
+            "output_tokens": u.get("completion_tokens", 0),
+        }
+    return result
+
+
+def parse_response(res_data: dict) -> dict:
+    """统一解析 res.json，返回规范化的 response 对象。
+
+    支持三种格式：Anthropic / OpenAI / Responses API
+    判断依据：res.json 的 type 标签（流式）或 json.object / json.type（非流式）
+    """
+    provider = _detect_provider(res_data)
+
+    if provider == "anthropic":
+        rtype = res_data.get("type")
+        if rtype == "anthropic_passthrough_sse_capture":
+            chunks = res_data.get("chunks", [])
+            status_code = 200
+            for c in chunks:
+                if c.get("type") == "anthropic_passthrough_sse_meta":
+                    status_code = c.get("status_code", 200)
+                    break
+            msg = parse_streaming_response(
+                [c for c in chunks if c.get("type") != "anthropic_passthrough_sse_meta"]
+            )
+            return {"status_code": status_code, **msg}
+        else:
+            body = dict(res_data.get("json") or {})
+            body["status_code"] = res_data.get("status_code", 200)
+            return body
+
+    if provider == "openai":
+        rtype = res_data.get("type")
+        if rtype == "openai_passthrough_sse_capture":
+            chunks = res_data.get("chunks", [])
+            status_code = 200
+            for c in chunks:
+                if c.get("type") == "openai_passthrough_sse_meta":
+                    status_code = c.get("status_code", 200)
+                    break
+            msg = parse_openai_streaming_response(
+                [c for c in chunks if c.get("type") != "openai_passthrough_sse_meta"]
+            )
+            normalized = _normalize_openai_response({"choices": [{"message": msg}], "usage": msg.pop("usage", None), "model": msg.pop("model", "")})
+            normalized["status_code"] = status_code
+            return normalized
+        else:
+            body = res_data.get("json") or {}
+            normalized = _normalize_openai_response(body)
+            normalized["status_code"] = res_data.get("status_code", 200)
+            return normalized
+
+    # responses / unknown — 直接返回 json body
+    body = dict(res_data.get("json") or {})
+    body["status_code"] = res_data.get("status_code", 200)
+    return body

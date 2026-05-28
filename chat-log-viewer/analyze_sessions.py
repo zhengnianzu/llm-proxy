@@ -130,9 +130,13 @@ def iter_blocks(content: Any):
                 yield b
 
 
+
+
 def count_user_turns(messages: List[dict]) -> int:
     count = 0
     for m in messages:
+        if m.get("role") == "tool":
+            continue
         if m.get("role") != "user":
             continue
         blocks = list(iter_blocks(m.get("content", [])))
@@ -148,6 +152,7 @@ def count_tool_use(messages: List[dict], resp_content: Optional[List]) -> int:
             for b in iter_blocks(m.get("content", [])):
                 if b.get("type") == "tool_use":
                     count += 1
+            count += len(m.get("tool_calls") or [])
     if isinstance(resp_content, list):
         for b in resp_content:
             if isinstance(b, dict) and b.get("type") == "tool_use":
@@ -158,6 +163,16 @@ def count_tool_use(messages: List[dict], resp_content: Optional[List]) -> int:
 def analyze_tool_results(messages: List[dict]) -> Dict[str, int]:
     total = success = fail_flag = fail_kw = 0
     for m in messages:
+        # OpenAI format: role=tool is a tool result
+        if m.get("role") == "tool":
+            total += 1
+            text = _collect_text(m.get("content", ""))
+            if _has_error_keywords(text):
+                fail_kw += 1
+            else:
+                success += 1
+            continue
+        # Anthropic format: tool_result blocks inside user messages
         if m.get("role") != "user":
             continue
         for blk in iter_blocks(m.get("content", [])):
@@ -186,6 +201,7 @@ def analyze_tools_detail(full_messages: List[dict]) -> Dict[str, Dict[str, int]]
     """统计每个工具的调用次数和成功/失败次数。
 
     返回 {"use": {tool_name: count}, "success": {...}, "fail": {...}}
+    兼容 Anthropic（tool_use block）和 OpenAI（tool_calls 数组）格式。
     """
     id_to_name: Dict[str, str] = {}
     use_counts: Counter = Counter()
@@ -193,6 +209,7 @@ def analyze_tools_detail(full_messages: List[dict]) -> Dict[str, Dict[str, int]]
     fail_counts: Counter = Counter()
 
     for m in full_messages:
+        # Anthropic: tool_use blocks in content
         for blk in iter_blocks(m.get("content", [])):
             if blk.get("type") == "tool_use":
                 tool_id = blk.get("id", "")
@@ -200,8 +217,26 @@ def analyze_tools_detail(full_messages: List[dict]) -> Dict[str, Dict[str, int]]
                 if tool_id:
                     id_to_name[tool_id] = name
                 use_counts[name] += 1
+        # OpenAI: tool_calls array in assistant message
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function", {})
+            tool_id = tc.get("id", "")
+            name = fn.get("name", "unknown")
+            if tool_id:
+                id_to_name[tool_id] = name
+            use_counts[name] += 1
 
     for m in full_messages:
+        # OpenAI: role=tool is a tool result
+        if m.get("role") == "tool":
+            name = id_to_name.get(m.get("tool_call_id", ""), "unknown")
+            text = _collect_text(m.get("content", ""))
+            if _has_error_keywords(text):
+                fail_counts[name] += 1
+            else:
+                success_counts[name] += 1
+            continue
+        # Anthropic: tool_result blocks in user messages
         if m.get("role") != "user":
             continue
         for blk in iter_blocks(m.get("content", [])):
@@ -305,14 +340,11 @@ def _is_garbled(text: str, min_lines: int = 10, max_avg_chars: float = 5.0) -> b
 
 def _scan_garbled(data: dict) -> bool:
     """遍历单个请求的 messages content、thinking 块及 response content，检测乱码。"""
-    # messages
     for msg in (data.get("messages") or []):
         content = msg.get("content", [])
-        # 普通文本内容
         text = _collect_text(content)
         if text and _is_garbled(text):
             return True
-        # thinking / reasoning 块
         if isinstance(content, list):
             for blk in content:
                 if not isinstance(blk, dict):
@@ -320,8 +352,19 @@ def _scan_garbled(data: dict) -> bool:
                 thinking = blk.get("thinking") or blk.get("reasoning_content") or ""
                 if isinstance(thinking, str) and _is_garbled(thinking):
                     return True
+        # OpenAI reasoning_content at message level
+        rc = msg.get("reasoning_content")
+        if isinstance(rc, str) and _is_garbled(rc):
+            return True
     # response content
-    resp_content = (data.get("response") or {}).get("content")
+    resp = data.get("response") or {}
+    resp_content = resp.get("content")
+    # OpenAI response: choices[0].message.content
+    if resp_content is None and resp.get("choices"):
+        oai_msg = (resp["choices"][0] or {}).get("message") or {}
+        oai_text = oai_msg.get("content")
+        if oai_text and _is_garbled(oai_text):
+            return True
     if resp_content:
         text = _collect_text(resp_content)
         if text and _is_garbled(text):
@@ -420,6 +463,18 @@ def _record_tool_use(blk: dict, stats: Dict[str, Any]) -> None:
     _record_skill_use(name, blk, stats)
 
 
+def _record_openai_tool_calls(msg: dict, stats: Dict[str, Any]) -> None:
+    """处理 OpenAI 格式 assistant message 中的 tool_calls 数组。"""
+    for tc in (msg.get("tool_calls") or []):
+        fn = tc.get("function", {})
+        tool_id = tc.get("id", "")
+        name = fn.get("name", "unknown")
+        if tool_id:
+            stats["id_to_name"][tool_id] = name
+        stats["tool_use_detail"][name] += 1
+        stats["tool_use_count"] += 1
+
+
 def _record_tool_result(blk: dict, stats: Dict[str, Any]) -> None:
     stats["tool_result_count"] += 1
     name = stats["id_to_name"].get(blk.get("tool_use_id", ""), "unknown")
@@ -448,10 +503,12 @@ def _analyze_user_message(content: Any, stats: Dict[str, Any]) -> None:
         stats["user_turns"] += 1
 
 
-def _analyze_assistant_message(content: Any, stats: Dict[str, Any]) -> None:
+def _analyze_assistant_message(msg: dict, stats: Dict[str, Any]) -> None:
+    content = msg.get("content", [])
     for blk in iter_blocks(content):
         if blk.get("type") == "tool_use":
             _record_tool_use(blk, stats)
+    _record_openai_tool_calls(msg, stats)
 
 
 def _build_quality_errors(resp: dict, resp_content: Any, stats: Dict[str, Any]) -> List[str]:
@@ -464,18 +521,52 @@ def _build_quality_errors(resp: dict, resp_content: Any, stats: Dict[str, Any]) 
     )
 
 
+def _analyze_tool_role_message(msg: dict, stats: Dict[str, Any]) -> None:
+    """处理 OpenAI 格式的 role=tool 消息（工具结果）。"""
+    stats["tool_result_count"] += 1
+    name = stats["id_to_name"].get(msg.get("tool_call_id", ""), "unknown")
+    text = _collect_text(msg.get("content", ""))
+    if _has_error_keywords(text):
+        stats["tool_fail_keyword"] += 1
+        stats["tool_fail_detail"][name] += 1
+    else:
+        stats["tool_success"] += 1
+        stats["tool_success_detail"][name] += 1
+
+
 def analyze_best_data(best_data: dict) -> Dict[str, Any]:
     """在一次 pass 中完成单个 best_data 的主要统计。
 
-    这里刻意保持与旧逻辑一致：
+    兼容 Anthropic 和 OpenAI 两种格式：
     - Q1 取第一条 user 消息文本
     - user_turns 仅在 user message 含非 tool_result block 时计数
-    - tool_result 只从 user message 中统计
-    - tool_use 同时统计 assistant messages 与最终 response.content
+    - tool_result 从 user message（Anthropic）和 role=tool（OpenAI）中统计
+    - tool_use 从 assistant content blocks + tool_calls + response.content 中统计
     """
     messages: List[dict] = best_data.get("messages") or []
     resp = best_data.get("response") or {}
     resp_content = resp.get("content")
+    # OpenAI format: extract content from choices[0].message
+    if resp_content is None and resp.get("choices"):
+        oai_msg = (resp["choices"][0] or {}).get("message") or {}
+        text = oai_msg.get("content")
+        if text:
+            resp_content = [{"type": "text", "text": text}]
+        # Also count tool_calls from OpenAI response
+        if oai_msg.get("tool_calls"):
+            resp_content = resp_content or []
+            for tc in oai_msg["tool_calls"]:
+                fn = tc.get("function", {})
+                try:
+                    inp = json.loads(fn.get("arguments", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    inp = fn.get("arguments", "")
+                resp_content.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", "unknown"),
+                    "input": inp,
+                })
     stats = _new_best_data_stats()
 
     for msg in messages:
@@ -488,9 +579,10 @@ def analyze_best_data(best_data: dict) -> Dict[str, Any]:
         if role == "user":
             _analyze_user_message(content, stats)
         elif role == "assistant":
-            _analyze_assistant_message(content, stats)
+            _analyze_assistant_message(msg, stats)
+        elif role == "tool":
+            _analyze_tool_role_message(msg, stats)
 
-        # 质量检查依赖正文和 thinking/reasoning 内容，这里与主统计一并扫描。
         _mark_garbled_from_content(content, stats)
 
     if isinstance(resp_content, list):
