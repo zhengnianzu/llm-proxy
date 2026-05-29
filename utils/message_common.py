@@ -77,7 +77,8 @@ def extract_messages(data: Any) -> Optional[List[dict]]:
 
 
 def count_user_messages(messages: List[dict]) -> int:
-    return sum(1 for m in messages if m.get("role") == "user")
+    # OpenAI 格式中工具结果的 role 是 "tool"（而非 Anthropic 的 "user"），也需计入以确保聚合正确
+    return sum(1 for m in messages if m.get("role") in ("user", "tool"))
 
 
 def count_real_user_turns(messages: List[dict]) -> int:
