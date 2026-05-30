@@ -287,6 +287,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 eprint("[app] --sync: meta file not ready after 60s, skipping sync")
                 return 0
             args.interval = None
+            cmd_sync_stop(args)
             return cmd_sync(args)
         eprint("[app] --sync: not configured. Run: sync config <yaml_path>")
 
