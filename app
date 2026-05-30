@@ -273,6 +273,23 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"[app] started: pid={proc.pid} host={host} port={port}")
     print(f"[app] env -> {service_key}")
     print(f"[app] log -> {log_file}")
+
+    if getattr(args, "sync", False):
+        config = load_sync_config(state)
+        if config.get("obs_base"):
+            meta_path = LOG_DIR / f"app-meta-port{port}.json"
+            print("[app] --sync: waiting for app meta file...")
+            for _ in range(6):
+                if meta_path.exists():
+                    break
+                time.sleep(10)
+            if not meta_path.exists():
+                eprint("[app] --sync: meta file not ready after 60s, skipping sync")
+                return 0
+            args.interval = None
+            return cmd_sync(args)
+        eprint("[app] --sync: not configured. Run: sync config <yaml_path>")
+
     return 0
 
 
@@ -391,12 +408,309 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return _print_services(state)
 
 
+# ---------------------------------------------------------------------------
+# Sync config — yaml file path stored in .cli_state.yaml["sync_config"]
+# ---------------------------------------------------------------------------
+
+def _resolve_sync_config_path(state: dict) -> Optional[Path]:
+    rel = state.get("sync_config")
+    if not rel:
+        return None
+    p = Path(rel)
+    if not p.is_absolute():
+        p = BASE_DIR / p
+    return p.resolve()
+
+
+def load_sync_config(state: dict) -> dict:
+    path = _resolve_sync_config_path(state)
+    if not path or not path.exists():
+        return {}
+    if yaml is not None:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _read_app_meta(port: int) -> dict:
+    meta_path = LOG_DIR / f"app-meta-port{port}.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _get_sync_service(state: dict, service_key: str) -> dict:
+    return state.setdefault("sync_services", {}).setdefault(service_key, {})
+
+
+# ---------------------------------------------------------------------------
+# cmd_sync_config — point to a yaml config file
+# ---------------------------------------------------------------------------
+
+def cmd_sync_config(args: argparse.Namespace) -> int:
+    state = load_state()
+    config_path = getattr(args, "config_file", None)
+
+    if config_path:
+        p = Path(config_path)
+        if not p.is_absolute():
+            p = BASE_DIR / p
+        p = p.resolve()
+        if not p.exists():
+            eprint(f"[sync] config file not found: {p}")
+            return 1
+        rel = os.path.relpath(p, BASE_DIR)
+        state["sync_config"] = rel
+        state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_state(state)
+        print(f"[sync] sync_config -> {rel}")
+        config = load_sync_config(state)
+        for k, v in config.items():
+            print(f"[sync]   {k}: {v}")
+        return 0
+
+    # show current
+    cfg_path = _resolve_sync_config_path(state)
+    if not cfg_path:
+        print("[sync] not configured")
+        print("[sync] run: sync config <yaml_path>")
+        return 0
+    print(f"[sync] config: {state.get('sync_config')}")
+    print(f"[sync] resolved: {cfg_path}")
+    config = load_sync_config(state)
+    for k, v in config.items():
+        print(f"[sync]   {k}: {v}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# cmd_sync — start sync daemon
+# ---------------------------------------------------------------------------
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    state = load_state()
+    config = load_sync_config(state)
+    obs_base = config.get("obs_base", "")
+    if not obs_base:
+        eprint("[sync] not configured. Run: sync config <yaml_path>")
+        return 1
+
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    env_path, env_values, host, port, _, _ = state_runtime(state)
+    service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
+
+    meta = _read_app_meta(port)
+    logs_dir = meta.get("logs_dir")
+    if not logs_dir:
+        eprint(f"[sync] app meta not found: logs/app-meta-port{port}.json")
+        eprint("[sync] start the app first: ./app start")
+        return 1
+
+    # OBS 目标：obs_base + logs_dir 相对于 logs_all/ 的部分
+    # logs_dir 形如 logs_all/env-xxx-key/26052814
+    if logs_dir.startswith("logs_all/"):
+        env_segment = logs_dir[len("logs_all/"):]
+    else:
+        env_segment = os.path.basename(logs_dir)
+    obs_dst = obs_base.rstrip("/") + "/" + env_segment.strip("/") + "/"
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    pid_file = LOG_DIR / f"sync-{service_slug}.pid"
+    log_file = LOG_DIR / f"sync-{service_slug}.log"
+
+    pid = read_pid(pid_file)
+    if is_pid_running(pid):
+        print(f"[sync] already running: pid={pid} env={service_key}")
+        print(f"[sync] log -> {log_file}")
+        return 0
+
+    interval = args.interval or config.get("interval", 600)
+    workers = config.get("workers", 4)
+    upload_script = config.get("upload_script")
+
+    cmd = [
+        sys.executable, "-m", "utils.obs_sync",
+        "--logs-dir", str(logs_dir),
+        "--obs-dst", str(obs_dst),
+        "--interval", str(interval),
+        "--workers", str(workers),
+    ]
+    if upload_script:
+        cmd.extend(["--upload-script", str(upload_script)])
+
+    with log_file.open("ab") as log_fp:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(BASE_DIR),
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
+    time.sleep(1)
+    if not is_pid_running(proc.pid):
+        eprint(f"[sync] failed to start, check log: {log_file}")
+        return 1
+
+    sync_svc = _get_sync_service(state, service_key)
+    sync_svc.update({
+        "pid": proc.pid,
+        "pid_file": os.path.relpath(pid_file, BASE_DIR),
+        "log_file": os.path.relpath(log_file, BASE_DIR),
+        "logs_dir": logs_dir,
+        "obs_dst": obs_dst,
+        "interval": interval,
+        "config": state.get("sync_config", ""),
+        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    save_state(state)
+    print(f"[sync] started: pid={proc.pid} env={service_key}")
+    print(f"[sync] {logs_dir} -> {obs_dst}")
+    print(f"[sync] log -> {log_file}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# cmd_sync_stop — stop sync daemon
+# ---------------------------------------------------------------------------
+
+def cmd_sync_stop(args: argparse.Namespace) -> int:
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    env_path = resolve_env_path(state["source_env"])
+    service_key = get_service_key(env_path)
+    sync_svcs = state.get("sync_services") or {}
+    sync_svc = sync_svcs.get(service_key, {})
+
+    pid_file_rel = sync_svc.get("pid_file")
+    pid = sync_svc.get("pid")
+    if pid_file_rel:
+        pid_from_file = read_pid(BASE_DIR / pid_file_rel)
+        if pid_from_file:
+            pid = pid_from_file
+
+    if not is_pid_running(pid):
+        print(f"[sync] not running: env={service_key}")
+        if pid_file_rel:
+            (BASE_DIR / pid_file_rel).unlink(missing_ok=True)
+        sync_svc["pid"] = None
+        save_state(state)
+        return 0
+
+    print(f"[sync] stopping pid={pid} env={service_key}")
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(20):
+        time.sleep(0.5)
+        if not is_pid_running(pid):
+            break
+
+    if is_pid_running(pid):
+        print(f"[sync] force kill pid={pid}")
+        os.kill(pid, signal.SIGKILL)
+        time.sleep(0.2)
+
+    if pid_file_rel:
+        (BASE_DIR / pid_file_rel).unlink(missing_ok=True)
+    sync_svc["pid"] = None
+    sync_svc["stopped_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_state(state)
+    print("[sync] stopped")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# cmd_sync_logs — view sync daemon logs
+# ---------------------------------------------------------------------------
+
+def cmd_sync_logs(args: argparse.Namespace) -> int:
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    env_path = resolve_env_path(state["source_env"])
+    service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
+    sync_svc = (state.get("sync_services") or {}).get(service_key, {})
+
+    log_file_rel = sync_svc.get("log_file")
+    if log_file_rel:
+        log_file = BASE_DIR / log_file_rel
+    else:
+        log_file = LOG_DIR / f"sync-{service_slug}.log"
+
+    if not log_file.exists():
+        eprint(f"[sync] log file not found: {log_file}")
+        return 1
+
+    if args.follow:
+        try:
+            subprocess.run(["tail", "-n", str(args.lines), "-f", str(log_file)], check=False)
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    sys.stdout.writelines(tail_lines(log_file, args.lines))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# cmd_sync_status / cmd_sync_list — show sync services
+# ---------------------------------------------------------------------------
+
+def _print_sync_services(state: dict) -> int:
+    sync_svcs = state.get("sync_services") or {}
+    if not sync_svcs:
+        print("[sync] no recorded sync services")
+        return 0
+    for key, svc in sync_svcs.items():
+        pid = svc.get("pid")
+        pid_file_rel = svc.get("pid_file")
+        if pid_file_rel:
+            pid_from_file = read_pid(BASE_DIR / pid_file_rel)
+            if pid_from_file:
+                pid = pid_from_file
+        running = is_pid_running(pid)
+        interval = svc.get("interval", "-")
+        config_file = svc.get("config", "-")
+        marker = "*" if key == state.get("source_env") else " "
+        print(f"{marker} {key}: {'running' if running else 'stopped'} pid={pid or '-'} interval={interval}s config={config_file}")
+        print(f"    src={svc.get('logs_dir', '-')}")
+        print(f"    dst={svc.get('obs_dst', '-')}")
+    return 0
+
+
+def cmd_sync_status(_args: argparse.Namespace) -> int:
+    state = load_state()
+    cfg_rel = state.get("sync_config")
+    if cfg_rel:
+        print(f"[sync] config: {cfg_rel}")
+    else:
+        print("[sync] config: not set")
+    return _print_sync_services(state)
+
+
+def cmd_sync_list(_args: argparse.Namespace) -> int:
+    state = load_state()
+    return _print_sync_services(state)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LLM proxy service CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_start = subparsers.add_parser("start", help="Start app.py using configured source_env")
     p_start.add_argument("--env", dest="env_file", help="Env file to use for this start")
+    p_start.add_argument("--sync", action="store_true", help="Also start sync daemon (requires obs_base configured)")
     p_start.set_defaults(func=cmd_start)
 
     p_stop = subparsers.add_parser("stop", help="Stop the running app")
@@ -405,6 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_restart = subparsers.add_parser("restart", help="Restart the app")
     p_restart.add_argument("--env", dest="env_file", help="Env file to restart")
+    p_restart.add_argument("--sync", action="store_true", help="Also start sync daemon after restart")
     p_restart.set_defaults(func=cmd_restart)
 
     p_logs = subparsers.add_parser("logs", help="Show log output")
@@ -422,6 +737,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_list = subparsers.add_parser("list", help="List all recorded env services")
     p_list.set_defaults(func=cmd_list)
+
+    # --- sync subcommands ---
+    p_sync = subparsers.add_parser("sync", help="Manage sync daemon (start/stop/logs/status)")
+    sync_sub = p_sync.add_subparsers(dest="sync_action", required=True)
+
+    ps_start = sync_sub.add_parser("start", help="Start sync daemon")
+    ps_start.add_argument("--env", dest="env_file", help="Env file to sync")
+    ps_start.add_argument("--interval", type=int, default=None, help="Override sync interval (seconds)")
+    ps_start.set_defaults(func=cmd_sync)
+
+    ps_stop = sync_sub.add_parser("stop", help="Stop sync daemon")
+    ps_stop.add_argument("--env", dest="env_file", help="Env file whose sync to stop")
+    ps_stop.set_defaults(func=cmd_sync_stop)
+
+    ps_logs = sync_sub.add_parser("logs", help="Show sync daemon logs")
+    ps_logs.add_argument("--env", dest="env_file", help="Env file whose sync logs to show")
+    ps_logs.add_argument("-f", "--follow", action="store_true", help="Follow the log file")
+    ps_logs.add_argument("-n", "--lines", type=int, default=100, help="Number of lines to show")
+    ps_logs.set_defaults(func=cmd_sync_logs)
+
+    ps_status = sync_sub.add_parser("status", help="Show sync status and config")
+    ps_status.set_defaults(func=cmd_sync_status)
+
+    ps_list = sync_sub.add_parser("list", help="List all recorded sync services")
+    ps_list.set_defaults(func=cmd_sync_list)
+
+    ps_config = sync_sub.add_parser("config", help="Set or show sync config file")
+    ps_config.add_argument("config_file", nargs="?", help="YAML config file path, e.g. settings/obs_base.yaml")
+    ps_config.set_defaults(func=cmd_sync_config)
 
     return parser
 

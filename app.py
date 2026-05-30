@@ -1733,4 +1733,16 @@ if __name__ == "__main__":
 
     host = os.getenv("PROXY_HOST", "127.0.0.1")
     port = int(os.getenv("PROXY_PORT", "4000"))
+
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
+
+    os.makedirs("logs", exist_ok=True)
+    _meta_path = os.path.join("logs", f"app-meta-port{port}.json")
+    try:
+        with open(_meta_path, "w", encoding="utf-8") as _mf:
+            json.dump({"logs_dir": LOGS_DIR, "logs_session_dir": LOGS_SESSION_DIR}, _mf)
+    except Exception:
+        pass
+
     uvicorn.run("app:app", host=host, port=port, log_level="info")
