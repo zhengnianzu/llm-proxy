@@ -410,6 +410,45 @@ def cmd_list(_args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Connect — connection test
+# ---------------------------------------------------------------------------
+
+def cmd_connect(args: argparse.Namespace) -> int:
+    from utils.connection_test import run_test, print_result
+
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    env_path, env_values, host, port, _, _ = state_runtime(state)
+
+    model = args.model
+    method = args.method
+
+    if args.noproxy:
+        upstream_url = env_values.get("UPSTREAM_URL", "")
+        if not upstream_url:
+            eprint("[connect] UPSTREAM_URL not found in env file")
+            return 1
+        upstream_url = upstream_url.rstrip("/").removesuffix("/v1")
+        raw_key = env_values.get("UPSTREAM_API_KEY", "").strip().strip('"')
+        api_key = raw_key.split(",")[0].strip() if raw_key else ""
+        print(f"[connect] direct upstream: {upstream_url}")
+        # 上游统一用 openai 协议
+        method = "openai"
+        base_url = upstream_url
+    else:
+        base_url = f"http://{host}:{port}"
+        # 从 env 文件读取 API_KEY（客户端 key），取第一个
+        raw_api_key = env_values.get("API_KEY", "").strip().strip('"')
+        api_key = raw_api_key.split(",")[0].strip() if raw_api_key else ""
+        print(f"[connect] via proxy: {base_url}")
+
+    print(f"[connect] method={method} model={model}")
+    result = run_test(base_url, method, model, api_key, args.timeout)
+    print_result(result)
+    return 0 if result["ok"] else 1
+
+
+# ---------------------------------------------------------------------------
 # Sync config — yaml file path stored in .cli_state.yaml["sync_config"]
 # ---------------------------------------------------------------------------
 
@@ -738,6 +777,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_list = subparsers.add_parser("list", help="List all recorded env services")
     p_list.set_defaults(func=cmd_list)
+
+    p_connect = subparsers.add_parser("connect", help="Connection test (proxy or upstream)")
+    p_connect.add_argument("--env", dest="env_file", help="Env file to use")
+    p_connect.add_argument("--model", default="claude-sonnet-4-6", help="Model to test (default: claude-sonnet-4-6)")
+    p_connect.add_argument("--method", default="anthropic", choices=["anthropic", "openai"], help="API protocol (default: anthropic)")
+    p_connect.add_argument("--noproxy", action="store_true", help="Test upstream directly, bypassing proxy")
+    p_connect.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
+    p_connect.set_defaults(func=cmd_connect)
 
     # --- sync subcommands ---
     p_sync = subparsers.add_parser("sync", help="Manage sync daemon (start/stop/logs/status)")
