@@ -197,6 +197,16 @@ def _run_sync_cycle(
 
     logger.info("upload summary: %d ok, %d failed", ok_count, fail_count)
 
+    # 同步 index.jsonl 和 .session_cache.jsonl
+    for meta_name in ("index.jsonl", ".session_cache.jsonl"):
+        meta_file = Path(logs_dir) / meta_name
+        if meta_file.is_file():
+            _, m_ok, m_msg = _upload_file(meta_file, obs_dst, upload_script)
+            if m_ok:
+                logger.info("%s uploaded", meta_name)
+            else:
+                logger.error("%s upload FAIL: %s", meta_name, m_msg)
+
     # 即使有失败也推进 offset，避免下次重复处理已成功的条目
     # 失败的文件在下次 app.py 重启时会重新写入 index.jsonl
     state["line_offset"] = total_lines
