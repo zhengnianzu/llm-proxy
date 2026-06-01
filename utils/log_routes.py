@@ -457,8 +457,20 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
         return {"items": items, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models)}
 
 def register_log_routes(app: FastAPI) -> None:
+    _current_log_dir = get_log_dir("logs_all")
+    _env_dir = str(Path(_current_log_dir).parent)
+
     def unified_log_dir() -> str:
-        return get_log_dir("logs_all")
+        return _current_log_dir
+
+    def resolve_log_dir(log_dir: str = "") -> str:
+        if not log_dir:
+            return _current_log_dir
+        # 只允许选择同 env-key 下的时间戳子目录
+        candidate = os.path.join(_env_dir, log_dir)
+        if os.path.isdir(candidate):
+            return candidate
+        return _current_log_dir
 
     def anthropic_log_dir() -> str:
         return get_log_dir("logs_anthropic")
@@ -466,20 +478,37 @@ def register_log_routes(app: FastAPI) -> None:
     def openai_log_dir() -> str:
         return get_log_dir("logs_openai")
 
+    @app.get("/logs/dirs")
+    def logs_dirs():
+        """列出 env-key 目录下所有时间戳子目录，当前目录排在第一个。"""
+        current_tag = Path(_current_log_dir).name
+        dirs = []
+        env_path = Path(_env_dir)
+        if env_path.is_dir():
+            for sub in sorted(env_path.iterdir(), reverse=True):
+                if sub.is_dir():
+                    dirs.append({
+                        "name": sub.name,
+                        "current": sub.name == current_tag,
+                    })
+        return JSONResponse({"dirs": dirs, "current": current_tag})
+
     # --- 统一路由（新） ---
 
     @app.get("/logs/list")
-    def logs_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
-        return JSONResponse(_list_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
+    def logs_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = ""):
+        return JSONResponse(_list_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model))
 
     @app.get("/logs/file")
-    def logs_file(filename: str):
+    def logs_file(filename: str, log_dir: str = ""):
         if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
-        path = os.path.join(unified_log_dir(), filename)
+        target_dir = resolve_log_dir(log_dir)
+        path = os.path.join(target_dir, filename)
         if not os.path.isfile(path):
-            for legacy_dir in [anthropic_log_dir(), openai_log_dir()]:
-                alt = os.path.join(legacy_dir, filename)
+            # fallback: 在当前目录和 legacy 目录中搜索
+            for search_dir in [unified_log_dir(), anthropic_log_dir(), openai_log_dir()]:
+                alt = os.path.join(search_dir, filename)
                 if os.path.isfile(alt):
                     path = alt
                     break
@@ -498,8 +527,8 @@ def register_log_routes(app: FastAPI) -> None:
         return JSONResponse(data)
 
     @app.get("/logs/aggregate")
-    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
+    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model))
 
     # --- 旧路由（别名，向后兼容） ---
 

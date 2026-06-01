@@ -313,6 +313,7 @@
     <div class="nav-pills-wrap">
         <a class="nav-pill" href="/">监控总览</a>
         <a class="nav-pill" href="/query">查询统计</a>
+        <a class="nav-pill" href="/sessions">Session 统计</a>
         <a class="nav-pill active" href="/history">对话历史记录</a>
         <a class="nav-pill" href="/failures">失败历史记录</a>
         <a class="nav-pill" href="/logout">退出登录</a>
@@ -322,6 +323,9 @@
 <div class="header">
     <span class="min-msg-label" id="loadStatus" style="font-size:14px;font-weight:600;color:#1a202c;"></span>
     <div class="header-right">
+        <span class="min-msg-label">时间目录</span>
+        <select class="folder-select" id="logDirSelect" onchange="resetAndLoad()">
+        </select>
         <span class="min-msg-label">文件夹</span>
         <select class="folder-select" id="folderSelect" onchange="resetAndLoad()">
             <option value="agg">聚合视图</option>
@@ -394,6 +398,30 @@ let totalItems = 0;
 let isLoadingMore = false;
 let knownKeys = new Set();
 let knownModels = new Set();
+let _logDirsLoaded = false;
+
+function currentLogDir() {
+    const sel = document.getElementById('logDirSelect');
+    return sel ? sel.value : '';
+}
+
+async function loadLogDirs() {
+    if (_logDirsLoaded) return;
+    try {
+        const res = await fetch('/logs/dirs');
+        const data = await res.json();
+        const sel = document.getElementById('logDirSelect');
+        sel.innerHTML = '';
+        (data.dirs || []).forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.name;
+            opt.textContent = d.name + (d.current ? ' (当前)' : '');
+            if (d.current) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        _logDirsLoaded = true;
+    } catch(e) {}
+}
 
 function currentFolder() {
     return document.getElementById('folderSelect').value;
@@ -503,6 +531,8 @@ async function loadFileList(refresh = false) {
     const filterModel = document.getElementById('filterModel').value;
     const resolvedKey = filterKey === '__default__' ? '' : filterKey;
     let params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
+    const logDir = currentLogDir();
+    if (logDir) params += `&log_dir=${encodeURIComponent(logDir)}`;
     if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
     if (filterModel) params += `&model=${encodeURIComponent(filterModel)}`;
     if (refresh) params += '&refresh=true';
@@ -651,7 +681,9 @@ async function selectAggChain(idx, el) {
 
     if (chain.latest_file) {
         try {
-            const res = await fetch(`/logs/file?filename=${encodeURIComponent(chain.latest_file)}`);
+            const logDir = currentLogDir();
+            const fileParams = `filename=${encodeURIComponent(chain.latest_file)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`;
+            const res = await fetch(`/logs/file?${fileParams}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             renderMessages(data, `${chain.q1_preview || chain.latest_file}  (${chain.file_count} 个文件)`);
@@ -669,7 +701,9 @@ async function selectFile(item, el) {
     activeItem = el;
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
-        const res = await fetch(`/logs/file?filename=${encodeURIComponent(item.filename)}`);
+        const logDir = currentLogDir();
+        const fileParams = `filename=${encodeURIComponent(item.filename)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`;
+        const res = await fetch(`/logs/file?${fileParams}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         renderMessages(data, item.filename);
@@ -1276,7 +1310,7 @@ function filterSidebar() {
 })();
 
 // Init
-resetAndLoad();
+loadLogDirs().then(() => resetAndLoad());
 </script>
 </body>
 </html>

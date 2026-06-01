@@ -33,6 +33,7 @@ from utils.metrics import (
 )
 from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix, STARTUP_DATE_TAG
 from utils.log_routes import register_log_routes
+from utils.session_routes import register_session_routes
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
@@ -57,6 +58,7 @@ MONITOR_AUTH_EXACT_PATHS = {
     "/query",
     "/history",
     "/failures",
+    "/sessions",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -65,6 +67,7 @@ MONITOR_AUTH_PREFIX_PATHS = (
     "/statistic",
     "/metrics",
     "/logs",
+    "/sessions/",
 )
 MONITOR_AUTH_PUBLIC_PATHS = {
     "/hi",
@@ -1706,6 +1709,7 @@ def logs_debug_file(filename: str):
 
 
 register_log_routes(app)
+register_session_routes(app, LOGS_DIR)
 
 
 if __name__ == "__main__":
