@@ -20,6 +20,7 @@ from utils.message_common import (
     get_first_user_text,
     get_text_from_content,
     load_json_safe,
+    parse_openai_streaming_response,
     parse_streaming_response_content,
 )
 from utils.q1_index import get_effective_q1, should_update_q1, update_q1
@@ -126,6 +127,16 @@ def _extract_openai_res_content(res_path: Path):
     data = _load_json(res_path)
     if not data:
         return None
+
+    if data.get("type") == "openai_passthrough_sse_capture":
+        chunks = data.get("chunks", [])
+        if not chunks:
+            return None
+        msg = parse_openai_streaming_response(chunks)
+        if msg.get("role") == "assistant":
+            return msg
+        return None
+
     msg = data.get("json", {}).get("choices", [{}])[0].get("message")
     if isinstance(msg, dict) and msg.get("role") == "assistant":
         return msg
