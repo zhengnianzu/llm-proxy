@@ -247,6 +247,15 @@ def sync_loop(
             break
         _interruptible_sleep(interval)
 
+    # 收到停止信号后，执行最后一次同步，确保累积的数据不丢失
+    if _shutdown_requested:
+        logger.info("shutdown requested, running final sync cycle...")
+        _shutdown_requested = False
+        try:
+            _run_sync_cycle(logs_dir, obs_dst, workers, upload_script, logger)
+        except Exception:
+            logger.exception("final sync cycle failed")
+
     logger.info("obs_sync exiting")
 
 

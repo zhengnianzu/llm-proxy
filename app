@@ -649,9 +649,9 @@ def cmd_sync_stop(args: argparse.Namespace) -> int:
         save_state(state)
         return 0
 
-    print(f"[sync] stopping pid={pid} env={service_key}")
+    print(f"[sync] stopping pid={pid} env={service_key} (waiting for final sync...)")
     os.kill(pid, signal.SIGTERM)
-    for _ in range(20):
+    for _ in range(1200):
         time.sleep(0.5)
         if not is_pid_running(pid):
             break
