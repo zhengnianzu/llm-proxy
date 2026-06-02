@@ -226,6 +226,8 @@ def sync_loop(
     once: bool = False,
     logger: Optional[logging.Logger] = None,
 ):
+    global _shutdown_requested
+
     if logger is None:
         logger = _setup_logging(logs_dir)
 
