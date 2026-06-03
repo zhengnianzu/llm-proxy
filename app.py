@@ -249,18 +249,36 @@ def _strip_task_explore_line(
     return cleaned
 
 
+def _parse_extra_headers() -> Dict[str, str]:
+    raw = os.getenv("UPSTREAM_EXTRA_HEADERS", "").strip()
+    if not raw:
+        return {}
+    headers = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        k, v = pair.split(":", 1)
+        k, v = k.strip(), v.strip()
+        if k:
+            headers[k] = v
+    return headers
+
+
+_EXTRA_HEADERS = _parse_extra_headers()
+
+
 def build_upstream_headers(x_auth_token: str, model_id: str) -> Dict[str, str]:
-    """
-    你网关/后端需要的 headers 全放这。
-    如果你还需要额外的（比如 X-ID / X-APPKEY），也在这里加。
-    """
     ack = os.getenv('UPSTREAM_API_KEY') or x_auth_token
-    return {
+    headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {ack}",
         "x-api-key": ack,
         "Model-Id": os.environ.get("MODEL_ID") or model_id,
     }
+    if _EXTRA_HEADERS:
+        headers.update(_EXTRA_HEADERS)
+    return headers
 
 
 def _ssl_verify() -> bool:
