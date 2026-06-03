@@ -686,6 +686,8 @@ async function selectAggChain(idx, el) {
             const res = await fetch(`/logs/file?${fileParams}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+            data._req_file = chain.latest_file;
+            data._log_dir = logDir || '';
             renderMessages(data, `${chain.q1_preview || chain.latest_file}  (${chain.file_count} 个文件)`);
         } catch(e) {
             showError(`加载失败：${e.message}`);
@@ -706,7 +708,9 @@ async function selectFile(item, el) {
         const res = await fetch(`/logs/file?${fileParams}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        renderMessages(data, item.filename);
+        data._req_file = item.filename;
+        data._log_dir = logDir || '';
+        renderJson(data, item.filename);
         renderDetailPanel({
             api_key: item.api_key || '',
             models: [data.model || item.model].filter(Boolean),
@@ -760,6 +764,24 @@ function toggleDetail() {
 let _toolMode = 0;
 let _activeToolFilters = new Set();
 
+function renderJson(data, filename) {
+    chatPanel.innerHTML = '';
+    const header = document.createElement('div');
+    header.className = 'metadata';
+    header.innerHTML = `
+        <div class="metadata-title">请求文件</div>
+        <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="/logs/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
+    `;
+    chatPanel.appendChild(header);
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'margin:12px;padding:12px;background:#1e1e1e;color:#d4d4d4;border-radius:6px;overflow:auto;font-size:12px;line-height:1.5;max-height:calc(100vh - 200px);white-space:pre-wrap;word-break:break-all;';
+    const display = {...data};
+    delete display._req_file;
+    delete display._log_dir;
+    pre.textContent = JSON.stringify(display, null, 2);
+    chatPanel.appendChild(pre);
+}
+
 function renderMessages(data, filename) {
     chatPanel.innerHTML = '';
     const messages = data.messages ?? (Array.isArray(data) ? data : null);
@@ -782,7 +804,7 @@ function renderMessages(data, filename) {
             ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${data.temperature}</span></div>` : ''}
             ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${data.max_tokens}</span></div>` : ''}
             <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
-            <div class="metadata-item"><strong>文件</strong><span>${filename}</span></div>
+            <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="/logs/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
         `;
         chatPanel.appendChild(meta);
     }

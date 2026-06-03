@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from utils.log_paths import build_index_path, get_log_dir
 from utils.message_common import (
@@ -536,6 +536,22 @@ def register_log_routes(app: FastAPI) -> None:
             if openai_content is not None:
                 data["messages"].append({**openai_content, "_from_res": True})
         return JSONResponse(data)
+
+    @app.get("/logs/file/download")
+    def logs_file_download(filename: str, log_dir: str = ""):
+        if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
+            return JSONResponse({"error": "invalid filename"}, status_code=400)
+        target_dir = resolve_log_dir(log_dir)
+        path = os.path.join(target_dir, filename)
+        if not os.path.isfile(path):
+            for search_dir in [unified_log_dir(), anthropic_log_dir(), openai_log_dir()]:
+                alt = os.path.join(search_dir, filename)
+                if os.path.isfile(alt):
+                    path = alt
+                    break
+            else:
+                return JSONResponse({"error": "file not found"}, status_code=404)
+        return FileResponse(path, filename=filename, media_type="application/json")
 
     @app.get("/logs/aggregate")
     def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = ""):
