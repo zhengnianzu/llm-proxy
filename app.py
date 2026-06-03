@@ -2,7 +2,6 @@ import re
 import os
 import json
 import time
-import glob
 import httpx
 import hmac
 import asyncio
@@ -31,7 +30,7 @@ from utils.metrics import (
     load_metrics_from_disk,
     get_metrics_storage_info,
 )
-from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix, STARTUP_DATE_TAG
+from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix, get_service_log_dir, STARTUP_DATE_TAG
 from utils.log_routes import register_log_routes
 from utils.session_routes import register_session_routes
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
@@ -76,30 +75,12 @@ MONITOR_AUTH_PUBLIC_PATHS = {
 }
 
 LOGS_DIR = get_log_dir("logs_all")
-LOGS_SESSION_DIR = get_log_dir("logs_session")
 
-# Legacy aliases for backward-compat (startup index loading)
-_LEGACY_LOGS_ANTHROPIC = get_log_dir("logs_anthropic")
-_LEGACY_LOGS_SESSION_ANTHROPIC = get_log_dir("logs_session_anthropic")
-_LEGACY_LOGS_OPENAI = get_log_dir("logs_openai")
-_LEGACY_LOGS_SESSION_OPENAI = get_log_dir("logs_session_openai")
-_LEGACY_LOGS_RESPONSES = get_log_dir("logs_responses")
-_LEGACY_LOGS_SESSION_RESPONSES = get_log_dir("logs_session_responses")
+SERVICE_LOG_DIR = get_service_log_dir()
 
 
 def _build_debug_dir() -> str:
-    parts = []
-    task_tag = get_log_task_tag()
-    if task_tag:
-        parts.append(task_tag)
-    port = (os.getenv("PROXY_PORT") or "").strip()
-    if port:
-        parts.append(f"port{port}")
-    upstream = get_upstream_key_prefix()
-    if upstream:
-        parts.append(upstream)
-    suffix = "-".join(parts) if parts else "default"
-    return os.path.join("logs", "debug", suffix, STARTUP_DATE_TAG)
+    return os.path.join(SERVICE_LOG_DIR, "debug", STARTUP_DATE_TAG)
 
 
 LOGS_DEBUG = _build_debug_dir()
@@ -430,11 +411,8 @@ def _build_index_path(log_dir: str) -> str:
 
 def _index_path_for_req_file(req_file: str) -> str:
     req_path = os.path.normpath(req_file)
-    session_root = os.path.normpath(LOGS_SESSION_DIR)
     main_root = os.path.normpath(LOGS_DIR)
 
-    if req_path == session_root or req_path.startswith(session_root + os.sep):
-        return _build_index_path(LOGS_SESSION_DIR)
     if req_path == main_root or req_path.startswith(main_root + os.sep):
         return _build_index_path(LOGS_DIR)
 
@@ -451,12 +429,7 @@ def _iter_existing_index_files(*roots: str):
 def _load_index():
     """启动时从各日志目录的 index.jsonl 恢复历史计数。"""
     global _first_count, _total_count, _valid_count
-    dirs_to_scan = [LOGS_DIR, LOGS_SESSION_DIR]
-    for legacy in [_LEGACY_LOGS_ANTHROPIC, _LEGACY_LOGS_SESSION_ANTHROPIC,
-                   _LEGACY_LOGS_OPENAI, _LEGACY_LOGS_SESSION_OPENAI,
-                   _LEGACY_LOGS_RESPONSES, _LEGACY_LOGS_SESSION_RESPONSES]:
-        if os.path.isdir(legacy):
-            dirs_to_scan.append(legacy)
+    dirs_to_scan = [LOGS_DIR]
     for index_file in _iter_existing_index_files(*dirs_to_scan):
         with open(index_file, "r", encoding="utf-8") as f:
             for line in f:
@@ -641,70 +614,6 @@ def _sanitize_messages(messages: Any) -> Any:
     return cleaned
 
 
-def _extract_text_from_blocks(blocks: Any) -> str:
-    if blocks is None:
-        return ""
-    if isinstance(blocks, str):
-        return blocks
-    if isinstance(blocks, list):
-        parts = []
-        for b in blocks:
-            if isinstance(b, dict) and b.get("type") == "text":
-                parts.append(b.get("text", ""))
-        return "".join(parts)
-    return str(blocks)
-
-
-def _extract_first_user_text(body: Dict[str, Any]) -> str:
-    """
-    提取首条 user 消息的 text 内容，用于 warmup 识别。
-    """
-    msgs = body.get("messages")
-    if not isinstance(msgs, list) or not msgs:
-        return ""
-    first = msgs[0] or {}
-    content = first.get("content")
-    return _extract_text_from_blocks(content).strip().lower()
-
-
-def _system_texts(body: Dict[str, Any]) -> List[str]:
-    """
-    拉平 system 字段的所有 text 段，便于关键词匹配。
-    """
-    systems = body.get("system")
-    if systems is None:
-        return []
-    if isinstance(systems, list):
-        texts = []
-        for s in systems:
-            if isinstance(s, dict):
-                texts.append(_extract_text_from_blocks(s.get("text")))
-            else:
-                texts.append(_extract_text_from_blocks(s))
-        return texts
-    return [_extract_text_from_blocks(systems)]
-
-
-def _should_skip_session_logging(body: Dict[str, Any]) -> bool:
-    """
-    按规则过滤不需要写入 session 目录的请求：
-    - warmup：首个 user content 为 'warmup'（不区分大小写）
-    - topic：system 含 “Analyze if this message indicates a new conversation topic”
-    - summary：system 含 “Summarize this coding conversation”
-    """
-    first_text = _extract_first_user_text(body)
-    # _extract_first_user_text 已经 lower，直接匹配小写
-    if first_text == "warmup":
-        return True
-
-    sys_texts = " ".join(t.lower() for t in _system_texts(body))
-    if "analyze if this message indicates a new conversation topic" in sys_texts:
-        return True
-    if "summarize this coding conversation" in sys_texts:
-        return True
-    return False
-
-
 @app.post("/v1/messages")
 async def anthropic_messages(req: Request):
     """anthropic透传"""
@@ -732,30 +641,14 @@ async def anthropic_messages(req: Request):
         if m:
             session_id = m.group(1)
     else:
-        # 适配codeagent获取session id
         session_id = req.headers.get("X-Session-Id")
-    skip_session_logging = False
-    if session_id:
-        skip_session_logging = _should_skip_session_logging(body)
 
     # 保存请求/响应日志（anthropic 直通）
-    if session_id and not skip_session_logging:
-        os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
-        # 若该 session_id 已有目录则复用，否则按当前时间戳新建
-        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_DIR, f"*_{session_id}")))
-        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_DIR,
-                                                                          f"{ts}_{session_id}")
-        os.makedirs(session_dir, exist_ok=True)
-        req_path = os.path.join(session_dir, f"{ts}-req.json")
-        res_path = os.path.join(session_dir, f"{ts}-res.json")
-        head_path = os.path.join(session_dir, f"{ts}-headers.json")
-    else:
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
-        req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
-        res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
-        head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
+    req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
+    res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
+    head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/messages"
     verify = _ssl_verify()
@@ -1055,29 +948,14 @@ async def openai_chat_completions(req: Request):
         if m:
             session_id = m.group(1)
     else:
-        # 适配codeagent获取session id
         session_id = req.headers.get("X-Session-Id")
-    skip_session_logging = False
-    if session_id:
-        skip_session_logging = _should_skip_session_logging(body)
 
     # 保存请求/响应日志（OpenAI 直通）
-    if session_id and not skip_session_logging:
-        os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
-        # 若该 session_id 已有目录则复用，否则按当前时间戳新建
-        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_DIR, f"*_{session_id}")))
-        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_DIR, f"{ts}_{session_id}")
-        os.makedirs(session_dir, exist_ok=True)
-        req_path = os.path.join(session_dir, f"{ts}-req.json")
-        res_path = os.path.join(session_dir, f"{ts}-res.json")
-        head_path = os.path.join(session_dir, f"{ts}-headers.json")
-    else:
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
-        req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
-        res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
-        head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
+    req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
+    res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
+    head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/chat/completions"
     verify = _ssl_verify()
@@ -1310,21 +1188,11 @@ async def openai_responses(req: Request):
         session_id = req.headers.get("X-Session-Id")
 
     # 保存请求/响应日志
-    if session_id:
-        os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
-        existing_dirs = sorted(glob.glob(os.path.join(LOGS_SESSION_DIR, f"*_{session_id}")))
-        session_dir = existing_dirs[0] if existing_dirs else os.path.join(LOGS_SESSION_DIR, f"{ts}_{session_id}")
-        os.makedirs(session_dir, exist_ok=True)
-        req_path = os.path.join(session_dir, f"{ts}-req.json")
-        res_path = os.path.join(session_dir, f"{ts}-res.json")
-        head_path = os.path.join(session_dir, f"{ts}-headers.json")
-    else:
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
-        req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
-        res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
-        head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
+    req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
+    res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
+    head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/responses"
     verify = _ssl_verify()
@@ -1580,7 +1448,6 @@ def index_stats():
         "valid_count": _valid_count,
         "success_rate": round(rate, 4),
         "index_file": _build_index_path(LOGS_DIR),
-        "session_index_file": _build_index_path(LOGS_SESSION_DIR),
         "debug_dir": LOGS_DEBUG,
         "rpm_log": metrics_info["rpm_log"],
         "rate_log": metrics_info["rate_log"],
@@ -1602,38 +1469,71 @@ def rate_history(hours: int = 2):
 
 @app.get("/logs/debug/envs")
 def logs_debug_envs():
-    debug_root = Path("logs", "debug")
-    if not debug_root.is_dir():
-        return JSONResponse([])
     envs = []
-    for env_dir in sorted(debug_root.iterdir()):
-        if not env_dir.is_dir():
+    logs_root = Path("logs")
+    if not logs_root.is_dir():
+        return JSONResponse(envs)
+
+    # New structure: logs/port*/*/debug/{hour}/
+    for port_dir in sorted(logs_root.glob("port*")):
+        if not port_dir.is_dir():
             continue
-        for hour_dir in sorted(env_dir.iterdir(), reverse=True):
-            if hour_dir.is_dir():
-                envs.append(f"{env_dir.name}/{hour_dir.name}")
-        if not any(hour_dir.is_dir() for hour_dir in env_dir.iterdir()):
-            envs.append(env_dir.name)
+        for env_dir in sorted(port_dir.iterdir()):
+            if not env_dir.is_dir():
+                continue
+            debug_dir = env_dir / "debug"
+            if not debug_dir.is_dir():
+                continue
+            for hour_dir in sorted(debug_dir.iterdir(), reverse=True):
+                if hour_dir.is_dir():
+                    envs.append(f"{port_dir.name}/{env_dir.name}/{hour_dir.name}")
+
+    # COMPAT: 旧版 debug 目录 logs/debug/{suffix}/{hour}/，可移除整段
+    legacy_root = Path("logs", "debug")
+    if legacy_root.is_dir():
+        for env_dir in sorted(legacy_root.iterdir()):
+            if not env_dir.is_dir():
+                continue
+            for hour_dir in sorted(env_dir.iterdir(), reverse=True):
+                if hour_dir.is_dir():
+                    envs.append(f"debug/{env_dir.name}/{hour_dir.name}")
+
     return JSONResponse(envs)
 
 
 def _iter_debug_txt_files(env_filter: str = ""):
-    debug_root = Path("logs", "debug")
-    if not debug_root.is_dir():
-        return
+    logs_root = Path("logs")
+
     if env_filter:
-        target = debug_root / env_filter
+        target = logs_root / env_filter
         if target.is_dir():
             yield from sorted(target.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
         return
-    for path in sorted(debug_root.rglob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True):
-        yield path
+
+    # Collect from new structure: logs/port*/*/debug/
+    all_files = []
+    for port_dir in logs_root.glob("port*"):
+        if not port_dir.is_dir():
+            continue
+        for env_dir in port_dir.iterdir():
+            if not env_dir.is_dir():
+                continue
+            debug_dir = env_dir / "debug"
+            if debug_dir.is_dir():
+                all_files.extend(debug_dir.rglob("*.txt"))
+
+    # COMPAT: 旧版 debug 目录 logs/debug/，可移除
+    legacy_root = Path("logs", "debug")
+    if legacy_root.is_dir():
+        all_files.extend(legacy_root.rglob("*.txt"))
+
+    yield from sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def _debug_env_label(path: Path) -> str:
-    debug_root = Path("logs", "debug")
+    logs_root = Path("logs")
     try:
-        rel = path.parent.relative_to(debug_root)
+        rel = path.parent.relative_to(logs_root)
         return str(rel) if str(rel) != "." else ""
     except ValueError:
         return ""
@@ -1689,13 +1589,20 @@ def logs_debug_list(limit: int = 200, keyword: str = "", env: str = ""):
 def logs_debug_file(filename: str):
     if ".." in filename or not filename.endswith(".txt"):
         return JSONResponse({"error": "invalid filename"}, status_code=400)
-    path = Path("logs", "debug") / filename
+    # Try as relative path under logs/ (works for both new and legacy)
+    path = Path("logs") / filename
     if not path.is_file():
-        old_path = Path(LOGS_DEBUG) / Path(filename).name
-        if old_path.is_file():
-            path = old_path
+        # Try current instance's debug dir
+        cur_path = Path(LOGS_DEBUG) / Path(filename).name
+        if cur_path.is_file():
+            path = cur_path
         else:
-            return JSONResponse({"error": "file not found"}, status_code=404)
+            # COMPAT: 旧版 debug 文件在 logs/debug/，可移除
+            legacy_path = Path("logs", "debug") / filename
+            if legacy_path.is_file():
+                path = legacy_path
+            else:
+                return JSONResponse({"error": "file not found"}, status_code=404)
     try:
         content = path.read_text(encoding="utf-8")
     except Exception as ex:
@@ -1739,13 +1646,21 @@ if __name__ == "__main__":
     port = int(os.getenv("PROXY_PORT", "4000"))
 
     os.makedirs(LOGS_DIR, exist_ok=True)
-    os.makedirs(LOGS_SESSION_DIR, exist_ok=True)
+    os.makedirs(SERVICE_LOG_DIR, exist_ok=True)
 
-    os.makedirs("logs", exist_ok=True)
-    _meta_path = os.path.join("logs", f"app-meta-port{port}.json")
+    _meta_content = {"logs_dir": LOGS_DIR}
+    _meta_path = os.path.join(SERVICE_LOG_DIR, "app-meta.json")
     try:
         with open(_meta_path, "w", encoding="utf-8") as _mf:
-            json.dump({"logs_dir": LOGS_DIR, "logs_session_dir": LOGS_SESSION_DIR}, _mf)
+            json.dump(_meta_content, _mf)
+    except Exception:
+        pass
+    # COMPAT: 旧版 CLI 从 logs/app-meta-port{port}.json 读取，可移除整段
+    _legacy_meta_path = os.path.join("logs", f"app-meta-port{port}.json")
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open(_legacy_meta_path, "w", encoding="utf-8") as _mf:
+            json.dump(_meta_content, _mf)
     except Exception:
         pass
 

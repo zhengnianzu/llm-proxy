@@ -45,6 +45,12 @@ def _env_key_segment() -> str:
     return key_prefix
 
 
+def get_service_log_dir() -> str:
+    port = (os.getenv("PROXY_PORT") or "").strip() or "0"
+    segment = _env_key_segment()
+    return os.path.join("logs", f"port{port}", segment)
+
+
 def get_log_dir(base_name: str) -> str:
     return os.path.join(base_name, _env_key_segment(), STARTUP_DATE_TAG)
 

@@ -161,6 +161,11 @@ def get_service_slug(service_key: str) -> str:
     return slug or "default"
 
 
+def _service_log_dir(port: int, service_slug: str, key_prefix: str) -> Path:
+    segment = f"{service_slug}-{key_prefix}" if key_prefix else (service_slug or "default")
+    return LOG_DIR / f"port{port}" / segment
+
+
 def get_selected_env(args: argparse.Namespace, state: dict) -> str:
     return args.env_file or state.get("source_env") or DEFAULT_ENV
 
@@ -223,13 +228,14 @@ def cmd_start(args: argparse.Namespace) -> int:
     state["source_env"] = get_selected_env(args, state)
     env_path, env_values, host, port, pid_file, log_file = state_runtime(state)
     api_key_suffix = get_api_key_suffix(env_values)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
     service_key = get_service_key(env_path)
     service_slug = get_service_slug(service_key)
+    svc_dir = _service_log_dir(port, service_slug, api_key_suffix)
+    svc_dir.mkdir(parents=True, exist_ok=True)
     services = state.setdefault("services", {})
     service = services.setdefault(service_key, {})
-    pid_file = LOG_DIR / f"app-{service_slug}-port{port}.pid"
-    log_file = LOG_DIR / f"app-{service_slug}-port{port}.log"
+    pid_file = svc_dir / "app.pid"
+    log_file = svc_dir / "app.log"
 
     pid = read_pid(pid_file)
     if is_pid_running(pid):
@@ -277,15 +283,18 @@ def cmd_start(args: argparse.Namespace) -> int:
     if getattr(args, "sync", False):
         config = load_sync_config(state)
         if config.get("obs_base"):
-            meta_path = LOG_DIR / f"app-meta-port{port}.json"
+            meta_path = svc_dir / "app-meta.json"
             print("[app] --sync: waiting for app meta file...")
             for _ in range(6):
                 if meta_path.exists():
                     break
                 time.sleep(10)
             if not meta_path.exists():
-                eprint("[app] --sync: meta file not ready after 60s, skipping sync")
-                return 0
+                # COMPAT: 旧版 app.py 将 meta 写在 logs/app-meta-port{port}.json，可移除
+                legacy_meta = LOG_DIR / f"app-meta-port{port}.json"
+                if not legacy_meta.exists():
+                    eprint("[app] --sync: meta file not ready after 60s, skipping sync")
+                    return 0
             args.interval = None
             cmd_sync_stop(args)
             return cmd_sync(args)
@@ -304,7 +313,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
     pid = service.get("pid")
     pid_file = service.get("pid_file")
     if not pid_file and service.get("port"):
-        pid_file = os.path.relpath(LOG_DIR / f"app-{service_slug}-port{service.get('port')}.pid", BASE_DIR)
+        key_suffix = service.get("api_key_suffix", "")
+        svc_dir = _service_log_dir(service.get("port"), service_slug, key_suffix)
+        new_pid = svc_dir / "app.pid"
+        # COMPAT: 旧版 pid 文件在 logs/app-{slug}-port{port}.pid，可移除 old_pid 分支
+        old_pid = LOG_DIR / f"app-{service_slug}-port{service.get('port')}.pid"
+        pid_file = os.path.relpath(new_pid if new_pid.exists() else old_pid, BASE_DIR)
     if pid_file:
         pid_from_file = read_pid(BASE_DIR / pid_file)
         if pid_from_file:
@@ -357,8 +371,13 @@ def cmd_logs(args: argparse.Namespace) -> int:
     if log_file_rel:
         log_file = BASE_DIR / log_file_rel
     else:
-        _, _, _, port, _, _ = state_runtime(state)
-        log_file = LOG_DIR / f"app-{service_slug}-port{port}.log"
+        _, env_values, _, port, _, _ = state_runtime(state)
+        key_suffix = get_api_key_suffix(env_values)
+        svc_dir = _service_log_dir(port, service_slug, key_suffix)
+        new_log = svc_dir / "app.log"
+        # COMPAT: 旧版 log 文件在 logs/app-{slug}-port{port}.log，可移除 old_log 分支
+        old_log = LOG_DIR / f"app-{service_slug}-port{port}.log"
+        log_file = new_log if new_log.exists() else old_log
 
     if not log_file.exists():
         eprint(f"[app] log file not found: {log_file}")
@@ -478,12 +497,21 @@ def load_sync_config(state: dict) -> dict:
         return {}
 
 
-def _read_app_meta(port: int) -> dict:
-    meta_path = LOG_DIR / f"app-meta-port{port}.json"
-    if not meta_path.exists():
+def _read_app_meta(port: int, service_slug: str = "", key_prefix: str = "") -> dict:
+    if service_slug or key_prefix:
+        svc_dir = _service_log_dir(port, service_slug, key_prefix)
+        meta_path = svc_dir / "app-meta.json"
+        if meta_path.exists():
+            try:
+                return json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    # COMPAT: 旧版 meta 在 logs/app-meta-port{port}.json，可移除以下 legacy 分支
+    legacy_path = LOG_DIR / f"app-meta-port{port}.json"
+    if not legacy_path.exists():
         return {}
     try:
-        return json.loads(meta_path.read_text(encoding="utf-8"))
+        return json.loads(legacy_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -549,11 +577,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
     env_path, env_values, host, port, _, _ = state_runtime(state)
     service_key = get_service_key(env_path)
     service_slug = get_service_slug(service_key)
+    api_key_suffix = get_api_key_suffix(env_values)
 
-    meta = _read_app_meta(port)
+    meta = _read_app_meta(port, service_slug, api_key_suffix)
     logs_dir = meta.get("logs_dir")
     if not logs_dir:
-        eprint(f"[sync] app meta not found: logs/app-meta-port{port}.json")
+        eprint(f"[sync] app meta not found for port{port}/{service_slug}-{api_key_suffix}")
         eprint("[sync] start the app first: ./app start")
         return 1
 
@@ -565,9 +594,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
         env_segment = os.path.basename(logs_dir)
     obs_dst = obs_base.rstrip("/") + "/" + env_segment.strip("/") + "/"
 
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    pid_file = LOG_DIR / f"sync-{service_slug}.pid"
-    log_file = LOG_DIR / f"sync-{service_slug}.log"
+    svc_dir = _service_log_dir(port, service_slug, api_key_suffix)
+    svc_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = svc_dir / "sync.pid"
+    log_file = svc_dir / "sync.log"
 
     pid = read_pid(pid_file)
     if is_pid_running(pid):
@@ -686,7 +716,13 @@ def cmd_sync_logs(args: argparse.Namespace) -> int:
     if log_file_rel:
         log_file = BASE_DIR / log_file_rel
     else:
-        log_file = LOG_DIR / f"sync-{service_slug}.log"
+        _, env_values, _, port, _, _ = state_runtime(state)
+        key_suffix = get_api_key_suffix(env_values)
+        svc_dir = _service_log_dir(port, service_slug, key_suffix)
+        new_log = svc_dir / "sync.log"
+        # COMPAT: 旧版 sync log 在 logs/sync-{slug}.log，可移除 old_log 分支
+        old_log = LOG_DIR / f"sync-{service_slug}.log"
+        log_file = new_log if new_log.exists() else old_log
 
     if not log_file.exists():
         eprint(f"[sync] log file not found: {log_file}")

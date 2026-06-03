@@ -15,6 +15,8 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 
+from utils.log_paths import get_service_log_dir
+
 QUALIFIED_THRESHOLD = 5
 _CACHE_TTL = 30
 
@@ -132,8 +134,7 @@ def _save_cache(cache_path: str, data: Dict[str, Any]) -> None:
 
 def register_session_routes(app: FastAPI, logs_dir: str) -> None:
     env_dir = str(Path(logs_dir).parent)
-    port = os.getenv("PROXY_PORT", "4000")
-    cache_path = os.path.join("logs", f".sessions_status_port{port}.json")
+    cache_path = os.path.join(get_service_log_dir(), ".sessions_status.json")
 
     @app.get("/sessions")
     async def sessions_page():

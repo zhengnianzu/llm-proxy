@@ -12,7 +12,7 @@ import time
 import threading
 from collections import deque
 
-from utils.log_paths import get_log_task_tag, get_upstream_key_prefix
+from utils.log_paths import get_service_log_dir
 
 _METRICS_LOCK = threading.Lock()
 _MAX_UI_HOURS = 24
@@ -26,26 +26,9 @@ _RATE_WINDOW = max(int(os.getenv("RATE_WINDOW_MINUTES", str(_DEFAULT_WINDOW))), 
 _rate_buckets: deque = deque(maxlen=_RATE_WINDOW)
 _current_rate_bucket: dict = {}
 
-_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
-
-
-def _service_metrics_suffix() -> str:
-    parts = []
-    task_tag = get_log_task_tag()
-    if task_tag:
-        parts.append(task_tag)
-    port = (os.getenv("PROXY_PORT") or "").strip()
-    if port:
-        parts.append(f"port{port}")
-    upstream = get_upstream_key_prefix()
-    if upstream:
-        parts.append(upstream)
-    return "-".join(parts) if parts else "default"
-
-
-_SERVICE_SUFFIX = _service_metrics_suffix()
-_RPM_LOG = os.path.join(_LOG_DIR, f"rpm-{_SERVICE_SUFFIX}.log")
-_RATE_LOG = os.path.join(_LOG_DIR, f"rate-{_SERVICE_SUFFIX}.log")
+_SERVICE_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), get_service_log_dir())
+_RPM_LOG = os.path.join(_SERVICE_LOG_DIR, "rpm.log")
+_RATE_LOG = os.path.join(_SERVICE_LOG_DIR, "rate.log")
 
 
 def _flush_to_disk(bucket: dict, path: str):
@@ -156,7 +139,7 @@ def get_metrics_storage_info() -> dict:
     return {
         "rpm_log": _RPM_LOG,
         "rate_log": _RATE_LOG,
-        "service_suffix": _SERVICE_SUFFIX,
+        "service_log_dir": _SERVICE_LOG_DIR,
         "metrics_window_minutes": _METRICS_WINDOW,
         "rate_window_minutes": _RATE_WINDOW,
     }
