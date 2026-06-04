@@ -586,13 +586,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
         eprint("[sync] start the app first: ./app start")
         return 1
 
-    # OBS 目标：obs_base + logs_dir 相对于 logs_all/ 的部分
+    # OBS 目标：obs_base/raw/{env_segment}/
     # logs_dir 形如 logs_all/env-xxx-key/26052814
     if logs_dir.startswith("logs_all/"):
         env_segment = logs_dir[len("logs_all/"):]
     else:
         env_segment = os.path.basename(logs_dir)
-    obs_dst = obs_base.rstrip("/") + "/" + env_segment.strip("/") + "/"
+    obs_dst = obs_base.rstrip("/") + "/raw/" + env_segment.strip("/") + "/"
 
     svc_dir = _service_log_dir(port, service_slug, api_key_suffix)
     svc_dir.mkdir(parents=True, exist_ok=True)
@@ -780,6 +780,217 @@ def cmd_sync_list(_args: argparse.Namespace) -> int:
     return _print_sync_services(state)
 
 
+# ---------------------------------------------------------------------------
+# cmd_export — export session_index.jsonl (and optionally sync to OBS)
+# ---------------------------------------------------------------------------
+
+def _resolve_sess_env(args: argparse.Namespace) -> tuple[dict, str, Path, Path, str]:
+    """返回 (state, service_key, svc_dir, env_base_dir, obs_base)
+    env_base_dir = logs_all/{env-key}/ 即 mtime 的父目录
+    """
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    env_path, env_values, host, port, _, _ = state_runtime(state)
+    service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
+    api_key_suffix = get_api_key_suffix(env_values)
+
+    meta = _read_app_meta(port, service_slug, api_key_suffix)
+    logs_dir = meta.get("logs_dir") or ""
+    if logs_dir:
+        abs_logs = str(BASE_DIR / logs_dir) if not os.path.isabs(logs_dir) else logs_dir
+        env_base_dir = Path(abs_logs).parent
+    else:
+        env_base_dir = Path(".")
+
+    svc_dir = _service_log_dir(port, service_slug, api_key_suffix)
+
+    config = load_sync_config(state)
+    obs_base = config.get("obs_base", "")
+
+    return state, service_key, svc_dir, env_base_dir, obs_base
+
+
+SESS_STATE_FILE = "sessions.json"
+
+
+def _sess_state_path(svc_dir: Path) -> Path:
+    return svc_dir / SESS_STATE_FILE
+
+
+def _load_sess_state(svc_dir: Path) -> dict:
+    sp = _sess_state_path(svc_dir)
+    if sp.is_file():
+        try:
+            return json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"current_mtime": None, "mtimes": {}}
+
+
+def _save_sess_state(svc_dir: Path, sess_state: dict) -> None:
+    svc_dir.mkdir(parents=True, exist_ok=True)
+    sp = _sess_state_path(svc_dir)
+    sp.write_text(json.dumps(sess_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def cmd_export_run(args: argparse.Namespace) -> int:
+    from utils.export_sync import export_session_index, sync_session_index
+
+    state, _, svc_dir, env_base_dir, obs_base = _resolve_sess_env(args)
+    sess_state = _load_sess_state(svc_dir)
+
+    mtime = sess_state.get("current_mtime")
+    if not mtime:
+        eprint("[sess] 未设置 current_mtime. 先运行: sess list 查看可用目录, sess config <mtime> 选择")
+        return 1
+
+    logs_dir = str(env_base_dir / mtime)
+    if not os.path.isdir(logs_dir):
+        eprint(f"[sess] 目录不存在: {logs_dir}")
+        return 1
+
+    svc_dir.mkdir(parents=True, exist_ok=True)
+    log_file = svc_dir / "sess.log"
+
+    def _log(msg: str) -> None:
+        line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}\n"
+        print(msg)
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(line)
+
+    _log(f"[sess] logs_dir: {logs_dir}")
+    result = export_session_index(logs_dir, force=getattr(args, "force", False))
+    if result["skipped"]:
+        _log(f"[sess] 跳过 (无变更). 共 {result['total_sessions']} 条 session, 平均 {result['avg_msg_count']} 轮 msg")
+    else:
+        _log(f"[sess] 共 {result['total_sessions']} 条 session, 平均 {result['avg_msg_count']} 轮 msg")
+
+    # 更新 sessions.json 中该 mtime 的状态
+    mtime_state = sess_state.setdefault("mtimes", {}).setdefault(mtime, {})
+    mtime_state["total_sessions"] = result["total_sessions"]
+    mtime_state["avg_msg_count"] = result["avg_msg_count"]
+    mtime_state["exported_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not getattr(args, "sync", False):
+        _save_sess_state(svc_dir, sess_state)
+        return 0
+
+    if not obs_base:
+        eprint("[sess] sync 需要 obs_base 配置. Run: sync config <yaml_path>")
+        _save_sess_state(svc_dir, sess_state)
+        return 1
+
+    env_key_name = env_base_dir.name
+    obs_dst = obs_base.rstrip("/") + "/session/" + env_key_name + "/" + mtime + "/"
+
+    config = load_sync_config(state)
+    workers = config.get("workers", 4)
+    upload_script = config.get("upload_script")
+
+    _log(f"[sess] 同步到 {obs_dst}")
+    sync_result = sync_session_index(
+        logs_dir,
+        obs_dst=obs_dst,
+        workers=workers,
+        upload_script=upload_script,
+    )
+    _log(f"[sess] 上传 {sync_result['uploaded']} 成功, {sync_result['failed']} 失败, {sync_result['skipped']} 跳过")
+
+    mtime_state["synced_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mtime_state["sync_uploaded"] = sync_result["uploaded"]
+    mtime_state["obs_dst"] = obs_dst
+    _save_sess_state(svc_dir, sess_state)
+    return 0
+
+
+def cmd_export_list(args: argparse.Namespace) -> int:
+    """扫描 env-key 下所有 mtime 目录，合并 sessions.json 状态显示。"""
+    _, _, svc_dir, env_base_dir, _ = _resolve_sess_env(args)
+    sess_state = _load_sess_state(svc_dir)
+    current_mtime = sess_state.get("current_mtime")
+    recorded = sess_state.get("mtimes", {})
+
+    if not env_base_dir.is_dir():
+        eprint(f"[sess] 目录不存在: {env_base_dir}")
+        return 1
+
+    mtimes = sorted(
+        d.name for d in env_base_dir.iterdir() if d.is_dir()
+    )
+    if not mtimes:
+        print(f"[sess] {env_base_dir.name}: 无 mtime 目录")
+        return 0
+
+    # 检测是否有新 mtime 未记录
+    new_count = sum(1 for m in mtimes if m not in recorded)
+
+    print(f"[sess] {env_base_dir.name} ({len(mtimes)} dirs, {new_count} new)")
+    for m in mtimes:
+        marker = "*" if m == current_mtime else " "
+        info = recorded.get(m)
+        if info:
+            sessions = info.get("total_sessions", 0)
+            avg_msg = info.get("avg_msg_count", 0)
+            exported_at = info.get("exported_at", "-")
+            synced_at = info.get("synced_at")
+            line = f"{marker} {m}: {sessions} sessions, avg {avg_msg} msg, exported={exported_at}"
+            if synced_at:
+                line += f", synced={synced_at}"
+            print(line)
+            obs_dst = info.get("obs_dst")
+            if obs_dst:
+                print(f"    obs: {obs_dst}")
+        else:
+            has_index = (env_base_dir / m / "index.jsonl").is_file()
+            status = "(has index.jsonl)" if has_index else "(empty)"
+            print(f"{marker} {m}: - {status}")
+    return 0
+
+
+def cmd_export_config(args: argparse.Namespace) -> int:
+    """设置或显示当前 sess 操作的 mtime 目录。"""
+    _, _, svc_dir, env_base_dir, _ = _resolve_sess_env(args)
+    sess_state = _load_sess_state(svc_dir)
+
+    mtime = getattr(args, "mtime", None)
+    if not mtime:
+        cur = sess_state.get("current_mtime") or "(not set)"
+        print(f"[sess] current_mtime: {cur}")
+        print(f"[sess] env_base_dir: {env_base_dir}")
+        return 0
+
+    target = env_base_dir / mtime
+    if not target.is_dir():
+        eprint(f"[sess] 目录不存在: {target}")
+        return 1
+
+    sess_state["current_mtime"] = mtime
+    _save_sess_state(svc_dir, sess_state)
+    print(f"[sess] current_mtime -> {mtime}")
+    return 0
+
+
+def cmd_export_logs(args: argparse.Namespace) -> int:
+    """显示 sess export 的运行日志。"""
+    _, _, svc_dir, _, _ = _resolve_sess_env(args)
+    log_file = svc_dir / "sess.log"
+
+    if not log_file.exists():
+        eprint(f"[sess] log file not found: {log_file}")
+        return 1
+
+    if args.follow:
+        try:
+            subprocess.run(["tail", "-n", str(args.lines), "-f", str(log_file)], check=False)
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    sys.stdout.writelines(tail_lines(log_file, args.lines))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LLM proxy service CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -821,6 +1032,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_connect.add_argument("--noproxy", action="store_true", help="Test upstream directly, bypassing proxy")
     p_connect.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
     p_connect.set_defaults(func=cmd_connect)
+
+    # --- sess subcommands ---
+    p_sess = subparsers.add_parser("sess", help="Session index management (export/list/logs)")
+    sess_sub = p_sess.add_subparsers(dest="sess_action", required=True)
+
+    pe_export = sess_sub.add_parser("export", help="Export session_index.jsonl for current mtime")
+    pe_export.add_argument("--env", dest="env_file", help="Env file to resolve meta from")
+    pe_export.add_argument("--sync", action="store_true", help="Also upload triplets to OBS")
+    pe_export.add_argument("--force", action="store_true", help="Force re-export even if unchanged")
+    pe_export.set_defaults(func=cmd_export_run)
+
+    pe_config = sess_sub.add_parser("config", help="Set or show current mtime directory")
+    pe_config.add_argument("mtime", nargs="?", help="mtime directory to switch to (e.g. 26060317)")
+    pe_config.add_argument("--env", dest="env_file", help="Env file to resolve meta from")
+    pe_config.set_defaults(func=cmd_export_config)
+
+    pe_list = sess_sub.add_parser("list", help="List all mtime directories and export status")
+    pe_list.add_argument("--env", dest="env_file", help="Env file to resolve meta from")
+    pe_list.set_defaults(func=cmd_export_list)
+
+    pe_logs = sess_sub.add_parser("logs", help="Show sess export run logs")
+    pe_logs.add_argument("--env", dest="env_file", help="Env file to resolve meta from")
+    pe_logs.add_argument("-f", "--follow", action="store_true", help="Follow the log file")
+    pe_logs.add_argument("-n", "--lines", type=int, default=100, help="Number of lines to show")
+    pe_logs.set_defaults(func=cmd_export_logs)
 
     # --- sync subcommands ---
     p_sync = subparsers.add_parser("sync", help="Manage sync daemon (start/stop/logs/status)")

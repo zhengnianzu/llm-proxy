@@ -241,6 +241,138 @@ services:
 3. stop / restart / logs 可通过 --env 精确作用到某个服务
 ```
 
+## Session 导出与同步
+
+`sess` 命令用于将日志中的请求聚合为 session，导出 `session_index.jsonl`，并可选上传到 OBS。
+
+### 数据流
+
+```text
+app.py 写入请求日志
+  → logs_all/{env-key}/{mtime}/index.jsonl          原始请求索引
+  → logs_all/{env-key}/{mtime}/.session_cache.jsonl  session 聚合缓存（自动生成）
+  → logs_all/{env-key}/{mtime}/session_index.jsonl   导出的 session 索引（sess export 生成）
+  → OBS obs_base/session/{env-key}/{mtime}/          云端同步（sess export --sync）
+```
+
+### 快捷命令
+
+加载 `source env.sh` 后可直接使用 `sess`：
+
+```shell
+sess list                    # 列出所有 mtime 目录及导出状态
+sess config 26060309         # 切换到指定 mtime 目录
+sess export                  # 导出当前 mtime 的 session_index.jsonl
+sess export --sync           # 导出并上传三元组到 OBS
+sess logs                    # 查看 export 运行日志
+```
+
+等价于 `./app sess list`、`./app sess config 26060309` 等。
+
+### 典型工作流
+
+```shell
+# 1. 查看当前 env 下有哪些 mtime 目录
+sess list --env .env.xunxing
+
+# 输出示例:
+# [sess] env-xunxing-zyKA (6 dirs, 5 new)
+#   26052819: - (has index.jsonl)
+#   26052910: - (has index.jsonl)
+# * 26060309: 1 sessions, avg 2 msg, exported=2026-06-04 14:52:22
+#   26060317: - (empty)
+#   26060414: - (has index.jsonl)
+
+# 2. 选择要处理的 mtime
+sess config 26060120 --env .env.xunxing
+
+# 3. 导出 session_index.jsonl
+sess export --env .env.xunxing
+
+# 4. 导出并同步到 OBS（需要先 sync config 配置 obs_base）
+sess export --sync --env .env.xunxing
+
+# 5. 查看运行日志
+sess logs --env .env.xunxing
+```
+
+### session_index.jsonl 格式
+
+每行一个 JSON，表示一个 session：
+
+```json
+{
+  "q1": "用户第一条消息",
+  "models": ["claude-sonnet-4-6", "gpt-5.4"],
+  "latest_file": "2026-06-02_19-18-18_530-req.json",
+  "msg_count": 2,
+  "api_key": "",
+  "first_ts": "2026-06-01_20-21-41_177",
+  "last_ts": "2026-06-02_19-18-18_530",
+  "trace_list": [
+    {"filename": "...-req.json", "model": "...", "msg_count": 2, "ts": "..."}
+  ],
+  "_key": "2026-06-01_20-21-41_177"
+}
+```
+
+末尾一行 `_meta`：
+
+```json
+{"_meta": true, "total_sessions": 10, "avg_msg_count": 5, "source_mtime": 1780451536.3, "updated_at": "2026-06-04T10:40:16"}
+```
+
+### 云端路径结构
+
+配置 `sync config settings/obs_base.yaml` 后，`sess export --sync` 上传到：
+
+```text
+obs_base/session/{env-key}/{mtime}/
+  ├── session_index.jsonl
+  ├── {ts}-req.json        (latest_file 三元组)
+  ├── {ts}-headers.json
+  └── {ts}-res.json
+```
+
+对比 `sync start` 的 raw 日志上传路径：
+
+```text
+obs_base/raw/{env-key}/{mtime}/
+  ├── index.jsonl
+  ├── .session_cache.jsonl
+  ├── {ts}-req.json        (全量三元组)
+  ├── {ts}-headers.json
+  └── {ts}-res.json
+```
+
+### 状态管理
+
+每个 env 的 sess 状态保存在 `logs/port{N}/{env-slug}/sessions.json`：
+
+```json
+{
+  "current_mtime": "26060309",
+  "mtimes": {
+    "26060309": {
+      "total_sessions": 1,
+      "avg_msg_count": 2,
+      "exported_at": "2026-06-04 14:52:22",
+      "synced_at": "2026-06-04 14:53:00",
+      "obs_dst": "obs://bucket/session/env-xxx/26060309/"
+    }
+  }
+}
+```
+
+### 与 analyze_sessions.py 配合
+
+`chat-log-viewer/analyze_sessions.py` 兼容 `session_index.jsonl`。当目录中存在该文件时，会直接从中加载 session 数据，而非扫描子文件夹：
+
+```shell
+cd chat-log-viewer
+python analyze_sessions.py --dir ../logs_all/env-xunxing-zyKA/26060309
+```
+
 ## 测试
 
 ```

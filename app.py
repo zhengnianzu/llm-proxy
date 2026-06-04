@@ -1666,8 +1666,15 @@ if __name__ == "__main__":
     os.makedirs(LOGS_DIR, exist_ok=True)
     os.makedirs(SERVICE_LOG_DIR, exist_ok=True)
 
-    _meta_content = {"logs_dir": LOGS_DIR}
     _meta_path = os.path.join(SERVICE_LOG_DIR, "app-meta.json")
+    _previous_logs_dir = None
+    try:
+        with open(_meta_path, "r", encoding="utf-8") as _mf:
+            _old_meta = json.load(_mf)
+        _previous_logs_dir = _old_meta.get("logs_dir")
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    _meta_content = {"logs_dir": LOGS_DIR, "previous_logs_dir": _previous_logs_dir}
     try:
         with open(_meta_path, "w", encoding="utf-8") as _mf:
             json.dump(_meta_content, _mf)
