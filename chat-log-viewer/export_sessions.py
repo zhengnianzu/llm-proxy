@@ -176,6 +176,23 @@ def build_triplet_from_index_entry(src: Path, entry: dict) -> Optional[Tuple[str
     return ts, tri
 
 
+def _load_session_index(path: Path) -> List[dict]:
+    entries = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("_meta"):
+                continue
+            entries.append(obj)
+    return entries
+
+
 def stream_preload_requests(
     src: Path,
     cutoff_ts: Optional[str],
@@ -303,6 +320,82 @@ def export_one_file(task: Tuple[Path, str, str, dict, bool]) -> Tuple[str, str, 
     return folder_prefix, f"{prefix}.json", msg_count, model, True
 
 
+def _export_from_session_index(
+    src: Path,
+    out: Path,
+    session_entries: List[dict],
+    worker_num: int,
+    pretty_json: bool,
+) -> None:
+    """session_index.jsonl 快速路径：session 已聚合，直接按 trace_list 构建文件夹并导出。"""
+    export_start = time.perf_counter()
+    index_entries: List[dict] = []
+    all_items: List[Tuple[Path, str, str, dict, bool]] = []
+
+    for sess in session_entries:
+        q1 = sess.get("q1", "")
+        first_ts = sess.get("first_ts") or sess.get("_key", "")
+        trace_list = sess.get("trace_list", [])
+        if not first_ts or not trace_list:
+            continue
+
+        folder_prefix = first_ts
+        (out / folder_prefix).mkdir(parents=True, exist_ok=True)
+
+        for trace in trace_list:
+            filename = trace.get("filename", "")
+            ts = trace.get("ts", "")
+            if not ts or not filename:
+                continue
+
+            stem = filename.replace("-req.json", "") if filename.endswith("-req.json") else filename.replace(".json", "")
+
+            tri: Dict[str, Path] = {}
+            req_path = resolve_req_file(src, ts, filename)
+            if req_path:
+                tri["req"] = req_path
+            parent = req_path.parent if req_path else src
+            headers_path = resolve_related_file(parent, stem, "headers")
+            res_path = resolve_related_file(parent, stem, "res")
+            if headers_path:
+                tri["headers"] = headers_path
+            if res_path:
+                tri["res"] = res_path
+            if "req" in tri:
+                all_items.append((out, folder_prefix, stem, tri, pretty_json))
+
+        latest = sess.get("latest_file", "")
+        latest_stem = latest.replace("-req.json", "") if latest.endswith("-req.json") else latest.replace(".json", "")
+        models = sess.get("models", [])
+        index_entries.append({
+            "folder": folder_prefix,
+            "q1": q1,
+            "latest_file": f"{latest_stem}.json",
+            "msg_count": sess.get("msg_count", 0),
+            "model": models[0] if models else "",
+            "trace_list": trace_list,
+        })
+
+    exported_files = 0
+    with ProcessPoolExecutor(max_workers=worker_num) as executor:
+        futures = {executor.submit(export_one_file, task): task for task in all_items}
+        with make_progress(total=len(all_items), desc="导出文件", unit="file") as bar:
+            for future in as_completed(futures):
+                _, _, _, _, ok = future.result()
+                bar.update(1)
+                if ok:
+                    exported_files += 1
+    export_elapsed = time.perf_counter() - export_start
+
+    index_path_out = out / "index.json"
+    with open(index_path_out, "w", encoding="utf-8") as fh:
+        json.dump(index_entries, fh, ensure_ascii=False, indent=2)
+
+    print(f"[done] 导出 {exported_files} 个文件，{len(index_entries)} 个 session → {out}")
+    print(f"[done] index.json 已生成: {index_path_out}")
+    print(f"[timing] export={format_stage_seconds(export_elapsed)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export logs_anthropic → logs_session_anthropic")
     parser.add_argument("--src", "-s", required=True, help="logs_anthropic 目录")
@@ -347,8 +440,21 @@ def main():
     # ── 收集三元组并过滤 ─────────────────────────────────────────
     collect_start = time.perf_counter()
     index_path = src / "index.jsonl"
+    session_index_path = src / "session_index.jsonl"
     worker_num = max(1, args.worker_num)
-    if index_path.exists():
+
+    # 数据源优先级: session_index.jsonl → index.jsonl → 目录扫描
+    use_session_index = session_index_path.exists()
+    use_index = index_path.exists()
+
+    # session_index.jsonl 快速路径：已聚合，直接导出
+    if use_session_index:
+        print("[info] 使用 session_index.jsonl（快速路径）")
+        session_entries = _load_session_index(session_index_path)
+        _export_from_session_index(src, out, session_entries, worker_num, args.pretty_json)
+        return
+
+    if use_index:
         preloaded, skipped = stream_preload_requests(src, cutoff, worker_num)
         new_prefixes = [prefix for prefix, _, _, _ in preloaded]
         new_triplets = {prefix: tri for prefix, tri, _, _ in preloaded}
@@ -472,12 +578,26 @@ def main():
                 best_model = model
 
         if best_file:
+            trace_list = [
+                {"filename": fn, "msg_count": mc, "model": md}
+                for fn, mc, md in sorted(results[session["folder_prefix"]])
+            ]
+            if session.get("from_base"):
+                for e in base_index:
+                    if e.get("folder") == session["folder_prefix"] and e.get("trace_list"):
+                        base_traces = e["trace_list"]
+                        existing = {t["filename"] for t in trace_list}
+                        for bt in base_traces:
+                            if bt.get("filename") not in existing:
+                                trace_list.insert(0, bt)
+                        break
             index_entries.append({
                 "folder": session["folder_prefix"],
                 "q1": session["q1"],
                 "latest_file": best_file,
                 "msg_count": best_msg_count,
                 "model": best_model,
+                "trace_list": trace_list,
             })
 
     # ── 写 index.json ─────────────────────────────────────────────

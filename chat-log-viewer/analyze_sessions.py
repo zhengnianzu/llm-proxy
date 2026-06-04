@@ -618,7 +618,7 @@ def analyze_best_data(best_data: dict) -> Dict[str, Any]:
 # 单 session 分析
 # ---------------------------------------------------------------------------
 
-def analyze_session(folder: Path) -> Optional[Dict]:
+def analyze_session(folder: Path, index_meta: Optional[Dict] = None) -> Optional[Dict]:
     json_files = sorted(folder.glob("*.json"))
     if not json_files:
         return None
@@ -629,7 +629,10 @@ def analyze_session(folder: Path) -> Optional[Dict]:
     if start_ts and end_ts and end_ts >= start_ts:
         duration_s = (end_ts - start_ts).total_seconds()
 
-    api_call_count = len(json_files)
+    if index_meta and index_meta.get("trace_list"):
+        api_call_count = len(index_meta["trace_list"])
+    else:
+        api_call_count = len(json_files)
     api_errors = 0
 
     try:
@@ -1463,11 +1466,33 @@ def analyze_session_root(
         }
 
     logger.info("扫描目录: %s", session_dir)
-    folders = sorted(
-        f for f in session_dir.iterdir()
-        if f.is_dir() and f.resolve() != output_dir
-    )
-    logger.info("发现 %d 个 session 文件夹", len(folders))
+
+    # 优先从 index.json 获取 session 列表和元信息，fallback 为目录扫描
+    index_json_path = session_dir / "index.json"
+    index_meta_map: Dict[str, Dict] = {}
+    if index_json_path.is_file():
+        try:
+            with open(index_json_path, "r", encoding="utf-8") as f:
+                for entry in json.load(f):
+                    folder_name = entry.get("folder", "")
+                    if folder_name:
+                        index_meta_map[folder_name] = entry
+            logger.info("已加载 index.json: %d 条 session", len(index_meta_map))
+        except Exception:
+            pass
+
+    if index_meta_map:
+        folders = sorted(
+            session_dir / name for name in index_meta_map
+            if (session_dir / name).is_dir()
+        )
+        logger.info("从 index.json 确定 %d 个 session 文件夹", len(folders))
+    else:
+        folders = sorted(
+            f for f in session_dir.iterdir()
+            if f.is_dir() and f.resolve() != output_dir
+        )
+        logger.info("发现 %d 个 session 文件夹（目录扫描）", len(folders))
 
     load_or_scan_start = time.perf_counter()
     if analysis_cache_path.exists() and not recompute:
@@ -1479,7 +1504,10 @@ def analyze_session_root(
         sessions = []
         logger.info("开始并行解析 session，worker_num=%d", worker_num)
         with ProcessPoolExecutor(max_workers=worker_num) as executor:
-            futures = {executor.submit(analyze_session, f): f for f in folders}
+            futures = {
+                executor.submit(analyze_session, f, index_meta_map.get(f.name)): f
+                for f in folders
+            }
             for future in tqdm(as_completed(futures), total=len(futures), desc=f"解析 {session_dir.name}", unit="个"):
                 r = future.result()
                 if r:

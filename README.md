@@ -364,13 +364,23 @@ obs_base/raw/{env-key}/{mtime}/
 }
 ```
 
-### 与 analyze_sessions.py 配合
+### 与 export_sessions.py / analyze_sessions.py 配合
 
-`chat-log-viewer/analyze_sessions.py` 兼容 `session_index.jsonl`。当目录中存在该文件时，会直接从中加载 session 数据，而非扫描子文件夹：
+分析流水线：`export_sessions.py`（转换为 session 文件夹格式）→ `analyze_sessions.py`（分析生成报告）。
+
+`export_sessions.py` 数据源优先级：
+1. `session_index.jsonl`（已聚合的 session 索引，快速路径）
+2. `index.jsonl`（原始请求索引，需重新聚合）
+3. 目录扫描（最后兜底）
 
 ```shell
 cd chat-log-viewer
-python analyze_sessions.py --dir ../logs_all/env-xunxing-zyKA/26060309
+
+# 默认：优先使用 session_index.jsonl（快速路径）
+python export_sessions.py --src ../logs_all/env-xunxing-zyKA/26060309 --out /tmp/sessions
+
+# 分析导出后的 session 文件夹
+python analyze_sessions.py --dir /tmp/sessions
 ```
 
 ## 测试
