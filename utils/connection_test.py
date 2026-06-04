@@ -45,9 +45,16 @@ def _extract_anthropic_text(data: dict) -> str:
 
 def _extract_openai_text(data: dict) -> str:
     choices = data.get("choices", [])
-    if choices:
-        return choices[0].get("message", {}).get("content", "")
-    return str(data)
+    if not choices:
+        return str(data)
+    msg = choices[0].get("message", {})
+    content = msg.get("content") or ""
+    reasoning = msg.get("reasoning_content") or ""
+    if content and reasoning:
+        return f"[reasoning] {reasoning}\n[content] {content}"
+    if reasoning:
+        return f"[reasoning] {reasoning}"
+    return content or str(data)
 
 
 def run_test(
@@ -129,7 +136,7 @@ def print_result(r: dict) -> None:
     if r.get("ok"):
         print(f"  Model used: {r.get('model_used', '?')}")
         print(f"  Tokens: {r.get('tokens', '?')}")
-        print(f"  Reply: {r.get('reply', '')[:120]}")
+        print(f"  Reply: {(r.get('reply') or '')[:200]}")
     else:
         print(f"  Error: {r.get('error', 'unknown')}")
     print(f"{'=' * 60}")
