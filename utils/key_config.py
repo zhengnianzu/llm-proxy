@@ -40,7 +40,8 @@ def _normalize(cfg: dict) -> dict:
     cfg.setdefault("user", "")
     cfg.setdefault("password", "")
     cfg.setdefault("key_len", 24)
-    cfg.setdefault("keys", [])
+    if not cfg.get("keys"):
+        cfg["keys"] = []
 
     # invite_code 兼容：字符串 -> 列表，列表 -> 原样
     raw_codes = cfg.pop("invite_code", None) or cfg.pop("invite_codes", None) or []
@@ -74,11 +75,11 @@ def validate_invite_code(code: str) -> bool:
 
 
 def validate_static_key(raw_key: str) -> str | None:
-    for entry in load_key_state().get("keys", []):
+    for entry in load_key_state().get("keys") or []:
         if isinstance(entry, dict) and entry.get("value") == raw_key:
             return raw_key
     return None
 
 
 def get_static_keys() -> list[dict]:
-    return load_key_state().get("keys", [])
+    return load_key_state().get("keys") or []
