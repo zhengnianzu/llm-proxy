@@ -425,7 +425,46 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
         return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models)}
 
 
-def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "") -> Dict[str, Any]:
+def _content_contains_keyword(content, kw: str) -> bool:
+    if isinstance(content, str):
+        return kw in content.lower()
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text", "")
+                if isinstance(text, str) and kw in text.lower():
+                    return True
+    return False
+
+
+def _match_messages_content(root_dir: str, filename: str, keyword: str) -> bool:
+    req_path = Path(root_dir) / filename
+    if not req_path.is_file():
+        return False
+    try:
+        kw = keyword.lower()
+        with open(req_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            for msg in messages:
+                if _content_contains_keyword(msg.get("content", ""), kw):
+                    return True
+        res_path = req_path.with_name(filename.replace("-req.json", "-res.json"))
+        res_content = _extract_anthropic_res_content(res_path)
+        if res_content is not None and _content_contains_keyword(res_content, kw):
+            return True
+        if res_content is None:
+            openai_content = _extract_openai_res_content(res_path)
+            if isinstance(openai_content, dict):
+                if _content_contains_keyword(openai_content.get("content", ""), kw):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         current_state = _state(kind, root_dir)
         if refresh or not current_state["initialized"]:
@@ -443,29 +482,35 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
             if model and model not in session.get("models", []):
                 continue
             sessions.append(session)
+        saved_known_keys = sorted(current_state["known_keys"])
 
-        sessions.sort(key=lambda s: s.get("last_ts", ""), reverse=True)
-        total = len(sessions)
-        paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
+    if search:
+        search = search.strip()
+    if search:
+        sessions = [s for s in sessions if _match_messages_content(root_dir, s.get("latest_file", ""), search)]
 
-        items = []
-        for session in paged:
-            models = session.get("models", [])
-            if not models and session.get("model"):
-                models = [session["model"]]
-            payload = {
-                "first_time": _format_time(session["first_ts"]),
-                "last_time": _format_time(session["last_ts"]),
-                "file_count": len(session.get("trace_list", [])),
-                "message_count": session.get("msg_count", 0),
-                "models": models,
-                "latest_file": session.get("latest_file", ""),
-                "api_key": session.get("api_key", ""),
-                "q1_preview": session.get("q1", ""),
-            }
-            items.append(payload)
+    sessions.sort(key=lambda s: s.get("last_ts", ""), reverse=True)
+    total = len(sessions)
+    paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
 
-        return {"items": items, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models)}
+    items = []
+    for session in paged:
+        models = session.get("models", [])
+        if not models and session.get("model"):
+            models = [session["model"]]
+        payload = {
+            "first_time": _format_time(session["first_ts"]),
+            "last_time": _format_time(session["last_ts"]),
+            "file_count": len(session.get("trace_list", [])),
+            "message_count": session.get("msg_count", 0),
+            "models": models,
+            "latest_file": session.get("latest_file", ""),
+            "api_key": session.get("api_key", ""),
+            "q1_preview": session.get("q1", ""),
+        }
+        items.append(payload)
+
+    return {"items": items, "total": total, "known_keys": saved_known_keys, "known_models": sorted(known_models)}
 
 def register_log_routes(app: FastAPI) -> None:
     _current_log_dir = get_log_dir("logs_all")
@@ -554,8 +599,8 @@ def register_log_routes(app: FastAPI) -> None:
         return FileResponse(path, filename=filename, media_type="application/json")
 
     @app.get("/logs/aggregate")
-    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model))
+    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = "", search: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model, search))
 
     # --- 旧路由（别名，向后兼容） ---
 
@@ -568,8 +613,8 @@ def register_log_routes(app: FastAPI) -> None:
         return logs_file(filename)
 
     @app.get("/logs/anthropic/aggregate")
-    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
+    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search))
 
     @app.get("/logs/openai/list")
     def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
@@ -580,5 +625,5 @@ def register_log_routes(app: FastAPI) -> None:
         return logs_file(filename)
 
     @app.get("/logs/openai/aggregate")
-    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model))
+    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search))

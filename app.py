@@ -21,7 +21,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from print_stats_summary import statistic_tokens, statistic_keys
-from auth import validate_api_key
+from utils.auth import validate_api_key
+from utils.key_store import init_db as init_key_db
+from utils.key_config import init_key_config
 from utils.metrics import (
     get_metrics_snapshot,
     get_rate_history,
@@ -31,6 +33,7 @@ from utils.metrics import (
 from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix, get_service_log_dir, STARTUP_DATE_TAG
 from utils.log_routes import register_log_routes
 from utils.session_routes import register_session_routes
+from utils.key_routes import register_key_routes
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
@@ -70,6 +73,8 @@ MONITOR_AUTH_PUBLIC_PATHS = {
     "/hi",
     "/login",
     "/logout",
+    "/keys",
+    "/invite",
 }
 
 LOGS_DIR = get_log_dir("logs_all")
@@ -572,7 +577,9 @@ def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success
     )
 
 
-# 启动时加载历史 index
+# 启动时初始化
+init_key_db(SERVICE_LOG_DIR)
+init_key_config(SERVICE_LOG_DIR)
 _load_index()
 start_metrics_scanner(os.path.dirname(LOGS_DIR))
 
@@ -1621,6 +1628,7 @@ def logs_debug_file(filename: str):
 
 register_log_routes(app)
 register_session_routes(app, LOGS_DIR)
+register_key_routes(app, templates)
 
 
 if __name__ == "__main__":
@@ -1628,16 +1636,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Start the LLM proxy")
-    parser.add_argument(
-        "--ban_explore",
-        action="store_true",
-        help="Remove '- Explore:' line from Task tool descriptions in /v1/messages",
-    )
-    parser.add_argument(
-        "--ban_stream",
-        action="store_true",
-        help="Disable stream requests for anthropic api /v1/messages",
-    )
+    parser.add_argument("--ban_explore", action="store_true",
+        help="Remove '- Explore:' line from Task tool descriptions in /v1/messages")
+    parser.add_argument("--ban_stream", action="store_true",
+        help="Disable stream requests for anthropic api /v1/messages")
+
     args = parser.parse_args()
 
     if args.ban_explore:

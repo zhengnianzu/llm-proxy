@@ -350,7 +350,10 @@
     <div class="sidebar">
         <div class="sidebar-hdr" id="sidebarTitle">对话日志</div>
         <div style="padding:8px 10px; border-bottom:1px solid #f3f4f6;">
-            <input class="search-box" type="text" id="q1Search" placeholder="搜索对话内容..." oninput="filterSidebar()" style="width:100%;" />
+            <div style="display:flex; gap:4px; align-items:center;">
+                <input class="search-box" type="text" id="q1Search" placeholder="搜索首句..." oninput="filterSidebar()" onkeydown="if(event.key==='Enter'){event.preventDefault();triggerDeepSearch()}" style="flex:1; min-width:0;" />
+                <button id="deepSearchBtn" onclick="triggerDeepSearch()" title="深度搜索对话内容" style="flex-shrink:0; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px; background:#f9fafb; cursor:pointer; font-size:12px; white-space:nowrap;">深度</button>
+            </div>
         </div>
         <div class="file-list" id="fileList">
             <div class="sidebar-tip"><span class="spinner"></span>加载中…</div>
@@ -489,6 +492,13 @@ function collectKeys(data) {
 // ----------------------------------------------------------------
 // Sidebar: file list with pagination
 // ----------------------------------------------------------------
+function _resetDeepSearchState() {
+    _deepSearchQuery = '';
+    _deepSearchActive = false;
+    const btn = document.getElementById('deepSearchBtn');
+    if (btn) { btn.style.background = '#f9fafb'; btn.style.color = ''; btn.style.borderColor = '#d1d5db'; }
+}
+
 function resetAndLoad() {
     offset = 0;
     totalItems = 0;
@@ -496,6 +506,7 @@ function resetAndLoad() {
     knownKeys = new Set();
     knownModels = new Set();
     _searchQuery = '';
+    _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
@@ -507,6 +518,7 @@ function reloadWithKey() {
     totalItems = 0;
     aggChains = [];
     _searchQuery = '';
+    _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
@@ -518,6 +530,7 @@ function reloadWithModel() {
     totalItems = 0;
     aggChains = [];
     _searchQuery = '';
+    _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
@@ -536,6 +549,7 @@ async function loadFileList(refresh = false) {
     if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
     if (filterModel) params += `&model=${encodeURIComponent(filterModel)}`;
     if (refresh) params += '&refresh=true';
+    if (_deepSearchQuery) params += `&search=${encodeURIComponent(_deepSearchQuery)}`;
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg' || folder === 'agg') {
         sidebarTitle.textContent = `对话聚合 (≥${min} 条)`;
@@ -641,11 +655,13 @@ async function loadFileList(refresh = false) {
 
 function updateLoadStatus() {
     const loaded = fileListEl.querySelectorAll('.file-item').length;
-    document.getElementById('loadStatus').textContent = `已加载 ${loaded} / 共 ${totalItems} 条`;
+    document.getElementById('loadStatus').textContent = _deepSearchActive
+        ? `深度搜索: ${totalItems} 条匹配`
+        : `已加载 ${loaded} / 共 ${totalItems} 条`;
 }
 
 function loadMore() {
-    if (_searchQuery) return;
+    if (_searchQuery && !_deepSearchActive) return;
     const loaded = fileListEl.querySelectorAll('.file-item').length;
     if (isLoadingMore || loaded >= totalItems) return;
     isLoadingMore = true;
@@ -1296,10 +1312,18 @@ function showError(msg) {
 }
 
 // ----------------------------------------------------------------
-// Q1 search filter
+// Q1 search filter (client-side) + Deep search (server-side)
 // ----------------------------------------------------------------
 let _searchQuery = '';
+let _deepSearchQuery = '';
+let _deepSearchActive = false;
+
 function filterSidebar() {
+    if (_deepSearchActive) {
+        const val = (document.getElementById('q1Search').value || '').trim();
+        if (!val) exitDeepSearch();
+        return;
+    }
     _searchQuery = (document.getElementById('q1Search').value || '').trim().toLowerCase();
     const items = fileListEl.querySelectorAll('.file-item');
     let visible = 0;
@@ -1317,6 +1341,44 @@ function filterSidebar() {
     document.getElementById('loadStatus').textContent = _searchQuery
         ? `搜索到 ${visible} 条 (共 ${totalItems})`
         : `已加载 ${items.length} / 共 ${totalItems} 条`;
+}
+
+function triggerDeepSearch() {
+    const query = (document.getElementById('q1Search').value || '').trim();
+    const btn = document.getElementById('deepSearchBtn');
+    if (_deepSearchActive && !query) {
+        exitDeepSearch();
+        return;
+    }
+    if (!query) return;
+    _deepSearchActive = true;
+    _deepSearchQuery = query;
+    _searchQuery = '';
+    btn.style.background = '#3b82f6';
+    btn.style.color = '#fff';
+    btn.style.borderColor = '#3b82f6';
+    offset = 0;
+    totalItems = 0;
+    aggChains = [];
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>深度搜索中…</div>';
+    document.getElementById('loadStatus').textContent = '';
+    loadFileList();
+}
+
+function exitDeepSearch() {
+    _deepSearchActive = false;
+    _deepSearchQuery = '';
+    const btn = document.getElementById('deepSearchBtn');
+    btn.style.background = '#f9fafb';
+    btn.style.color = '';
+    btn.style.borderColor = '#d1d5db';
+    document.getElementById('q1Search').value = '';
+    offset = 0;
+    totalItems = 0;
+    aggChains = [];
+    fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
+    document.getElementById('loadStatus').textContent = '';
+    loadFileList();
 }
 
 // ----------------------------------------------------------------

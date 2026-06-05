@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Key 管理</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <script src="/static/js/vue.min.js"></script>
+    <style>
+        body { background: #f4f6fb; color: #1f2937; }
+        .page-shell { max-width: 1200px; margin: 0 auto; padding: 24px 16px 40px; }
+        .topbar {
+            background: linear-gradient(135deg, #0f172a, #1d4ed8);
+            color: #fff; padding: 10px 20px; border-radius: 10px; margin-bottom: 16px;
+            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+        }
+        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
+        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
+        .nav-pill {
+            display: inline-flex; align-items: center; justify-content: center;
+            padding: 6px 12px; border-radius: 999px; text-decoration: none;
+            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
+            border: 1px solid rgba(255,255,255,.14);
+        }
+        .nav-pill.active { background: #fff; color: #0f172a; }
+        .panel { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15,23,42,.06); margin-bottom: 20px; }
+        .badge-active { background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
+        .badge-disabled { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
+        .badge-env { background: #e0e7ff; color: #3730a3; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
+        .key-text { font-family: monospace; font-size: .85rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }
+        .created-key { background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 14px; margin-top: 12px; }
+        .created-key code { font-size: 1rem; word-break: break-all; }
+    </style>
+</head>
+<body>
+<div id="app" class="page-shell">
+{% raw %}
+    <div class="topbar">
+        <h1 class="brand-title">Key 管理</h1>
+        <div class="nav-pills-wrap">
+            <a class="nav-pill" href="/">监控总览</a>
+            <a class="nav-pill" href="/query">查询统计</a>
+            <a class="nav-pill active" href="/keys">Key 管理</a>
+            <a class="nav-pill" href="/logout">退出登录</a>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="mb-0">数据库 Key</h5>
+            <button class="btn btn-primary btn-sm" @click="showCreate = true">新建 Key</button>
+        </div>
+
+        <div v-if="createdKey" class="created-key mb-3">
+            <strong>Key 已创建，请立即复制保存（刷新后不再显示）：</strong>
+            <div class="mt-2"><code>{{ createdKey.key }}</code></div>
+            <div class="mt-1 text-muted small">名称: {{ createdKey.name || '(unnamed)' }} | ID: {{ createdKey.id }}</div>
+            <button class="btn btn-outline-secondary btn-sm mt-2" @click="copyKey(createdKey.key)">复制 Key</button>
+            <button class="btn btn-outline-secondary btn-sm mt-2 ms-2" @click="createdKey = null">关闭</button>
+        </div>
+
+        <div v-if="showCreate && !createdKey" class="mb-3 p-3" style="background:#f8fafc; border-radius:8px;">
+            <div class="d-flex align-items-center gap-2">
+                <input v-model="newName" class="form-control form-control-sm" placeholder="Key 名称（可选）" style="max-width:300px">
+                <button class="btn btn-success btn-sm" @click="createKey">创建</button>
+                <button class="btn btn-outline-secondary btn-sm" @click="showCreate = false">取消</button>
+            </div>
+        </div>
+
+        <table class="table table-sm table-hover mb-0" v-if="dbKeys.length">
+            <thead><tr>
+                <th style="width:50px">ID</th>
+                <th>名称</th>
+                <th>Key</th>
+                <th style="width:80px">状态</th>
+                <th style="width:100px">邀请码</th>
+                <th style="width:160px">创建时间</th>
+                <th style="width:150px">操作</th>
+            </tr></thead>
+            <tbody>
+                <tr v-for="k in dbKeys" :key="k.id">
+                    <td>{{ k.id }}</td>
+                    <td>{{ k.name || '-' }}</td>
+                    <td><span class="key-text">{{ k.key }}</span></td>
+                    <td>
+                        <span :class="k.status === 'active' ? 'badge-active' : 'badge-disabled'">
+                            {{ k.status === 'active' ? '启用' : '停用' }}
+                        </span>
+                    </td>
+                    <td class="text-muted small">{{ k.invite_code || '-' }}</td>
+                    <td class="text-muted small">{{ k.created_at }}</td>
+                    <td>
+                        <button v-if="k.status === 'active'" class="btn btn-outline-warning btn-sm" @click="toggleKey(k.id, 'disable')">停用</button>
+                        <button v-else class="btn btn-outline-success btn-sm" @click="toggleKey(k.id, 'enable')">启用</button>
+                        <button class="btn btn-outline-danger btn-sm ms-1" @click="removeKey(k.id, k.key)">删除</button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        <div v-else class="text-muted text-center py-4">暂无数据库 Key，点击「新建 Key」创建</div>
+    </div>
+
+    <div class="panel" v-if="envKeys.length">
+        <h5>环境变量 Key（只读）</h5>
+        <table class="table table-sm mb-0">
+            <thead><tr><th>Key</th><th style="width:80px">来源</th></tr></thead>
+            <tbody>
+                <tr v-for="(k, i) in envKeys" :key="i">
+                    <td><span class="key-text">{{ k.key }}</span></td>
+                    <td><span class="badge-env">.env</span></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+{% endraw %}
+</div>
+
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        dbKeys: [], envKeys: [],
+        showCreate: false, newName: '', createdKey: null,
+    },
+    mounted() { this.fetchKeys(); },
+    methods: {
+        _h(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
+        fetchKeys() {
+            fetch('/api/keys', {headers: this._h()}).then(r => r.json()).then(d => {
+                this.dbKeys = d.db_keys || [];
+                this.envKeys = d.env_keys || [];
+            });
+        },
+        createKey() {
+            fetch('/api/keys', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({name: this.newName})
+            }).then(r => r.json()).then(d => {
+                this.createdKey = d;
+                this.newName = '';
+                this.showCreate = false;
+                this.fetchKeys();
+            });
+        },
+        toggleKey(id, action) {
+            fetch('/api/keys/' + id + '/' + action, {method: 'POST', headers: this._h()})
+                .then(() => this.fetchKeys());
+        },
+        removeKey(id, key) {
+            if (!confirm('确认删除 Key ' + key + '？')) return;
+            fetch('/api/keys/' + id, {method: 'DELETE', headers: this._h()})
+                .then(() => this.fetchKeys());
+        },
+        copyKey(key) {
+            navigator.clipboard.writeText(key).then(() => alert('已复制到剪贴板'));
+        }
+    }
+});
+</script>
+</body>
+</html>

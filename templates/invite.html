@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>申请 API Key</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <script src="/static/js/vue.min.js"></script>
+    <style>
+        body { background: #f4f6fb; color: #1f2937; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .card-box { background: #fff; border-radius: 14px; padding: 32px; box-shadow: 0 8px 24px rgba(15,23,42,.08); max-width: 460px; width: 100%; }
+        .card-title { font-size: 1.25rem; font-weight: 700; margin-bottom: 4px; }
+        .card-sub { color: #6b7280; font-size: .9rem; margin-bottom: 20px; }
+        .created-key { background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 14px; margin-top: 16px; }
+        .created-key code { font-size: .95rem; word-break: break-all; }
+        .err { color: #dc2626; font-size: .9rem; margin-top: 8px; }
+    </style>
+</head>
+<body>
+<div id="app">
+{% raw %}
+    <div class="card-box">
+        <div class="card-title">申请 API Key</div>
+        <div class="card-sub">输入邀请码获取你的 API Key</div>
+
+        <div v-if="!result">
+            <div class="mb-3">
+                <label class="form-label small fw-semibold">邀请码</label>
+                <input v-model="inviteCode" class="form-control" placeholder="请输入邀请码" @keyup.enter="submit">
+            </div>
+            <div class="mb-3">
+                <label class="form-label small fw-semibold">Key 名称（可选）</label>
+                <input v-model="name" class="form-control" placeholder="例如：我的项目">
+            </div>
+            <button class="btn btn-primary w-100" @click="submit" :disabled="loading">
+                {{ loading ? '申请中...' : '申请 Key' }}
+            </button>
+            <div v-if="error" class="err">{{ error }}</div>
+        </div>
+
+        <div v-else>
+            <div class="created-key">
+                <strong>API Key 已创建，请立即复制保存：</strong>
+                <div class="mt-2"><code>{{ result.key }}</code></div>
+                <div class="mt-1 text-muted small">名称: {{ result.name || '(unnamed)' }}</div>
+                <button class="btn btn-outline-secondary btn-sm mt-2" @click="copyKey">复制 Key</button>
+            </div>
+            <div class="mt-3 text-muted small text-center">刷新页面后将无法再看到完整 Key，请妥善保存。</div>
+        </div>
+    </div>
+{% endraw %}
+</div>
+
+<script>
+new Vue({
+    el: '#app',
+    data: { inviteCode: '', name: '', loading: false, error: '', result: null },
+    methods: {
+        submit() {
+            if (!this.inviteCode.trim()) { this.error = '请输入邀请码'; return; }
+            this.loading = true; this.error = '';
+            fetch('/api/invite', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+                body: JSON.stringify({invite_code: this.inviteCode, name: this.name})
+            }).then(r => {
+                if (!r.ok) return r.json().then(d => { throw new Error(d.detail || '申请失败'); });
+                return r.json();
+            }).then(d => {
+                this.result = d;
+            }).catch(e => {
+                this.error = e.message;
+            }).finally(() => { this.loading = false; });
+        },
+        copyKey() {
+            navigator.clipboard.writeText(this.result.key).then(() => alert('已复制到剪贴板'));
+        }
+    }
+});
+</script>
+</body>
+</html>

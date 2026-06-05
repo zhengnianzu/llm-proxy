@@ -456,9 +456,27 @@ def cmd_connect(args: argparse.Namespace) -> int:
         base_url = upstream_url
     else:
         base_url = f"http://{host}:{port}"
-        # 从 env 文件读取 API_KEY（客户端 key），取第一个
+        # 从 env 文件读取 API_KEY（客户端 key），取第一个；fallback 到 DB
         raw_api_key = env_values.get("API_KEY", "").strip().strip('"')
         api_key = raw_api_key.split(",")[0].strip() if raw_api_key else ""
+        if not api_key:
+            try:
+                sys.path.insert(0, str(BASE_DIR))
+                from utils.key_store import init_db, list_keys as _list_keys
+                service_key = get_service_key(env_path)
+                service_slug = get_service_slug(service_key)
+                key_suffix = get_api_key_suffix(env_values)
+                svc_dir = _service_log_dir(port, service_slug, key_suffix)
+                init_db(str(svc_dir))
+                db_keys = _list_keys()
+                active = [k for k in db_keys if k.get("status") == "active"]
+                if active:
+                    from utils.key_store import get_key_full
+                    full = get_key_full(active[0]["id"])
+                    if full:
+                        api_key = full["key"]
+            except Exception:
+                pass
         print(f"[connect] via proxy: {base_url}")
 
     print(f"[connect] method={method} model={model}")
@@ -991,6 +1009,146 @@ def cmd_export_logs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_key_db_dir(args: argparse.Namespace) -> Path:
+    """根据 --env 参数定位当前 port 的 SERVICE_LOG_DIR（keys.db 所在目录）。"""
+    state = load_state()
+    source_env = get_selected_env(args, state)
+    env_path = resolve_env_path(source_env)
+    env_values = parse_env_file(env_path)
+    port = int(env_values.get("PROXY_PORT", "4000"))
+    service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
+    key_suffix = get_api_key_suffix(env_values)
+    svc_dir = _service_log_dir(port, service_slug, key_suffix)
+    svc_dir.mkdir(parents=True, exist_ok=True)
+    return svc_dir
+
+
+def cmd_key(args: argparse.Namespace) -> int:
+    sys.path.insert(0, str(BASE_DIR))
+    from utils.key_store import (
+        init_db, add_key, list_keys, find_key,
+        disable_key, enable_key, delete_key, mask_key,
+    )
+    from utils.key_config import load_key_state, init_key_config
+
+    db_dir = _resolve_key_db_dir(args)
+    init_db(str(db_dir))
+    init_key_config(str(db_dir))
+    cfg = load_key_state()
+    action = args.key_action
+
+    if action == "list":
+        keys = list_keys()
+        if not keys:
+            print("No keys found.")
+        else:
+            print(f"{'ID':<5} {'Name':<20} {'Key':<25} {'Status':<10} {'Invite':<12} {'Created'}")
+            print("-" * 100)
+            for k in keys:
+                invite = k.get('invite_code', '') or '-'
+                print(f"{k['id']:<5} {k['name'] or '(unnamed)':<20} {k['key']:<25} {k['status']:<10} {invite:<12} {k['created_at']}")
+        print(f"\n[key] db: {db_dir / 'keys.db'}")
+        return 0
+
+    if action == "add":
+        spec = args.spec
+        name, key_val = "", ""
+        if ":" in spec:
+            name, key_val = spec.split(":", 1)
+        else:
+            name = spec
+        result = add_key(name=name, key=key_val, key_len=cfg.get("key_len", 24))
+        print(f"Key created!")
+        print(f"  ID:   {result['id']}")
+        print(f"  Name: {result['name'] or '(unnamed)'}")
+        print(f"  Key:  {result['key']}")
+        return 0
+
+    if action == "del":
+        rec = find_key(args.identifier)
+        if not rec:
+            print(f"Key not found: {args.identifier}")
+            return 1
+        delete_key(rec["id"])
+        print(f"Deleted key {rec['id']} ({mask_key(rec['key'])})")
+        return 0
+
+    if action == "stop":
+        rec = find_key(args.identifier)
+        if not rec:
+            print(f"Key not found: {args.identifier}")
+            return 1
+        disable_key(rec["id"])
+        print(f"Disabled key {rec['id']} ({mask_key(rec['key'])})")
+        return 0
+
+    if action == "start":
+        rec = find_key(args.identifier)
+        if not rec:
+            print(f"Key not found: {args.identifier}")
+            return 1
+        enable_key(rec["id"])
+        print(f"Enabled key {rec['id']} ({mask_key(rec['key'])})")
+        return 0
+
+    if action == "config":
+        from utils.key_config import apply_config
+        config_file = getattr(args, "config_file", None)
+        state_path = db_dir / "key_state.yaml"
+        do_apply = getattr(args, "apply", False)
+
+        if not config_file:
+            if state_path.exists():
+                print(state_path.read_text(encoding="utf-8"))
+            else:
+                print(f"No state file at {state_path}")
+                print("Run: key config settings/keys.yaml")
+            return 0
+
+        src = Path(config_file).resolve()
+        if not src.exists():
+            print(f"Config file not found: {config_file}")
+            return 1
+
+        parsed = apply_config(str(src), str(state_path))
+        print(f"[key] State saved: {state_path}")
+        if parsed.get("user"):
+            print(f"[key] User: {parsed['user']}")
+        if parsed.get("password"):
+            print(f"[key] Password: set")
+        codes = parsed.get("invite_codes", [])
+        if codes:
+            print(f"[key] Invite codes: {len(codes)} configured")
+        print(f"[key] Key length: {parsed.get('key_len', 24)} bytes")
+
+        if do_apply:
+            keys_to_import = parsed.get("keys") or []
+            imported = 0
+            for entry in keys_to_import:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name", "")
+                value = entry.get("value", "")
+                if not value:
+                    continue
+                existing = find_key(value)
+                if existing:
+                    print(f"  skip (exists): {name} -> {mask_key(value)}")
+                    continue
+                add_key(name=name, key=value)
+                print(f"  imported: {name} -> {mask_key(value)}")
+                imported += 1
+            if keys_to_import:
+                print(f"[key] Imported {imported}/{len(keys_to_import)} keys to DB")
+            elif not keys_to_import:
+                print(f"[key] No keys to import")
+
+        return 0
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LLM proxy service CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1086,6 +1244,40 @@ def build_parser() -> argparse.ArgumentParser:
     ps_config = sync_sub.add_parser("config", help="Set or show sync config file")
     ps_config.add_argument("config_file", nargs="?", help="YAML config file path, e.g. settings/obs_base.yaml")
     ps_config.set_defaults(func=cmd_sync_config)
+
+    # --- key subcommands ---
+    p_key = subparsers.add_parser("key", help="API key management (list/add/del/stop/start/config)")
+    key_sub = p_key.add_subparsers(dest="key_action", required=True)
+
+    pk_list = key_sub.add_parser("list", help="List all keys")
+    pk_list.add_argument("--env", dest="env_file", help="Env file to resolve port from")
+    pk_list.set_defaults(func=cmd_key)
+
+    pk_add = key_sub.add_parser("add", help="Add a key. Format: name:key or just name")
+    pk_add.add_argument("spec", nargs="?", default="", help="name:key or name (key auto-generated)")
+    pk_add.add_argument("--env", dest="env_file", help="Env file to resolve port from")
+    pk_add.set_defaults(func=cmd_key)
+
+    pk_del = key_sub.add_parser("del", help="Delete a key by ID or key value")
+    pk_del.add_argument("identifier", help="Key ID or key value")
+    pk_del.add_argument("--env", dest="env_file", help="Env file to resolve port from")
+    pk_del.set_defaults(func=cmd_key)
+
+    pk_stop = key_sub.add_parser("stop", help="Disable a key")
+    pk_stop.add_argument("identifier", help="Key ID or key value")
+    pk_stop.add_argument("--env", dest="env_file", help="Env file to resolve port from")
+    pk_stop.set_defaults(func=cmd_key)
+
+    pk_start = key_sub.add_parser("start", help="Enable a key")
+    pk_start.add_argument("identifier", help="Key ID or key value")
+    pk_start.add_argument("--env", dest="env_file", help="Env file to resolve port from")
+    pk_start.set_defaults(func=cmd_key)
+
+    pk_config = key_sub.add_parser("config", help="Set key config (invite code, password, keys)")
+    pk_config.add_argument("config_file", nargs="?", help="YAML config file path, e.g. settings/keys.yaml")
+    pk_config.add_argument("--apply", action="store_true", help="Also import keys from yaml into DB")
+    pk_config.add_argument("--env", dest="env_file", help="Env file to resolve port from")
+    pk_config.set_defaults(func=cmd_key)
 
     return parser
 
