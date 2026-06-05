@@ -574,7 +574,7 @@ def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success
 
 # 启动时加载历史 index
 _load_index()
-start_metrics_scanner("logs_all")
+start_metrics_scanner(os.path.dirname(LOGS_DIR))
 
 
 def _sanitize_messages(messages: Any) -> Any:

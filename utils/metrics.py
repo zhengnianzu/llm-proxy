@@ -229,21 +229,20 @@ def _save_scanner_state(state: dict):
 # 发现 index 文件
 # ---------------------------------------------------------------------------
 
-def _discover_index_files(logs_all_base: str) -> list:
-    """遍历 logs_all/{env-segment}/{startup_hour}/index.jsonl"""
+def _discover_index_files(env_segment_dir: str) -> list:
+    """遍历当前 env segment 下所有 startup_hour 的 index.jsonl。
+    env_segment_dir 例如: logs_all/env-xunxing-zyKA
+    """
     result = []
-    base = Path(logs_all_base)
+    base = Path(env_segment_dir)
     if not base.is_dir():
         return result
-    for env_dir in sorted(base.iterdir()):
-        if not env_dir.is_dir():
+    for hour_dir in sorted(base.iterdir()):
+        if not hour_dir.is_dir():
             continue
-        for hour_dir in sorted(env_dir.iterdir()):
-            if not hour_dir.is_dir():
-                continue
-            idx = hour_dir / INDEX_FILENAME
-            if idx.exists():
-                result.append(str(idx))
+        idx = hour_dir / INDEX_FILENAME
+        if idx.exists():
+            result.append(str(idx))
     return result
 
 
@@ -293,7 +292,7 @@ _scanner_stop = threading.Event()
 _scanner_thread: Optional[threading.Thread] = None
 
 
-def _scanner_loop(logs_all_base: str, interval: float):
+def _scanner_loop(env_segment_dir: str, interval: float):
     metrics_map: dict = {}
     rate_map: dict = {}
     flushed_rpm_keys: set = set()
@@ -318,7 +317,7 @@ def _scanner_loop(logs_all_base: str, interval: float):
     while not _scanner_stop.is_set():
         try:
             changed = False
-            index_files = _discover_index_files(logs_all_base)
+            index_files = _discover_index_files(env_segment_dir)
 
             for idx_path in index_files:
                 fs = file_states.get(idx_path, {"offset": 0, "mtime": 0.0})
@@ -346,14 +345,14 @@ def _scanner_loop(logs_all_base: str, interval: float):
         _scanner_stop.wait(interval)
 
 
-def start_metrics_scanner(logs_all_base: str, interval: float = 10.0):
+def start_metrics_scanner(env_segment_dir: str, interval: float = 10.0):
     global _scanner_thread
     if _scanner_thread is not None and _scanner_thread.is_alive():
         return
     _scanner_stop.clear()
     _scanner_thread = threading.Thread(
         target=_scanner_loop,
-        args=(logs_all_base, interval),
+        args=(env_segment_dir, interval),
         daemon=True,
         name="metrics-scanner",
     )
