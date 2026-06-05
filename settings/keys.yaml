@@ -12,7 +12,7 @@ invite_codes:               # 多个
   - "group2"
 
 # 生成 key 时 sk- 后面的随机字符长度（字节数，hex 字符数为此值 2 倍）
-key_len: 24
+key_len: 4
 
 # key 列表，--apply 时写入数据库
 keys:

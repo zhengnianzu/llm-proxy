@@ -1092,6 +1092,21 @@ def cmd_key(args: argparse.Namespace) -> int:
         print(f"Enabled key {rec['id']} ({mask_key(rec['key'])})")
         return 0
 
+    if action == "status":
+        from utils.key_store import get_key_full
+        rec = find_key(args.identifier)
+        if not rec:
+            print(f"Key not found: {args.identifier}")
+            return 1
+        full = get_key_full(rec["id"])
+        print(f"  ID:          {full['id']}")
+        print(f"  Name:        {full['name'] or '(unnamed)'}")
+        print(f"  Key:         {full['key']}")
+        print(f"  Status:      {full['status']}")
+        print(f"  Invite Code: {full.get('invite_code') or '-'}")
+        print(f"  Created:     {full['created_at']}")
+        return 0
+
     if action == "config":
         from utils.key_config import apply_config
         config_file = getattr(args, "config_file", None)
@@ -1272,6 +1287,11 @@ def build_parser() -> argparse.ArgumentParser:
     pk_start.add_argument("identifier", help="Key ID or key value")
     pk_start.add_argument("--env", dest="env_file", help="Env file to resolve port from")
     pk_start.set_defaults(func=cmd_key)
+
+    pk_status = key_sub.add_parser("status", help="Show key details by ID or key value")
+    pk_status.add_argument("identifier", help="Key ID or key value")
+    pk_status.add_argument("--env", dest="env_file", help="Env file to resolve port from")
+    pk_status.set_defaults(func=cmd_key)
 
     pk_config = key_sub.add_parser("config", help="Set key config (invite code, password, keys)")
     pk_config.add_argument("config_file", nargs="?", help="YAML config file path, e.g. settings/keys.yaml")
