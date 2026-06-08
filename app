@@ -900,24 +900,41 @@ def cmd_export_run(args: argparse.Namespace) -> int:
         return 1
 
     env_key_name = env_base_dir.name
-    obs_dst = obs_base.rstrip("/") + "/session/" + env_key_name + "/" + mtime + "/"
+    now_date = datetime.now().strftime("%y%m%d%H")
+    filter_key = getattr(args, "key", None)
+    key_dir = "key-" + filter_key[-4:] if filter_key else "nokey"
+    export_dir = f"ex-{now_date}"
+
+    obs_dst = obs_base.rstrip("/") + "/session/" + env_key_name + "/" + mtime + "/" + key_dir + "/" + export_dir + "/"
+
+    # 本地复制目录: logs_session 与 logs_all 同级
+    logs_session_base = env_base_dir.parent.parent / "logs_session"
+    local_copy_dir = str(logs_session_base / env_key_name / mtime / key_dir / export_dir)
 
     config = load_sync_config(state)
     workers = config.get("workers", 4)
     upload_script = config.get("upload_script")
 
+    _log(f"[sess] 复制到 {local_copy_dir}")
     _log(f"[sess] 同步到 {obs_dst}")
+    if filter_key:
+        _log(f"[sess] 按 key 过滤: {filter_key}")
     sync_result = sync_session_index(
         logs_dir,
         obs_dst=obs_dst,
         workers=workers,
         upload_script=upload_script,
+        key=filter_key,
+        local_copy_dir=local_copy_dir,
+        force=getattr(args, "force", False),
     )
-    _log(f"[sess] 上传 {sync_result['uploaded']} 成功, {sync_result['failed']} 失败, {sync_result['skipped']} 跳过")
+    _log(f"[sess] 上传 {sync_result['uploaded']} 文件, {sync_result['failed']} 失败, {sync_result['skipped']} 跳过")
 
-    mtime_state["synced_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    mtime_state["sync_uploaded"] = sync_result["uploaded"]
-    mtime_state["obs_dst"] = obs_dst
+    slot_key = "key-" + filter_key[-4:] if filter_key else "nokey"
+    slot_state = mtime_state.setdefault("slots", {}).setdefault(slot_key, {})
+    slot_state["synced_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    slot_state["sync_uploaded"] = sync_result["uploaded"]
+    slot_state["obs_dst"] = obs_dst
     _save_sess_state(svc_dir, sess_state)
     return 0
 
@@ -951,14 +968,16 @@ def cmd_export_list(args: argparse.Namespace) -> int:
             sessions = info.get("total_sessions", 0)
             avg_msg = info.get("avg_msg_count", 0)
             exported_at = info.get("exported_at", "-")
-            synced_at = info.get("synced_at")
             line = f"{marker} {m}: {sessions} sessions, avg {avg_msg} msg, exported={exported_at}"
-            if synced_at:
-                line += f", synced={synced_at}"
             print(line)
-            obs_dst = info.get("obs_dst")
-            if obs_dst:
-                print(f"    obs: {obs_dst}")
+            slots = info.get("slots", {})
+            for slot_name, slot_info in sorted(slots.items()):
+                synced_at = slot_info.get("synced_at", "-")
+                uploaded = slot_info.get("sync_uploaded", 0)
+                obs_dst = slot_info.get("obs_dst", "")
+                print(f"    [{slot_name}] synced={synced_at}, files={uploaded}")
+                if obs_dst:
+                    print(f"      obs: {obs_dst}")
         else:
             has_index = (env_base_dir / m / "index.jsonl").is_file()
             status = "(has index.jsonl)" if has_index else "(empty)"
@@ -1006,6 +1025,47 @@ def cmd_export_logs(args: argparse.Namespace) -> int:
         return 0
 
     sys.stdout.writelines(tail_lines(log_file, args.lines))
+    return 0
+
+
+def cmd_export_clear(args: argparse.Namespace) -> int:
+    """清除当前 mtime 目录下的导出缓存文件和 sessions.json 中的记录。"""
+    _, _, svc_dir, env_base_dir, _ = _resolve_sess_env(args)
+    sess_state = _load_sess_state(svc_dir)
+
+    mtime = sess_state.get("current_mtime")
+    if not mtime:
+        eprint("[sess] 未设置 current_mtime. 先运行: sess config <mtime>")
+        return 1
+
+    logs_dir = env_base_dir / mtime
+    if not logs_dir.is_dir():
+        eprint(f"[sess] 目录不存在: {logs_dir}")
+        return 1
+
+    cache_files = [
+        ("session_index.jsonl", "session 索引"),
+        (".sync_export_state.json", "上传状态记录"),
+    ]
+
+    removed = 0
+    for name, desc in cache_files:
+        fp = logs_dir / name
+        if fp.is_file():
+            fp.unlink()
+            print(f"[sess] 已删除 {name} ({desc})")
+            removed += 1
+
+    mtime_info = sess_state.get("mtimes", {}).get(mtime)
+    if mtime_info:
+        del sess_state["mtimes"][mtime]
+        _save_sess_state(svc_dir, sess_state)
+        print(f"[sess] 已清除 sessions.json 中 {mtime} 的记录")
+
+    if removed == 0 and not mtime_info:
+        print(f"[sess] {mtime}: 无缓存需要清理")
+    else:
+        print(f"[sess] {mtime}: 清理完成 (删除 {removed} 个文件)")
     return 0
 
 
@@ -1214,6 +1274,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe_export.add_argument("--env", dest="env_file", help="Env file to resolve meta from")
     pe_export.add_argument("--sync", action="store_true", help="Also upload triplets to OBS")
     pe_export.add_argument("--force", action="store_true", help="Force re-export even if unchanged")
+    pe_export.add_argument("--key", help="Filter sessions by api_key (exact match)")
     pe_export.set_defaults(func=cmd_export_run)
 
     pe_config = sess_sub.add_parser("config", help="Set or show current mtime directory")
@@ -1230,6 +1291,10 @@ def build_parser() -> argparse.ArgumentParser:
     pe_logs.add_argument("-f", "--follow", action="store_true", help="Follow the log file")
     pe_logs.add_argument("-n", "--lines", type=int, default=100, help="Number of lines to show")
     pe_logs.set_defaults(func=cmd_export_logs)
+
+    pe_clear = sess_sub.add_parser("clear", help="Clear export cache for current mtime")
+    pe_clear.add_argument("--env", dest="env_file", help="Env file to resolve meta from")
+    pe_clear.set_defaults(func=cmd_export_clear)
 
     # --- sync subcommands ---
     p_sync = subparsers.add_parser("sync", help="Manage sync daemon (start/stop/logs/status)")
