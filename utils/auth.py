@@ -18,9 +18,29 @@ def get_configured_api_keys() -> list[str]:
     return [k.strip() for k in raw.split(",") if k.strip()]
 
 
+def _is_key_access_enabled() -> bool:
+    raw = os.getenv("ENABLE_KEY_ACCESS", "true").strip().lower()
+    return raw not in ("false", "0", "off", "no")
+
+
 def is_auth_enabled() -> bool:
-    """Check if API key authentication is enabled (DB, env, or yaml)."""
-    return bool(get_configured_api_keys()) or db_has_active_keys() or bool(get_static_keys())
+    """Check if API key authentication is enabled.
+    Controlled by ENABLE_KEY_ACCESS env (default true).
+    When true, auth is enforced regardless of whether keys exist."""
+    return _is_key_access_enabled()
+
+
+def get_auth_status() -> dict:
+    """Return current auth status for UI display."""
+    if not _is_key_access_enabled():
+        return {"enabled": False, "reason": "ENABLE_KEY_ACCESS=false"}
+    env = bool(get_configured_api_keys())
+    db = db_has_active_keys()
+    yaml_keys = bool(get_static_keys())
+    if env or db or yaml_keys:
+        sources = [s for s, v in [("env", env), ("db", db), ("yaml", yaml_keys)] if v]
+        return {"enabled": True, "reason": f"来源: {', '.join(sources)}"}
+    return {"enabled": True, "reason": "未配置任何 Key，所有请求将被拒绝"}
 
 
 async def validate_api_key(request: Request) -> str:
@@ -30,12 +50,12 @@ async def validate_api_key(request: Request) -> str:
     Checks: DB active keys -> yaml static keys -> env keys.
     Returns the matched key if auth is enabled, or empty string if auth is disabled.
     """
+    if not is_auth_enabled():
+        return ""
+
     env_keys = get_configured_api_keys()
     db_enabled = db_has_active_keys()
     static_keys = get_static_keys()
-
-    if not env_keys and not db_enabled and not static_keys:
-        return ""
 
     api_key = None
 

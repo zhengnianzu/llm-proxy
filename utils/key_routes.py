@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from utils.key_store import add_key, list_keys, disable_key, enable_key, delete_key, mask_key
-from utils.auth import get_configured_api_keys
+from utils.auth import get_configured_api_keys, get_auth_status
 from utils.key_config import load_key_state
 
 
@@ -79,7 +79,7 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         env_keys = get_configured_api_keys()
         env_list = [{"key": mask_key(k), "source": "env"} for k in env_keys]
         yaml_keys = [{"name": k.get("name", ""), "key": mask_key(k.get("value", "")), "source": "yaml"} for k in state.get("keys", [])]
-        return JSONResponse({"db_keys": db_keys, "env_keys": env_list, "yaml_keys": yaml_keys})
+        return JSONResponse({"db_keys": db_keys, "env_keys": env_list, "yaml_keys": yaml_keys, "auth_status": get_auth_status()})
 
     @app.post("/api/keys")
     async def api_keys_create(request: Request):

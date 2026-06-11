@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>服务代理监控系统 - 对话历史记录</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -304,6 +305,61 @@
         }
         .scroll-to-bottom:hover { background: rgba(15, 23, 42, 0.9); }
         .chat-panel { position: relative; }
+
+        /* Markdown rendered content */
+        .block.text.md-rendered { white-space: normal; line-height: 1.6; }
+        .block.text.md-rendered p { margin: 0.4em 0; }
+        .block.text.md-rendered h1, .block.text.md-rendered h2, .block.text.md-rendered h3 { margin: 0.6em 0 0.3em; }
+        .block.text.md-rendered pre { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 6px; overflow-x: auto; margin: 0.5em 0; }
+        .block.text.md-rendered code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.9em; }
+        .block.text.md-rendered pre code { background: none; padding: 0; }
+        .block.text.md-rendered ul, .block.text.md-rendered ol { margin: 0.4em 0; padding-left: 1.5em; }
+        .block.text.md-rendered blockquote { border-left: 3px solid #d1d5db; padding-left: 10px; color: #6b7280; margin: 0.4em 0; }
+        .block.text.md-rendered table { border-collapse: collapse; margin: 0.5em 0; }
+        .block.text.md-rendered th, .block.text.md-rendered td { border: 1px solid #d1d5db; padding: 4px 8px; font-size: 0.9em; }
+        .block.text.md-rendered a { color: #2563eb; }
+        .block.text.md-rendered img { max-width: 100%; }
+
+        /* HTML preview button */
+        .html-preview-btn {
+            display: inline-block; margin-top: 6px; padding: 3px 10px;
+            background: #6366f1; color: #fff; border: none; border-radius: 4px;
+            font-size: 11px; cursor: pointer; text-decoration: none;
+        }
+        .html-preview-btn:hover { background: #4f46e5; }
+
+        /* Searchable dropdown */
+        .searchable-select {
+            position: relative; display: inline-block;
+        }
+        .searchable-select .ss-display {
+            padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px;
+            font-size: 13px; background: #fff; cursor: pointer; color: #374151;
+            min-width: 100px; display: flex; align-items: center; gap: 4px;
+            user-select: none;
+        }
+        .searchable-select .ss-display::after {
+            content: '▾'; font-size: 10px; color: #9ca3af; margin-left: auto;
+        }
+        .searchable-select .ss-dropdown {
+            display: none; position: absolute; top: 100%; left: 0; z-index: 100;
+            background: #fff; border: 1px solid #d1d5db; border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,.12); min-width: 180px; max-height: 280px;
+            overflow: hidden; flex-direction: column; margin-top: 2px;
+        }
+        .searchable-select .ss-dropdown.open { display: flex; }
+        .searchable-select .ss-search {
+            padding: 6px 8px; border: none; border-bottom: 1px solid #e5e7eb;
+            font-size: 12px; outline: none; width: 100%;
+        }
+        .searchable-select .ss-options {
+            overflow-y: auto; max-height: 240px;
+        }
+        .searchable-select .ss-option {
+            padding: 6px 10px; font-size: 12px; cursor: pointer; white-space: nowrap;
+        }
+        .searchable-select .ss-option:hover { background: #f3f4f6; }
+        .searchable-select .ss-option.selected { background: #eff6ff; color: #2563eb; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -334,9 +390,16 @@
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
         <span class="min-msg-label">API Key</span>
-        <select class="folder-select" id="filterKey" onchange="reloadWithKey()">
-            <option value="">全部</option>
-        </select>
+        <div class="searchable-select" id="filterKeyWrap">
+            <div class="ss-display" onclick="toggleSSDropdown('filterKeyWrap')"><span id="filterKeyLabel">全部</span></div>
+            <div class="ss-dropdown" id="filterKeyDropdown">
+                <input class="ss-search" type="text" placeholder="搜索 key..." oninput="filterSSOptions('filterKeyWrap')" />
+                <div class="ss-options">
+                    <div class="ss-option selected" data-value="" onclick="selectSSOption('filterKeyWrap','','全部');reloadWithKey()">全部</div>
+                </div>
+            </div>
+        </div>
+        <input type="hidden" id="filterKey" value="" />
         <span class="min-msg-label">模型</span>
         <select class="folder-select" id="filterModel" onchange="reloadWithModel()">
             <option value="">全部</option>
@@ -387,6 +450,9 @@
 </div>
 
 <script>
+if (typeof marked !== 'undefined') {
+    marked.setOptions({ breaks: true, gfm: true });
+}
 // ----------------------------------------------------------------
 // State
 // ----------------------------------------------------------------
@@ -440,19 +506,28 @@ function maskKey(key) {
 }
 
 function updateKeyDropdown() {
-    const sel = document.getElementById('filterKey');
-    const current = sel.value;
-    sel.innerHTML = '<option value="">全部</option>';
+    const wrap = document.getElementById('filterKeyWrap');
+    const hidden = document.getElementById('filterKey');
+    const current = hidden.value;
+    const optionsContainer = wrap.querySelector('.ss-options');
+    optionsContainer.innerHTML = '<div class="ss-option' + (!current ? ' selected' : '') + '" data-value="" onclick="selectSSOption(\'filterKeyWrap\',\'\',\'全部\');reloadWithKey()">全部</div>';
     const sorted = [...knownKeys].sort();
     sorted.forEach(k => {
         const label = k ? maskKey(k) : 'default';
         const val = k || '__default__';
-        const opt = document.createElement('option');
-        opt.value = val;
+        const opt = document.createElement('div');
+        opt.className = 'ss-option' + (val === current ? ' selected' : '');
+        opt.dataset.value = val;
         opt.textContent = label;
-        sel.appendChild(opt);
+        opt.onclick = function() { selectSSOption('filterKeyWrap', val, label); reloadWithKey(); };
+        optionsContainer.appendChild(opt);
     });
-    sel.value = current;
+    if (current) {
+        const match = sorted.find(k => (k || '__default__') === current);
+        if (match !== undefined) {
+            document.getElementById('filterKeyLabel').textContent = match ? maskKey(match) : 'default';
+        }
+    }
 }
 
 function updateModelDropdown() {
@@ -508,6 +583,8 @@ function resetAndLoad() {
     _searchQuery = '';
     _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
+    document.getElementById('filterKey').value = '';
+    document.getElementById('filterKeyLabel').textContent = '全部';
     fileListEl.innerHTML = '<div class="sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
     loadFileList(true);
@@ -1144,10 +1221,41 @@ function renderBlock(block) {
     }
 }
 
+function _looksLikeHtml(text) {
+    return /^\s*<!DOCTYPE\s+html|^\s*<html[\s>]/i.test(text);
+}
+
+function _looksLikeMarkdown(text) {
+    return /^#{1,6}\s|^\s*[-*+]\s|\*\*|__|\[.*\]\(.*\)|```|^\s*>\s|^\|.*\|/m.test(text);
+}
+
 function renderTextBlock(block) {
+    const text = block.text || '';
     const el = document.createElement('div');
     el.className = 'block text';
-    el.textContent = block.text || '';
+
+    if (_looksLikeHtml(text)) {
+        el.textContent = text.slice(0, 200) + (text.length > 200 ? '...' : '');
+        const btn = document.createElement('a');
+        btn.className = 'html-preview-btn';
+        btn.textContent = '预览 HTML';
+        btn.href = '#';
+        btn.onclick = function(e) {
+            e.preventDefault();
+            const blob = new Blob([text], {type: 'text/html;charset=utf-8'});
+            window.open(URL.createObjectURL(blob), '_blank');
+        };
+        el.appendChild(btn);
+        return el;
+    }
+
+    if (typeof marked !== 'undefined' && _looksLikeMarkdown(text)) {
+        el.classList.add('md-rendered');
+        el.innerHTML = marked.parse(text);
+        return el;
+    }
+
+    el.textContent = text;
     return el;
 }
 
@@ -1178,7 +1286,31 @@ function renderToolUseBlock(block) {
         const others = Object.entries(input).filter(([k]) => k !== 'command');
         if (others.length) body.appendChild(renderKV(others));
     } else if (Object.keys(input).length) {
-        body.appendChild(renderKV(Object.entries(input)));
+        const contentVal = typeof input.content === 'string' ? input.content : '';
+        const hasHtml = contentVal && _looksLikeHtml(contentVal);
+        if (hasHtml) {
+            const nonContent = Object.entries(input).filter(([k]) => k !== 'content');
+            if (nonContent.length) body.appendChild(renderKV(nonContent));
+            const preview = document.createElement('div');
+            preview.style.cssText = 'margin-top:6px;';
+            const pre = document.createElement('pre');
+            pre.style.cssText = 'max-height:120px;overflow:auto;font-size:11px;color:#6b7280;background:#f9fafb;padding:6px;border-radius:4px;white-space:pre-wrap;word-break:break-all;';
+            pre.textContent = contentVal.slice(0, 500) + (contentVal.length > 500 ? '\n...' : '');
+            preview.appendChild(pre);
+            const btn = document.createElement('a');
+            btn.className = 'html-preview-btn';
+            btn.textContent = '预览 HTML';
+            btn.href = '#';
+            btn.onclick = function(e) {
+                e.preventDefault();
+                const blob = new Blob([contentVal], {type: 'text/html;charset=utf-8'});
+                window.open(URL.createObjectURL(blob), '_blank');
+            };
+            preview.appendChild(btn);
+            body.appendChild(preview);
+        } else {
+            body.appendChild(renderKV(Object.entries(input)));
+        }
     } else {
         body.textContent = '(no input)';
     }
@@ -1240,7 +1372,31 @@ function renderOaiToolCallBlock(block) {
         const others = Object.entries(parsed).filter(([k]) => k !== 'command');
         if (others.length) body.appendChild(renderKV(others));
     } else if (parsed && typeof parsed === 'object') {
-        body.appendChild(renderKV(Object.entries(parsed)));
+        const contentVal = typeof parsed.content === 'string' ? parsed.content : '';
+        const hasHtml = contentVal && _looksLikeHtml(contentVal);
+        if (hasHtml) {
+            const nonContent = Object.entries(parsed).filter(([k]) => k !== 'content');
+            if (nonContent.length) body.appendChild(renderKV(nonContent));
+            const preview = document.createElement('div');
+            preview.style.cssText = 'margin-top:6px;';
+            const pre = document.createElement('pre');
+            pre.style.cssText = 'max-height:120px;overflow:auto;font-size:11px;color:#6b7280;background:#f9fafb;padding:6px;border-radius:4px;white-space:pre-wrap;word-break:break-all;';
+            pre.textContent = contentVal.slice(0, 500) + (contentVal.length > 500 ? '\n...' : '');
+            preview.appendChild(pre);
+            const btn = document.createElement('a');
+            btn.className = 'html-preview-btn';
+            btn.textContent = '预览 HTML';
+            btn.href = '#';
+            btn.onclick = function(e) {
+                e.preventDefault();
+                const blob = new Blob([contentVal], {type: 'text/html;charset=utf-8'});
+                window.open(URL.createObjectURL(blob), '_blank');
+            };
+            preview.appendChild(btn);
+            body.appendChild(preview);
+        } else {
+            body.appendChild(renderKV(Object.entries(parsed)));
+        }
     } else {
         let args = fn.arguments || '';
         try { args = JSON.stringify(JSON.parse(args), null, 2); } catch(e) {}
@@ -1380,6 +1536,50 @@ function exitDeepSearch() {
     document.getElementById('loadStatus').textContent = '';
     loadFileList();
 }
+
+// ----------------------------------------------------------------
+// Searchable select dropdown
+// ----------------------------------------------------------------
+function toggleSSDropdown(wrapId) {
+    const wrap = document.getElementById(wrapId);
+    const dd = wrap.querySelector('.ss-dropdown');
+    const isOpen = dd.classList.contains('open');
+    document.querySelectorAll('.ss-dropdown.open').forEach(d => d.classList.remove('open'));
+    if (!isOpen) {
+        dd.classList.add('open');
+        const input = dd.querySelector('.ss-search');
+        input.value = '';
+        input.focus();
+        filterSSOptions(wrapId);
+    }
+}
+
+function filterSSOptions(wrapId) {
+    const wrap = document.getElementById(wrapId);
+    const query = wrap.querySelector('.ss-search').value.toLowerCase();
+    wrap.querySelectorAll('.ss-option').forEach(opt => {
+        const text = opt.textContent.toLowerCase();
+        opt.style.display = text.includes(query) ? '' : 'none';
+    });
+}
+
+function selectSSOption(wrapId, value, label) {
+    const wrap = document.getElementById(wrapId);
+    const hidden = document.getElementById(wrapId === 'filterKeyWrap' ? 'filterKey' : '');
+    if (hidden) hidden.value = value;
+    const labelEl = wrap.querySelector('.ss-display span');
+    if (labelEl) labelEl.textContent = label;
+    wrap.querySelectorAll('.ss-option').forEach(opt => {
+        opt.classList.toggle('selected', opt.dataset.value === value);
+    });
+    wrap.querySelector('.ss-dropdown').classList.remove('open');
+}
+
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.searchable-select')) {
+        document.querySelectorAll('.ss-dropdown.open').forEach(d => d.classList.remove('open'));
+    }
+});
 
 // ----------------------------------------------------------------
 // Scroll-to-bottom visibility

@@ -1,2 +1,14 @@
 __pycache__/
 *.json
+
+# 日志目录
+logs/
+logs_*/
+.*
+
+# 数据
+data/
+
+# 测试文件
+test/test-api-x.py
+configs/

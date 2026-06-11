@@ -480,7 +480,9 @@ def cmd_connect(args: argparse.Namespace) -> int:
         print(f"[connect] via proxy: {base_url}")
 
     print(f"[connect] method={method} model={model}")
-    result = run_test(base_url, method, model, api_key, args.timeout)
+    if args.message:
+        print(f"[connect] message={args.message}")
+    result = run_test(base_url, method, model, api_key, args.timeout, args.message)
     print_result(result)
     return 0 if result["ok"] else 1
 
@@ -1264,6 +1266,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_connect.add_argument("--method", default="anthropic", choices=["anthropic", "openai"], help="API protocol (default: anthropic)")
     p_connect.add_argument("--noproxy", action="store_true", help="Test upstream directly, bypassing proxy")
     p_connect.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
+    p_connect.add_argument("--message", "-m", default="", help="Custom prompt message")
     p_connect.set_defaults(func=cmd_connect)
 
     # --- sess subcommands ---

@@ -20,19 +20,19 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 TEST_PROMPT = "Say hi in one sentence."
 
 
-def _anthropic_payload(model: str) -> dict:
+def _anthropic_payload(model: str, message: str) -> dict:
     return {
         "model": model,
         "max_tokens": 64,
-        "messages": [{"role": "user", "content": TEST_PROMPT}],
+        "messages": [{"role": "user", "content": message}],
     }
 
 
-def _openai_payload(model: str) -> dict:
+def _openai_payload(model: str, message: str) -> dict:
     return {
         "model": model,
         "max_tokens": 64,
-        "messages": [{"role": "user", "content": TEST_PROMPT}],
+        "messages": [{"role": "user", "content": message}],
     }
 
 
@@ -63,13 +63,15 @@ def run_test(
     model: str,
     api_key: str = "",
     timeout: int = 30,
+    message: str = "",
 ) -> dict:
     """执行单次连通测试，返回结果字典。"""
     method = method.lower()
+    prompt = message or TEST_PROMPT
 
     if method == "anthropic":
         url = f"{base_url.rstrip('/')}/v1/messages"
-        payload = _anthropic_payload(model)
+        payload = _anthropic_payload(model, prompt)
         headers = {
             "Content-Type": "application/json",
             "x-api-key": api_key or "test",
@@ -77,7 +79,7 @@ def run_test(
         }
     else:
         url = f"{base_url.rstrip('/')}/v1/chat/completions"
-        payload = _openai_payload(model)
+        payload = _openai_payload(model, prompt)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key or 'test'}",
@@ -155,6 +157,7 @@ def main():
     parser.add_argument("--upstream-url", default="", help="Upstream URL (used with --noproxy)")
     parser.add_argument("--upstream-key", default="", help="Upstream API key (used with --noproxy)")
     parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
+    parser.add_argument("--message", "-m", default="", help="Custom prompt message (default: 'Say hi in one sentence.')")
     args = parser.parse_args()
 
     import os
@@ -173,8 +176,10 @@ def main():
         print(f"[connect] via proxy: {base_url}")
 
     print(f"[connect] method={args.method} model={args.model}")
+    if args.message:
+        print(f"[connect] message={args.message}")
 
-    result = run_test(base_url, args.method, args.model, api_key, args.timeout)
+    result = run_test(base_url, args.method, args.model, api_key, args.timeout, args.message)
     print_result(result)
     sys.exit(0 if result["ok"] else 1)
 
