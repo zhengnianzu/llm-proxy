@@ -142,6 +142,28 @@
         .detail-value { font-size: 13px; color: #374151; word-break: break-all; }
         .detail-empty { padding: 40px 16px; text-align: center; color: #9ca3af; font-size: 13px; }
 
+        /* Trace list in detail panel */
+        .trace-section { margin-top: 8px; border-top: 1px solid #e5e7eb; padding-top: 8px; }
+        .trace-toggle {
+            display: flex; align-items: center; gap: 4px; cursor: pointer;
+            font-size: 11px; color: #6b7280; font-weight: 600; text-transform: uppercase;
+            letter-spacing: .04em; padding: 4px 0; user-select: none;
+        }
+        .trace-toggle:hover { color: #374151; }
+        .trace-toggle .trace-chevron { font-size: 9px; transition: transform .15s; }
+        .trace-toggle .trace-chevron.open { transform: rotate(90deg); }
+        .trace-list { display: none; margin-top: 4px; }
+        .trace-list.open { display: block; }
+        .trace-item {
+            padding: 6px 8px; margin: 2px 0; border-radius: 5px;
+            font-size: 11px; color: #374151; cursor: pointer; border: 1px solid transparent;
+            line-height: 1.4; word-break: break-all;
+        }
+        .trace-item:hover { background: #f3f4f6; }
+        .trace-item.active { background: #eff6ff; border-color: #93c5fd; }
+        .trace-item-ts { color: #9ca3af; font-size: 10px; }
+        .trace-item-model { color: #6366f1; font-size: 10px; margin-left: 4px; }
+
         /* ========= Metadata bar ========= */
         .metadata {
             background: #fff; border-radius: 10px;
@@ -293,18 +315,18 @@
         .system-body.collapsed { display: none; }
 
         /* ========= Scroll to bottom ========= */
+        .chat-wrap { position: relative; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
         .scroll-to-bottom {
             position: absolute; bottom: 20px; right: 20px;
-            width: 36px; height: 36px; border-radius: 50%;
-            background: rgba(15, 23, 42, 0.7); color: #fff;
-            border: none; cursor: pointer; font-size: 16px;
+            width: 40px; height: 40px; border-radius: 50%;
+            background: #1d4ed8; color: #fff;
+            border: none; cursor: pointer; font-size: 18px;
             display: none; align-items: center; justify-content: center;
-            box-shadow: 0 2px 8px rgba(0,0,0,.2);
-            transition: opacity .2s;
+            box-shadow: 0 2px 12px rgba(0,0,0,.3);
+            transition: background .2s;
             z-index: 10;
         }
-        .scroll-to-bottom:hover { background: rgba(15, 23, 42, 0.9); }
-        .chat-panel { position: relative; }
+        .scroll-to-bottom:hover { background: #1e40af; }
 
         /* Markdown rendered content */
         .block.text.md-rendered { white-space: normal; line-height: 1.6; }
@@ -442,17 +464,19 @@
     </div>
 
     <!-- Center: chat -->
-    <div class="chat-panel" id="chatPanel">
-        <div class="empty-state">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863
-                       9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3
-                       12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-            </svg>
-            <p>从左侧选择一个对话文件</p>
+    <div class="chat-wrap">
+        <div class="chat-panel" id="chatPanel">
+            <div class="empty-state">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863
+                           9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3
+                           12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                </svg>
+                <p>从左侧选择一个对话文件</p>
+            </div>
         </div>
-        <button class="scroll-to-bottom" id="scrollToBottom" onclick="chatPanel.scrollTo({top: chatPanel.scrollHeight, behavior: 'smooth'})">&#x2193;</button>
+        <button class="scroll-to-bottom" id="scrollToBottom" onclick="document.getElementById('chatPanel').scrollTo({top: document.getElementById('chatPanel').scrollHeight, behavior: 'smooth'})">&#x2193;</button>
     </div>
 
     <!-- Right: detail panel -->
@@ -788,6 +812,8 @@ async function selectAggChain(idx, el) {
         first_time: chain.first_time || '',
         last_time: chain.last_time || '',
         file_count: chain.file_count || 1,
+        trace_list: chain.trace_list || [],
+        latest_file: chain.latest_file || '',
     });
 
     if (chain.latest_file) {
@@ -833,6 +859,24 @@ async function selectFile(item, el) {
     }
 }
 
+async function loadTraceFile(el, filename) {
+    document.querySelectorAll('#traceList .trace-item').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+    try {
+        const logDir = currentLogDir();
+        const fileParams = `filename=${encodeURIComponent(filename)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`;
+        const res = await fetch(`/logs/file?${fileParams}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        data._req_file = filename;
+        data._log_dir = logDir || '';
+        renderMessages(data, filename);
+    } catch(e) {
+        showError(`加载失败：${e.message}`);
+    }
+}
+
 // ----------------------------------------------------------------
 // Detail panel
 // ----------------------------------------------------------------
@@ -857,6 +901,22 @@ function renderDetailPanel(data) {
     }
     if (data.filename) {
         html += `<div class="detail-item"><div class="detail-label">文件名</div><div class="detail-value">${esc(data.filename)}</div></div>`;
+    }
+    if (data.trace_list && data.trace_list.length > 1) {
+        html += `<div class="trace-section">`;
+        html += `<div class="trace-toggle" onclick="this.querySelector('.trace-chevron').classList.toggle('open');this.nextElementSibling.classList.toggle('open')">`;
+        html += `<span class="trace-chevron">&#9654;</span> 关联列表 (${data.trace_list.length})`;
+        html += `</div>`;
+        html += `<div class="trace-list" id="traceList">`;
+        data.trace_list.forEach((t, i) => {
+            const ts = (t.ts || '').replace(/_/g, ' ').slice(0, 19);
+            html += `<div class="trace-item${t.filename === data.latest_file ? ' active' : ''}" data-filename="${esc(t.filename)}" onclick="loadTraceFile(this, '${esc(t.filename)}')">`;
+            html += `<div>${esc(t.filename)}</div>`;
+            html += `<div><span class="trace-item-ts">${esc(ts)}</span>`;
+            if (t.model) html += `<span class="trace-item-model">${esc(t.model)}</span>`;
+            html += `</div></div>`;
+        });
+        html += `</div></div>`;
     }
     body.innerHTML = html || '<div class="detail-empty">无详情</div>';
     document.getElementById('detailPanel').classList.remove('collapsed');
@@ -1095,18 +1155,6 @@ function renderMessages(data, filename) {
     // Build filter chips and apply initial mode
     buildFilterChips(filterChipsContainer);
     applyToolMode();
-
-    // Re-add scroll-to-bottom button
-    chatPanel.appendChild(document.getElementById('scrollToBottom') || createScrollBtn());
-}
-
-function createScrollBtn() {
-    const btn = document.createElement('button');
-    btn.className = 'scroll-to-bottom';
-    btn.id = 'scrollToBottom';
-    btn.innerHTML = '&#x2193;';
-    btn.onclick = () => chatPanel.scrollTo({top: chatPanel.scrollHeight, behavior: 'smooth'});
-    return btn;
 }
 
 // ----------------------------------------------------------------

@@ -507,6 +507,7 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
             "latest_file": session.get("latest_file", ""),
             "api_key": session.get("api_key", ""),
             "q1_preview": session.get("q1", ""),
+            "trace_list": session.get("trace_list", []),
         }
         items.append(payload)
 
