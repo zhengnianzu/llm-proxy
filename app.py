@@ -34,6 +34,8 @@ from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get
 from utils.log_routes import register_log_routes
 from utils.session_routes import register_session_routes
 from utils.key_routes import register_key_routes
+from utils.export_routes import register_export_routes
+from utils.export_store import init_db as init_export_db, mark_interrupted as mark_export_interrupted
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
@@ -580,6 +582,8 @@ def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success
 # 启动时初始化
 init_key_db(SERVICE_LOG_DIR)
 init_key_config(SERVICE_LOG_DIR)
+init_export_db(SERVICE_LOG_DIR)
+mark_export_interrupted()
 _load_index()
 start_metrics_scanner(os.path.dirname(LOGS_DIR))
 
@@ -1629,6 +1633,7 @@ def logs_debug_file(filename: str):
 register_log_routes(app)
 register_session_routes(app, LOGS_DIR)
 register_key_routes(app, templates)
+register_export_routes(app, LOGS_DIR)
 
 
 if __name__ == "__main__":

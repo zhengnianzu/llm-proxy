@@ -37,26 +37,7 @@ def _interruptible_sleep(seconds: int):
 # Upload
 # ---------------------------------------------------------------------------
 
-def _run_upload_cmd(
-    local: str,
-    dst: str,
-    upload_script: Optional[str] = None,
-    timeout: int = 120,
-) -> Tuple[bool, str]:
-    project_root = Path(__file__).resolve().parent.parent
-    if upload_script is None:
-        upload_script = str(project_root / "tools" / "obs_upload.sh")
-    else:
-        upload_script = str((project_root / upload_script).resolve())
-
-    cmd = [upload_script, local, dst]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode == 0:
-            return True, result.stdout.strip()
-        return False, (result.stderr or result.stdout).strip()
-    except Exception as e:
-        return False, str(e)
+from utils.obs_utils import run_upload_cmd as _run_upload_cmd
 
 
 def _upload_file(

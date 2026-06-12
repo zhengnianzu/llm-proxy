@@ -52,6 +52,7 @@
             <a class="nav-pill" href="/">监控总览</a>
             <a class="nav-pill" href="/query">查询统计</a>
             <a class="nav-pill active" href="/sessions">Session 统计</a>
+            <a class="nav-pill" href="/keys/export">Session 导出</a>
             <a class="nav-pill" href="/history">对话历史记录</a>
             <a class="nav-pill" href="/failures">失败历史记录</a>
             <a class="nav-pill" href="/logout">退出登录</a>
@@ -73,6 +74,7 @@
                 <button class="btn btn-primary btn-sm flex-grow-1" @click="fetchStats(true)" :disabled="loading">
                     {{ loading ? '加载中…' : '刷新' }}
                 </button>
+                <a href="/keys/export" class="btn btn-outline-success btn-sm">导出</a>
             </div>
         </div>
     </div>

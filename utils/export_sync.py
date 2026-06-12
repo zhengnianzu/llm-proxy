@@ -228,13 +228,13 @@ def sync_session_index(
     sessions = _load_session_index(logs_dir)
     if not sessions:
         logger.info("无 session 数据，跳过 sync")
-        return {"uploaded": 0, "skipped": 0, "failed": 0, "total_files": 0}
+        return {"uploaded": 0, "skipped": 0, "failed": 0, "total_files": 0, "matched_sessions": 0}
 
     if key:
         sessions = [s for s in sessions if s.get("api_key") == key]
         if not sessions:
             logger.info("按 key=%s 过滤后无 session 数据", key)
-            return {"uploaded": 0, "skipped": 0, "failed": 0, "total_files": 0}
+            return {"uploaded": 0, "skipped": 0, "failed": 0, "total_files": 0, "matched_sessions": 0}
         logger.info("按 key=%s 过滤，共 %d 条 session", key, len(sessions))
 
     state = _load_sync_state(logs_dir)
@@ -256,13 +256,15 @@ def sync_session_index(
         triplet_files = _collect_triplet_files(logs_dir, latest_file)
         collect_files.extend(triplet_files)
 
+    matched_sessions = len(sessions)
+
     if not collect_files and not new_keys:
         logger.info("无新 session 需要上传")
-        return {"uploaded": 0, "skipped": len(uploaded_keys), "failed": 0, "total_files": 0}
+        return {"uploaded": 0, "skipped": len(uploaded_keys), "failed": 0, "total_files": 0, "matched_sessions": matched_sessions}
 
     if not local_copy_dir:
         logger.error("未指定 local_copy_dir，无法复制文件")
-        return {"uploaded": 0, "skipped": 0, "failed": 1, "total_files": 0}
+        return {"uploaded": 0, "skipped": 0, "failed": 1, "total_files": 0, "matched_sessions": matched_sessions}
 
     copy_dir = Path(local_copy_dir)
     copy_dir.mkdir(parents=True, exist_ok=True)
@@ -298,7 +300,7 @@ def sync_session_index(
         logger.info("文件夹上传成功: %s -> %s", copy_dir, obs_dst)
     else:
         logger.error("文件夹上传失败: %s", msg)
-        return {"uploaded": 0, "skipped": 0, "failed": 1, "total_files": copied}
+        return {"uploaded": 0, "skipped": 0, "failed": 1, "total_files": copied, "matched_sessions": matched_sessions}
 
     uploaded_keys.update(new_keys)
     slots = state.setdefault("slots", {})
@@ -306,4 +308,4 @@ def sync_session_index(
     _save_sync_state(logs_dir, state)
 
     logger.info("上传完成: %d 个文件, %d 个新 session", copied, len(new_keys))
-    return {"uploaded": copied, "skipped": len(uploaded_keys) - len(new_keys), "failed": 0, "total_files": copied}
+    return {"uploaded": copied, "skipped": len(uploaded_keys) - len(new_keys), "failed": 0, "total_files": copied, "matched_sessions": matched_sessions}
