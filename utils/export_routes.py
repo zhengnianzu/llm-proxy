@@ -232,8 +232,18 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         from utils.eval.eval import evaluate_sessions
         from utils.obs_sync import _run_upload_cmd
 
-        rec = get_record(record_id)
         _log = lambda msg: append_log(record_id, msg)
+        try:
+            _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
+                            reformat_and_analyze, evaluate_sessions, _run_upload_cmd, _log)
+        except Exception as exc:
+            logger.exception("_run_task crashed (record=%s)", record_id)
+            _log(f"任务异常终止: {exc}")
+            update_status(record_id, "failed", error_message=str(exc))
+
+    def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
+                        reformat_and_analyze, evaluate_sessions, _run_upload_cmd, _log):
+        rec = get_record(record_id)
         update_status(record_id, "running")
 
         sync_cfg = _load_sync_config()

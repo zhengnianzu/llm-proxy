@@ -1094,7 +1094,12 @@ def evaluate_sessions(
     stats = compute_stats(sessions)
 
     xlsx_path = out / "session_report.xlsx"
-    write_excel(sessions, stats, xlsx_path)
+    try:
+        write_excel(sessions, stats, xlsx_path)
+    except ImportError:
+        _log("跳过 xlsx（缺少 pandas/openpyxl）")
+    except Exception as e:
+        _log(f"xlsx 生成失败: {e}")
     _log("session_report.xlsx 已生成")
 
     report_path = out / "session_report.md"
