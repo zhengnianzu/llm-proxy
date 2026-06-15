@@ -171,7 +171,6 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             return JSONResponse({"keys": [], "mtimes": []})
 
         stats = _build_stats_json(env_dir, threshold)
-        date_mtime = _date_to_mtime_map(env_dir)
 
         db_keys = {}
         db_key_created = {}
@@ -183,15 +182,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         for row in stats.get("rows", []):
             api_key = row["api_key"]
             slot = _key_slot(api_key if api_key != "(empty)" else "")
-            mtime_dist = {}
-            for date_str, cell in row.get("cells", {}).items():
-                if cell["total"] == 0:
-                    continue
-                for mt in date_mtime.get(date_str, []):
-                    if mt not in mtime_dist:
-                        mtime_dist[mt] = {"total": 0, "qualified": 0}
-                    mtime_dist[mt]["total"] += cell["total"]
-                    mtime_dist[mt]["qualified"] += cell["qualified"]
+            mtime_dist = row.get("mtime_cells", {})
 
             matched_name = ""
             created_at = ""
@@ -293,22 +284,26 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         local_copy_dir=str(local_base), force=force,
                     )
                     matched = sync_result.get("matched_sessions", 0)
+                    new_sessions = sync_result.get("new_sessions", 0)
                     uploaded = sync_result.get("uploaded", 0)
                     skipped = sync_result.get("skipped", 0)
-                    total_sessions += uploaded
+                    total_sessions += new_sessions
                     total_uploaded += uploaded
                     total_skipped += skipped
-                    _log(f"[{mt}] 匹配 {matched} sessions, 新导出 {uploaded}, 跳过 {skipped}")
+                    _log(f"[{mt}] 匹配 {matched} sessions, 新导出 {new_sessions}, 跳过 {skipped}, 文件数 {uploaded}")
                     if sync_result.get("failed", 0) > 0:
                         _log(f"[{mt}] 上传失败!")
                         errors.append(f"{mt}: upload failed")
                 else:
                     session_entries = _load_session_index(mt_src)
+                    total_before = len(session_entries)
                     if api_key:
                         session_entries = [s for s in session_entries if s.get("api_key") == api_key]
                     if not session_entries:
-                        _log(f"[{mt}] 无匹配 session，跳过")
+                        _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 0, 跳过")
                         continue
+                    if api_key:
+                        _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 {len(session_entries)}")
                     _log(f"[{mt}] reformat+analyze: {len(session_entries)} sessions...")
                     ra_result = reformat_and_analyze(
                         src_dir=mt_src, out_dir=str(local_base),

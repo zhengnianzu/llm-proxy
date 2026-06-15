@@ -33,6 +33,7 @@ def _load_sessions(base_dir: Path) -> list:
         cache_file = sub / ".session_cache.jsonl"
         if not cache_file.is_file():
             continue
+        mtime_name = sub.name
         with open(cache_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -44,6 +45,7 @@ def _load_sessions(base_dir: Path) -> list:
                     continue
                 if obj.get("_meta"):
                     continue
+                obj["_mtime_dir"] = mtime_name
                 sessions.append(obj)
     return sessions
 
@@ -58,15 +60,24 @@ def _build_stats_json(base_dir: Path, threshold: int = QUALIFIED_THRESHOLD) -> D
     qualified = sum(1 for s in sessions if len(s.get("trace_list", [])) >= threshold)
 
     table: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: {"total": 0, "qualified": 0}))
+    mtime_table: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: {"total": 0, "qualified": 0}))
     all_dates: set = set()
+    all_mtimes: set = set()
 
     for s in sessions:
         key = s.get("api_key", "") or "(empty)"
         date = _extract_date(s.get("first_ts", ""))
+        mt = s.get("_mtime_dir", "")
+        q = len(s.get("trace_list", [])) >= threshold
         all_dates.add(date)
         table[key][date]["total"] += 1
-        if len(s.get("trace_list", [])) >= threshold:
+        if q:
             table[key][date]["qualified"] += 1
+        if mt:
+            all_mtimes.add(mt)
+            mtime_table[key][mt]["total"] += 1
+            if q:
+                mtime_table[key][mt]["qualified"] += 1
 
     dates = sorted(all_dates)
     keys = sorted(table.keys())
@@ -81,9 +92,15 @@ def _build_stats_json(base_dir: Path, threshold: int = QUALIFIED_THRESHOLD) -> D
             cells[d] = {"total": cell["total"], "qualified": cell["qualified"]}
             row_total += cell["total"]
             row_qualified += cell["qualified"]
+        mtime_cells = {}
+        for mt in sorted(all_mtimes):
+            mc = mtime_table[key][mt]
+            if mc["total"] > 0:
+                mtime_cells[mt] = {"total": mc["total"], "qualified": mc["qualified"]}
         rows.append({
             "api_key": key,
             "cells": cells,
+            "mtime_cells": mtime_cells,
             "row_total": row_total,
             "row_qualified": row_qualified,
         })

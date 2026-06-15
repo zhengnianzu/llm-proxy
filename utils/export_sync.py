@@ -309,4 +309,4 @@ def sync_session_index(
     _save_sync_state(logs_dir, state)
 
     logger.info("上传完成: %d 个文件, %d 个新 session", copied, len(new_keys))
-    return {"uploaded": copied, "skipped": len(uploaded_keys) - len(new_keys), "failed": 0, "total_files": copied, "matched_sessions": matched_sessions}
+    return {"uploaded": copied, "skipped": len(uploaded_keys) - len(new_keys), "failed": 0, "total_files": copied, "matched_sessions": matched_sessions, "new_sessions": len(new_keys)}
