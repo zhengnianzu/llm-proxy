@@ -115,12 +115,125 @@ def _process_one(args: tuple) -> Optional[dict]:
         "tool_success_rate": analyzed["tool_success_rate"],
         "model": merged.get("model", ""),
         "q1": analyzed["q1"],
+        "latest_file": latest_file,
+        "log_dir": Path(src_dir_s).name,
         "tool_use_detail": analyzed["tool_use_detail"],
         "tool_success_detail": analyzed["tool_success_detail"],
         "tool_fail_detail": analyzed["tool_fail_detail"],
         "skills_used": analyzed["skills_used"],
         **dict(zip(("completed", "completed_note"), fmt_quality(analyzed["quality_errors"]))),
     }
+
+
+def _rebuild_from_cache(entry: dict) -> Optional[dict]:
+    ev = entry.get("_eval")
+    if not ev or not isinstance(ev, dict):
+        return None
+    first_ts = entry.get("_key") or entry.get("first_ts", "")
+    if not first_ts:
+        return None
+    from utils.eval.eval import _parse_folder_ts
+    start_ts = _parse_folder_ts(first_ts)
+    models = entry.get("models", [])
+    return {
+        "session": first_ts,
+        "latest_file": entry.get("latest_file", ""),
+        "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S") if start_ts else None,
+        "end_time": ev.get("end_time"),
+        "duration_s": ev.get("duration_s"),
+        "api_call_count": ev.get("api_call_count", len(entry.get("trace_list", []) or []) or 1),
+        "api_errors": ev.get("api_errors", 0),
+        "user_turns": ev.get("user_turns", 0),
+        "total_messages": ev.get("total_messages", entry.get("msg_count", 0)),
+        "tool_use_count": ev.get("tool_use_count", 0),
+        "tool_result_count": ev.get("tool_result_count", 0),
+        "tool_success": ev.get("tool_success", 0),
+        "tool_fail_flag": ev.get("tool_fail_flag", 0),
+        "tool_fail_keyword": ev.get("tool_fail_keyword", 0),
+        "tool_fail_total": ev.get("tool_fail_total", 0),
+        "tool_success_rate": ev.get("tool_success_rate"),
+        "model": ev.get("model", models[0] if models else ""),
+        "q1": ev.get("q1", entry.get("q1", "")),
+        "tool_use_detail": ev.get("tool_use_detail", {}),
+        "tool_success_detail": ev.get("tool_success_detail", {}),
+        "tool_fail_detail": ev.get("tool_fail_detail", {}),
+        "skills_used": ev.get("skills_used", {}),
+        "completed": ev.get("completed", 0),
+        "completed_note": ev.get("completed_note", ""),
+    }
+
+
+def write_eval_to_cache(logs_dir: str, results: List[dict]) -> None:
+    cache_path = Path(logs_dir) / ".session_cache.jsonl"
+    if not cache_path.is_file() or not results:
+        return
+    result_map = {}
+    for r in results:
+        sid = r.get("session", "")
+        if sid:
+            result_map[sid] = r
+    if not result_map:
+        return
+
+    lines = []
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+
+    from datetime import datetime as _dt
+    now_str = _dt.now().strftime("%Y-%m-%dT%H:%M:%S")
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            new_lines.append(line)
+            continue
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            new_lines.append(line)
+            continue
+        key = obj.get("_key", "")
+        if key and key in result_map:
+            r = result_map[key]
+            obj["_eval"] = {
+                "ts": now_str,
+                "completed": r.get("completed", 0),
+                "completed_note": r.get("completed_note", ""),
+                "tool_use_count": r.get("tool_use_count", 0),
+                "tool_result_count": r.get("tool_result_count", 0),
+                "tool_success": r.get("tool_success", 0),
+                "tool_fail_flag": r.get("tool_fail_flag", 0),
+                "tool_fail_keyword": r.get("tool_fail_keyword", 0),
+                "tool_fail_total": r.get("tool_fail_total", 0),
+                "tool_success_rate": r.get("tool_success_rate"),
+                "user_turns": r.get("user_turns", 0),
+                "total_messages": r.get("total_messages", 0),
+                "duration_s": r.get("duration_s"),
+                "end_time": r.get("end_time"),
+                "api_call_count": r.get("api_call_count", 0),
+                "api_errors": r.get("api_errors", 0),
+                "model": r.get("model", ""),
+                "q1": r.get("q1", ""),
+                "tool_use_detail": r.get("tool_use_detail", {}),
+                "tool_success_detail": r.get("tool_success_detail", {}),
+                "tool_fail_detail": r.get("tool_fail_detail", {}),
+                "skills_used": r.get("skills_used", {}),
+            }
+            new_lines.append(json.dumps(obj, ensure_ascii=False) + "\n")
+        else:
+            new_lines.append(line)
+
+    import os
+    tmp = str(cache_path) + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        os.replace(tmp, str(cache_path))
+    except OSError:
+        pass
 
 
 def reformat_and_analyze(
@@ -150,15 +263,23 @@ def reformat_and_analyze(
         return {"total_sessions": 0, "total_files": 0, "errors": [], "results": []}
 
     tasks = []
+    cached_results = []
     for sess in entries:
         first_ts = sess.get("first_ts") or sess.get("_key", "")
         latest_file = sess.get("latest_file", "")
         trace_list = sess.get("trace_list", [])
         if not first_ts or not latest_file:
             continue
-        tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list))
+        cached = _rebuild_from_cache(sess)
+        if cached:
+            cached["log_dir"] = Path(src_dir).name
+            cached_results.append(cached)
+        else:
+            tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list))
 
-    results = []
+    results = list(cached_results)
+    if cached_results:
+        _log(f"缓存命中 {len(cached_results)} sessions, 需处理 {len(tasks)}")
     errors = []
     done = 0
 

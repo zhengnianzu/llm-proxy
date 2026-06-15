@@ -324,11 +324,20 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 eval_result = evaluate_sessions(
                     sessions=all_results, report_dir=str(local_base), progress_cb=_log,
+                    key_name=f"{_env_key_name}/{slot}",
+                    obs_path=obs_dst,
                 )
                 eval_report_path = eval_result.get("report_path", "")
                 analysis_json_path = eval_result.get("analysis_json_path", "")
                 if analysis_json_path and Path(analysis_json_path).is_file():
                     analysis_json_content = Path(analysis_json_path).read_text(encoding="utf-8")
+
+                from utils.eval.reformat import write_eval_to_cache
+                for mt in mtime_dirs:
+                    try:
+                        write_eval_to_cache(str(_env_dir / mt), all_results)
+                    except Exception:
+                        logger.debug("write_eval_to_cache failed for %s", mt, exc_info=True)
             else:
                 _log("无 session 数据")
 
@@ -495,7 +504,12 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 from utils.eval.eval import load_analysis_json, compute_stats, render_html_report_string
                 sessions = load_analysis_json(analysis_json)
                 stats = compute_stats(sessions)
-                content = render_html_report_string(sessions, stats)
+                key_slot = rec.get("key_slot", "all")
+                content = render_html_report_string(
+                    sessions, stats,
+                    key_name=f"{env_key_name}/{key_slot}",
+                    obs_path=rec.get("obs_dst", ""),
+                )
                 return JSONResponse({"report_html": content, "record_id": record_id})
             except Exception as e:
                 logger.exception("Failed to rebuild report from analysis JSON")

@@ -1676,7 +1676,29 @@ document.addEventListener('click', function(e) {
 })();
 
 // Init
-loadLogDirs().then(() => resetAndLoad());
+loadLogDirs().then(() => {
+    resetAndLoad();
+    const _params = new URLSearchParams(window.location.search);
+    const _urlFile = _params.get('file');
+    const _urlLogDir = _params.get('log_dir');
+    if (_urlFile) {
+        setTimeout(async () => {
+            chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+            try {
+                let fp = `filename=${encodeURIComponent(_urlFile)}`;
+                if (_urlLogDir) fp += `&log_dir=${encodeURIComponent(_urlLogDir)}`;
+                const res = await fetch(`/logs/file?${fp}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                data._req_file = _urlFile;
+                data._log_dir = _urlLogDir || '';
+                renderMessages(data, _urlFile);
+            } catch(e) {
+                showError(`加载失败：${e.message}`);
+            }
+        }, 300);
+    }
+});
 </script>
 </body>
 </html>

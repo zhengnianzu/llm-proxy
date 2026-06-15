@@ -809,39 +809,31 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
 # HTML 报告 — build_context + render (移植自 analyze_sessions.py)
 # ---------------------------------------------------------------------------
 
-def _fmt_duration(s: Optional[float]) -> str:
-    if s is None:
-        return "N/A"
-    if s < 60:
-        return f"{s:.0f}s"
-    if s < 3600:
-        return f"{s / 60:.1f}min"
-    return f"{s / 3600:.1f}h"
-
-
 def _fmt_rate(r: Optional[float]) -> str:
     return f"{r:.1f}%" if r is not None else "-"
 
 
-def _pct(values: List[float], p: int) -> float:
-    if not values:
-        return 0.0
-    sv = sorted(values)
-    return sv[min(int(len(sv) * p / 100), len(sv) - 1)]
-
-
-def _dist_rows(vals: List, buckets: List[Tuple], unit: str = "") -> List[Dict]:
+def _dist_rows(vals: List, buckets: List[Tuple], unit: str = "",
+               session_items: Optional[List[Dict]] = None) -> List[Dict]:
     total = len(vals)
-    counts = [sum(1 for v in vals if v is not None and lo <= v < hi) for _, lo, hi in buckets]
-    max_c = max(counts, default=1)
+    bucket_sessions: List[List[Dict]] = [[] for _ in buckets]
+    counts = []
+    for bi, (_, lo, hi) in enumerate(buckets):
+        cnt = 0
+        for vi, v in enumerate(vals):
+            if v is not None and lo <= v < hi:
+                cnt += 1
+                if session_items and vi < len(session_items):
+                    bucket_sessions[bi].append(session_items[vi])
+        counts.append(cnt)
     return [
         {
             "label": f"{label}{unit}",
             "count": cnt,
             "pct": round(cnt / total * 100, 1) if total else 0.0,
-            "bar": "█" * (max(1, round(cnt / max(max_c, 1) * 15)) if cnt else 0),
+            "sessions": sids,
         }
-        for (label, lo, hi), cnt in zip(buckets, counts)
+        for (label, lo, hi), cnt, sids in zip(buckets, counts, bucket_sessions)
     ]
 
 
@@ -852,7 +844,8 @@ def _extract_error_codes(completed) -> List[str]:
     return [c.strip() for c in codes_part.split(",") if c.strip()]
 
 
-def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
+def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10,
+                  key_name: str = "", obs_path: str = "") -> Dict:
     total = stats["total"]
     turns_vals = stats["turns_vals"]
     msg_vals = stats["msg_vals"]
@@ -865,48 +858,49 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
     total_tr = stats["total_tr"]
     single_count = sum(1 for v in api_vals if v == 1)
 
+    def _si(s):
+        return {"name": s["session"], "file": s.get("latest_file", ""), "log_dir": s.get("log_dir", "")}
+
+    all_items = [_si(s) for s in sessions]
+    wt_items = [_si(s) for s in with_tools]
+    rate_items = [_si(s) for s in rate_sessions]
+    mt_items = [_si(s) for s in multi_timed]
+
     ok_count = sum(1 for s in sessions if s["completed"] == 0)
     fail_count = total - ok_count
     err_counter: Counter = Counter()
+    err_sessions: Dict[str, List[Dict]] = {}
     for s in sessions:
         for code in _extract_error_codes(s["completed"]):
             err_counter[code] += 1
+            err_sessions.setdefault(code, []).append(_si(s))
 
     top_raw = sorted(
         [s for s in sessions if s.get("duration_s")],
         key=lambda x: -x["duration_s"],
     )[:top_n]
 
-    def p(vals, q):
-        return int(_pct(vals, q))
-
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "total": total,
         "top_n": top_n,
+        "key_name": key_name,
+        "obs_path": obs_path,
         "turns": {
             "avg": f"{sum(turns_vals)/total:.2f}",
-            "max": max(turns_vals),
-            "p50": p(turns_vals, 50),
-            "p90": p(turns_vals, 90),
             "dist": _dist_rows(turns_vals, [
                 ("1", 1, 2), ("2-3", 2, 4), ("4-7", 4, 8), ("8-15", 8, 16), (">15", 16, 10**9)
-            ], "轮"),
+            ], "轮", session_items=all_items),
         },
         "messages": {
             "avg": f"{sum(msg_vals)/total:.2f}",
-            "max": max(msg_vals),
-            "min": min(msg_vals),
-            "p50": p(msg_vals, 50),
-            "p90": p(msg_vals, 90),
             "dist": _dist_rows(msg_vals, [
                 ("1-2", 0, 3), ("3-5", 3, 6), ("6-10", 6, 11),
                 ("11-20", 11, 21), ("21-50", 21, 51), (">50", 51, 10**9)
-            ], "条"),
+            ], "条", session_items=all_items),
         },
         "api": {
             "avg": f"{sum(api_vals)/total:.2f}",
-            "max": max(api_vals),
             "single_count": single_count,
             "single_pct": f"{single_count/total*100:.1f}",
             "multi_count": stats["multi_api"],
@@ -915,7 +909,7 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
             "err_pct": f"{stats['api_err']/total*100:.1f}",
             "dist": _dist_rows(api_vals, [
                 ("1次", 1, 2), ("2-3次", 2, 4), ("4-10次", 4, 11), ("11-30次", 11, 31), (">30次", 31, 10**9)
-            ]),
+            ], session_items=all_items),
         },
         "tools": {
             "with_count": len(with_tools),
@@ -926,9 +920,6 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
             "total_result": total_tr,
             "has_sessions": bool(with_tools),
             "avg_use": f"{sum(tu_vals)/len(tu_vals):.1f}" if tu_vals else "0",
-            "max_use": max(tu_vals) if tu_vals else 0,
-            "p50_use": p(tu_vals, 50) if tu_vals else 0,
-            "p90_use": p(tu_vals, 90) if tu_vals else 0,
             "has_results": total_tr > 0,
             "total_succ": stats["total_succ"],
             "total_ff": stats["total_ff"],
@@ -942,12 +933,13 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
             "use_dist": _dist_rows(tu_vals, [
                 ("1-5次", 1, 6), ("6-15次", 6, 16), ("16-30次", 16, 31),
                 ("31-50次", 31, 51), (">50次", 51, 10**9)
-            ]) if tu_vals else [],
+            ], session_items=wt_items) if tu_vals else [],
             "rate_sessions_count": len(rate_sessions),
             "rate_dist": _dist_rows(
                 [s["tool_success_rate"] for s in rate_sessions],
                 [("0-50%", 0, 50), ("50-80%", 50, 80), ("80-95%", 80, 95),
-                 ("95-99%", 95, 99), ("100%", 100, 101)]
+                 ("95-99%", 95, 99), ("100%", 100, 101)],
+                session_items=rate_items,
             ) if rate_sessions else [],
         },
         "duration": {
@@ -956,13 +948,10 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
             "has_multi": bool(multi_timed),
             "avg": _fmt_duration(sum(dur_vals)/len(dur_vals)) if dur_vals else "N/A",
             "max": _fmt_duration(max(dur_vals)) if dur_vals else "N/A",
-            "min": _fmt_duration(min(dur_vals)) if dur_vals else "N/A",
-            "p50": _fmt_duration(_pct(dur_vals, 50)) if dur_vals else "N/A",
-            "p90": _fmt_duration(_pct(dur_vals, 90)) if dur_vals else "N/A",
             "dist": _dist_rows(dur_vals, [
                 ("<1min", 0, 60), ("1-5min", 60, 300), ("5-15min", 300, 900),
                 ("15-30min", 900, 1800), (">30min", 1800, 10**9)
-            ]) if dur_vals else [],
+            ], session_items=mt_items) if dur_vals else [],
         },
         "models": [
             {"name": mdl or "(未知)", "count": cnt, "pct": f"{cnt/total*100:.1f}"}
@@ -993,6 +982,7 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
                     "desc": QUALITY_ERRORS.get(code, code),
                     "count": cnt,
                     "pct": f"{cnt/total*100:.1f}",
+                    "sessions": err_sessions.get(code, []),
                 }
                 for code, cnt in sorted(err_counter.items(), key=lambda x: -x[1])
             ],
@@ -1027,8 +1017,9 @@ def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
-def render_html_report(sessions: List[Dict], stats: Dict, output_path: Path) -> None:
-    ctx = build_context(sessions, stats)
+def render_html_report(sessions: List[Dict], stats: Dict, output_path: Path,
+                       key_name: str = "", obs_path: str = "") -> None:
+    ctx = build_context(sessions, stats, key_name=key_name, obs_path=obs_path)
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=False,
@@ -1039,8 +1030,9 @@ def render_html_report(sessions: List[Dict], stats: Dict, output_path: Path) -> 
     output_path.write_text(env.get_template("report.html.j2").render(**ctx), encoding="utf-8")
 
 
-def render_html_report_string(sessions: List[Dict], stats: Dict) -> str:
-    ctx = build_context(sessions, stats)
+def render_html_report_string(sessions: List[Dict], stats: Dict,
+                              key_name: str = "", obs_path: str = "") -> str:
+    ctx = build_context(sessions, stats, key_name=key_name, obs_path=obs_path)
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=False,
@@ -1081,6 +1073,8 @@ def evaluate_sessions(
     sessions: List[Dict],
     report_dir: str,
     progress_cb: Optional[Callable[[str], None]] = None,
+    key_name: str = "",
+    obs_path: str = "",
 ) -> dict:
     """
     接收已分析好的 session 结果列表，聚合统计并生成报告。
@@ -1108,7 +1102,7 @@ def evaluate_sessions(
     _log("session_report.md 已生成")
 
     html_path = out / "session_report.html"
-    render_html_report(sessions, stats, html_path)
+    render_html_report(sessions, stats, html_path, key_name=key_name, obs_path=obs_path)
     _log("session_report.html 已生成")
 
     json_path = out / "session_analysis.json"
