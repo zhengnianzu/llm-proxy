@@ -25,7 +25,7 @@ from utils.export_store import (
     list_records_by_key,
     update_status,
 )
-from utils.export_sync import export_session_index, sync_session_index, _load_session_index, _read_session_cache
+from utils.export_sync import export_session_index, sync_session_index, _load_session_index
 from utils.key_config import load_key_state
 from utils.key_store import list_keys, mask_key
 from utils.log_paths import get_service_log_dir
@@ -281,12 +281,12 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         for mt in mtime_dirs:
             mt_src = str(_env_dir / mt)
             try:
-                if mode == "export":
-                    _log(f"[{mt}] 生成 session_index...")
-                    exp_result = export_session_index(mt_src, force=force)
-                    _log(f"[{mt}] session_index: {exp_result.get('total_sessions', 0)} sessions"
-                         + (" (已是最新，跳过)" if exp_result.get("skipped") else ""))
+                _log(f"[{mt}] 生成 session_index...")
+                exp_result = export_session_index(mt_src, force=force)
+                _log(f"[{mt}] session_index: {exp_result.get('total_sessions', 0)} sessions"
+                     + (" (已是最新，跳过)" if exp_result.get("skipped") else ""))
 
+                if mode == "export":
                     _log(f"[{mt}] 开始同步文件" + (f" (按 key 过滤: ...{api_key[-8:]})" if api_key else " (全量)"))
                     sync_result = sync_session_index(
                         mt_src, obs_dst=obs_dst, key=api_key or None,
@@ -303,7 +303,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         _log(f"[{mt}] 上传失败!")
                         errors.append(f"{mt}: upload failed")
                 else:
-                    session_entries = _read_session_cache(mt_src)
+                    session_entries = _load_session_index(mt_src)
                     if api_key:
                         session_entries = [s for s in session_entries if s.get("api_key") == api_key]
                     if not session_entries:
