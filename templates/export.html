@@ -60,9 +60,12 @@
         .status-badge.running { background: #fef9c3; color: #854d0e; }
         .status-badge.pending { background: #e5e7eb; color: #374151; }
 
-        /* OBS drawer */
+        /* 右侧 Drawer（通用） */
         .drawer-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(0,0,0,.3); z-index: 1000; }
-        .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 480px; background: #fff; z-index: 1001; box-shadow: -4px 0 24px rgba(0,0,0,.15); overflow-y: auto; padding: 20px; }
+        .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 560px; background: #fff; z-index: 1001; box-shadow: -4px 0 24px rgba(0,0,0,.15); overflow-y: auto; padding: 20px; display: flex; flex-direction: column; }
+        @media (max-width: 640px) { .drawer { width: 100%; } }
+        .drawer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-shrink: 0; }
+        .drawer-body { flex: 1; overflow-y: auto; min-height: 0; }
         .file-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f1f5f9; font-size: .84rem; }
         .file-item .name { font-family: monospace; color: #1e40af; }
         .file-item .size { color: #9ca3af; }
@@ -174,15 +177,22 @@
             <div v-if="k.records && k.records.length" style="margin-top:10px;">
                 <small class="text-muted" style="font-weight:600">导出历史:</small>
                 <div v-for="r in k.records" :key="r.id" class="record-row">
-                    <span class="status-badge" :class="r.status">{{ statusText(r.status) }}</span>
+                    <span class="status-badge" :class="r.status">{{ statusText(r.status, r.mode) }}</span>
+                    <span v-if="r.mode === 'eval'" class="badge bg-info" style="font-size:.68rem">质检</span>
                     <span>{{ r.created_at }}</span>
-                    <span class="text-muted">{{ r.total_sessions }} sessions / {{ r.files_uploaded }} files</span>
+                    <span class="text-muted">
+                        {{ r.total_sessions }} sessions<span v-if="r.mode !== 'eval'"> / {{ r.files_uploaded }} files</span>
+                    </span>
                     <span v-if="r.obs_dst && r.status === 'success'"
                           class="text-primary" style="cursor:pointer;font-size:.8rem" @click="openDrawer(r.obs_dst)">
                         [OBS]
                     </span>
-                    <span class="text-primary" style="cursor:pointer;font-size:.8rem" @click="showLog(r.id)">
+                    <span class="text-primary" style="cursor:pointer;font-size:.8rem" @click="openLogDrawer(r.id)">
                         [详情]
+                    </span>
+                    <span v-if="r.mode === 'eval' && r.status === 'success'"
+                          class="text-success" style="cursor:pointer;font-size:.8rem;font-weight:600" @click="openReport(r.id)">
+                        [报告]
                     </span>
                     <span v-if="r.error_message" class="text-danger" style="font-size:.78rem">{{ r.error_message }}</span>
                 </div>
@@ -197,19 +207,26 @@
     <div v-if="loading" class="text-center text-muted py-3">加载中…</div>
     <div v-if="error" class="alert alert-danger py-2 small mt-2">{{ error }}</div>
 
-    <!-- 进度日志面板 -->
-    <div v-if="logVisible" class="panel" style="border: 1px solid #e2e8f0; background: #f8fafc;">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-            <h6 class="mb-0" style="font-weight:600;">导出详情 #{{ logRecordId }}</h6>
-            <button class="btn btn-outline-secondary btn-sm" @click="logVisible = false" style="font-size:.75rem">关闭</button>
-        </div>
-        <div v-if="logLoading" class="text-muted small">加载中…</div>
-        <div v-else-if="logEntries.length" style="max-height:300px;overflow-y:auto;font-family:monospace;font-size:.8rem;line-height:1.6;background:#1e293b;color:#e2e8f0;padding:10px;border-radius:6px;">
-            <div v-for="(entry, i) in logEntries" :key="i">
-                <span style="color:#94a3b8;">{{ entry.ts }}</span> {{ entry.msg }}
+    <!-- 详情 Drawer（右侧弹出）-->
+    <div v-if="logVisible" class="drawer-overlay" @click.self="closeLogDrawer">
+        <div class="drawer">
+            <div class="drawer-header">
+                <h5 class="mb-0">
+                    详情 #{{ logRecordId }}
+                    <span v-if="logPollTimer" style="font-size:.72rem;color:#d97706;font-weight:400;margin-left:6px;">● 实时</span>
+                </h5>
+                <button class="btn btn-outline-secondary btn-sm" @click="closeLogDrawer">关闭</button>
+            </div>
+            <div class="drawer-body">
+                <div v-if="logLoading" class="text-muted small py-3 text-center">加载中…</div>
+                <div v-else-if="logEntries.length" style="font-family:monospace;font-size:.8rem;line-height:1.6;background:#1e293b;color:#e2e8f0;padding:10px;border-radius:6px;">
+                    <div v-for="(entry, i) in logEntries" :key="i">
+                        <span style="color:#94a3b8;">{{ entry.ts }}</span> {{ entry.msg }}
+                    </div>
+                </div>
+                <div v-else class="text-muted small text-center py-3">暂无日志</div>
             </div>
         </div>
-        <div v-else class="text-muted small">暂无日志</div>
     </div>
 
     <!-- 导出 Modal -->
@@ -236,10 +253,14 @@
                 <input type="text" class="form-control form-control-sm" v-model="obsPrefix" placeholder="obs://bucket/path（可选，留空仅本地复制）">
             </div>
             <div v-if="obsPrefix" class="obs-preview">
-                目标: {{ obsPrefix.replace(/\/+$/, '') }}/session/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
+                目标: {{ obsPrefix.replace(/\/+$/, '') }}/{{ autoEval ? 'session_analysis' : 'session' }}/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
             </div>
             <div class="mb-3 mt-2">
                 <div class="form-check">
+                    <input type="checkbox" class="form-check-input" v-model="autoEval" id="eval-check">
+                    <label class="form-check-label small" for="eval-check">质检模式（reformat+分析，不导出原始文件）</label>
+                </div>
+                <div class="form-check mt-1">
                     <input type="checkbox" class="form-check-input" v-model="forceExport" id="force-check">
                     <label class="form-check-label small" for="force-check">强制重新导出（忽略缓存）</label>
                 </div>
@@ -247,7 +268,7 @@
             <div class="d-flex justify-content-end gap-2">
                 <button class="btn btn-outline-secondary btn-sm" @click="showModal = false">取消</button>
                 <button class="btn btn-success btn-sm" @click="runExport" :disabled="exporting || !selectedMtimes.length">
-                    {{ exporting ? '导出中…' : '开始导出' }}
+                    {{ exporting ? '执行中…' : (autoEval ? '开始质检' : '开始导出') }}
                 </button>
             </div>
         </div>
@@ -256,21 +277,23 @@
     <!-- OBS Drawer -->
     <div v-if="drawerVisible" class="drawer-overlay" @click.self="drawerVisible = false">
         <div class="drawer">
-            <div class="d-flex justify-content-between align-items-center mb-3">
+            <div class="drawer-header">
                 <h5 class="mb-0">OBS 文件浏览</h5>
                 <button class="btn btn-outline-secondary btn-sm" @click="drawerVisible = false">关闭</button>
             </div>
             <div class="mb-2" style="font-size:.82rem;color:#6b7280;word-break:break-all;font-family:monospace;">
                 {{ drawerPath }}
             </div>
-            <div v-if="drawerLoading" class="text-center text-muted py-3">加载中…</div>
-            <div v-else-if="drawerFiles.length">
-                <div v-for="f in drawerFiles" :key="f.name" class="file-item">
-                    <span class="name">{{ f.name }}</span>
-                    <span class="size">{{ f.size || '' }}</span>
+            <div class="drawer-body">
+                <div v-if="drawerLoading" class="text-center text-muted py-3">加载中…</div>
+                <div v-else-if="drawerFiles.length">
+                    <div v-for="f in drawerFiles" :key="f.name" class="file-item">
+                        <span class="name">{{ f.name }}</span>
+                        <span class="size">{{ f.size || '' }}</span>
+                    </div>
                 </div>
+                <div v-else class="text-muted text-center py-3">无文件</div>
             </div>
-            <div v-else class="text-muted text-center py-3">无文件</div>
         </div>
     </div>
 </div>
@@ -291,6 +314,7 @@ new Vue({
         modalMtimes: [],
         selectedMtimes: [],
         forceExport: false,
+        autoEval: false,
         exporting: false,
         nowTag: '',
 
@@ -306,6 +330,7 @@ new Vue({
         logRecordId: null,
         logEntries: [],
         logLoading: false,
+        logPollTimer: null,
     },
     computed: {
         totalSessions: function() {
@@ -330,6 +355,7 @@ new Vue({
     },
     beforeDestroy: function() {
         if (this.pollTimer) clearInterval(this.pollTimer);
+        if (this.logPollTimer) clearInterval(this.logPollTimer);
     },
     methods: {
         _h: function(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
@@ -360,7 +386,10 @@ new Vue({
             }.bind(this));
         },
 
-        statusText: function(s) {
+        statusText: function(s, mode) {
+            if (mode === 'eval') {
+                return { pending: '等待中', running: '质检中', success: '成功', failed: '失败' }[s] || s;
+            }
             return { pending: '等待中', running: '导出中', success: '成功', failed: '失败' }[s] || s;
         },
 
@@ -387,6 +416,7 @@ new Vue({
                 mtime_dirs: this.selectedMtimes,
                 obs_prefix: this.obsPrefix,
                 force: this.forceExport,
+                auto_eval: this.autoEval,
             };
             fetch('/api/export/run', {
                 method: 'POST',
@@ -413,6 +443,7 @@ new Vue({
             this.logEntries = [];
             this.logVisible = true;
             this.logLoading = false;
+            this.drawerVisible = false;
             var self = this;
             this.pollTimer = setInterval(function() {
                 fetch('/api/export/status/' + self.pollRecordId, {headers: self._h()})
@@ -421,7 +452,8 @@ new Vue({
                         try {
                             self.logEntries = JSON.parse(d.progress_log || '[]');
                         } catch(e) {}
-                        if (d.status === 'success' || d.status === 'failed') {
+                        var done = (d.status === 'success' || d.status === 'failed');
+                        if (done) {
                             clearInterval(self.pollTimer);
                             self.pollTimer = null;
                             self.fetchKeys();
@@ -438,6 +470,7 @@ new Vue({
             this.drawerFiles = [];
             this.drawerVisible = true;
             this.drawerLoading = true;
+            this.logVisible = false;
             fetch('/api/export/obs/ls?path=' + encodeURIComponent(obsPath), {headers: this._h()})
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
@@ -451,11 +484,13 @@ new Vue({
                 }.bind(this));
         },
 
-        showLog: function(recordId) {
+        openLogDrawer: function(recordId) {
+            if (this.logPollTimer) { clearInterval(this.logPollTimer); this.logPollTimer = null; }
             this.logRecordId = recordId;
             this.logEntries = [];
             this.logVisible = true;
             this.logLoading = true;
+            this.drawerVisible = false;
             var self = this;
             fetch('/api/export/status/' + recordId, {headers: this._h()})
                 .then(function(r) { return r.json(); })
@@ -465,9 +500,48 @@ new Vue({
                     } catch(e) {
                         self.logEntries = [];
                     }
+                    if (d.status === 'running') {
+                        self._startLogPoll(recordId);
+                    }
                 })
                 .catch(function() { self.logEntries = []; })
                 .finally(function() { self.logLoading = false; });
+        },
+
+        _startLogPoll: function(recordId) {
+            if (this.logPollTimer) clearInterval(this.logPollTimer);
+            var self = this;
+            this.logPollTimer = setInterval(function() {
+                if (!self.logVisible || self.logRecordId !== recordId) {
+                    clearInterval(self.logPollTimer);
+                    self.logPollTimer = null;
+                    return;
+                }
+                fetch('/api/export/status/' + recordId, {headers: self._h()})
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        try {
+                            self.logEntries = JSON.parse(d.progress_log || '[]');
+                        } catch(e) {}
+                        self.$nextTick(function() {
+                            var body = self.$el.querySelector('.drawer-body');
+                            if (body) body.scrollTop = body.scrollHeight;
+                        });
+                        if (d.status === 'success' || d.status === 'failed') {
+                            clearInterval(self.logPollTimer);
+                            self.logPollTimer = null;
+                        }
+                    });
+            }, 2000);
+        },
+
+        closeLogDrawer: function() {
+            this.logVisible = false;
+            if (this.logPollTimer) { clearInterval(this.logPollTimer); this.logPollTimer = null; }
+        },
+
+        openReport: function(recordId) {
+            window.open('/keys/export/report/' + recordId, '_blank');
         },
     }
 });

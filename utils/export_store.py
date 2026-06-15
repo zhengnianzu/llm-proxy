@@ -45,10 +45,16 @@ def init_db(db_dir: str):
         """)
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_export_key_slot ON export_records(key_slot)")
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_export_status ON export_records(status)")
-        try:
-            _conn.execute("ALTER TABLE export_records ADD COLUMN progress_log TEXT NOT NULL DEFAULT '[]'")
-        except sqlite3.OperationalError:
-            pass
+        for col_def in [
+            "progress_log TEXT NOT NULL DEFAULT '[]'",
+            "eval_status TEXT NOT NULL DEFAULT ''",
+            "eval_report_path TEXT NOT NULL DEFAULT ''",
+            "mode TEXT NOT NULL DEFAULT 'export'",
+        ]:
+            try:
+                _conn.execute(f"ALTER TABLE export_records ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass
         _conn.commit()
 
 
@@ -64,13 +70,14 @@ def create_record(
     mtime_dirs: str,
     obs_dst: str = "",
     local_copy_dir: str = "",
+    mode: str = "export",
 ) -> int:
     conn = _get_conn()
     with _lock:
         cur = conn.execute(
-            """INSERT INTO export_records (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir)
-               VALUES (?, ?, ?, ?, ?)""",
-            (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir),
+            """INSERT INTO export_records (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode),
         )
         conn.commit()
     return cur.lastrowid
@@ -85,7 +92,8 @@ def update_status(record_id: int, status: str, **kwargs):
     elif status in ("success", "failed"):
         fields.append("finished_at = datetime('now','localtime')")
     for k, v in kwargs.items():
-        if k in ("error_message", "total_sessions", "files_uploaded", "files_skipped", "obs_dst", "local_copy_dir"):
+        if k in ("error_message", "total_sessions", "files_uploaded", "files_skipped",
+                 "obs_dst", "local_copy_dir", "eval_status", "eval_report_path"):
             fields.append(f"{k} = ?")
             values.append(v)
     values.append(record_id)

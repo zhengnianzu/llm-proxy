@@ -295,7 +295,8 @@ def sync_session_index(
 
     logger.info("已复制 %d 个文件到 %s", copied, copy_dir)
 
-    ok, msg = _run_upload_cmd(str(copy_dir) + "/", obs_dst, upload_script)
+    obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
+    ok, msg = _run_upload_cmd(str(copy_dir), obs_parent, upload_script)
     if ok:
         logger.info("文件夹上传成功: %s -> %s", copy_dir, obs_dst)
     else:

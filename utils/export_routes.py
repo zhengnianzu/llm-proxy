@@ -25,7 +25,7 @@ from utils.export_store import (
     list_records_by_key,
     update_status,
 )
-from utils.export_sync import export_session_index, sync_session_index
+from utils.export_sync import export_session_index, sync_session_index, _load_session_index
 from utils.key_config import load_key_state
 from utils.key_store import list_keys, mask_key
 from utils.log_paths import get_service_log_dir
@@ -132,6 +132,13 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             return templates.TemplateResponse("keys_login.html", {"request": request})
         return FileResponse(path="templates/export.html")
 
+    @app.get("/keys/export/report/{record_id}")
+    def export_report_page(request: Request, record_id: int):
+        state = load_key_state()
+        if state.get("password") and not _is_key_authenticated(request):
+            return templates.TemplateResponse("keys_login.html", {"request": request})
+        return FileResponse(path="templates/export_report.html")
+
     @app.get("/api/export/config")
     def export_config(request: Request):
         denied = _require_key_api(request)
@@ -216,6 +223,141 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         return JSONResponse({"keys": keys_result, "mtimes": mtimes})
 
+    # -----------------------------------------------------------------
+    # 统一任务执行（导出 / 质检）
+    # -----------------------------------------------------------------
+
+    def _run_task(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force=False):
+        from utils.eval.reformat import reformat_and_analyze
+        from utils.eval.eval import evaluate_sessions
+        from utils.obs_sync import _run_upload_cmd
+
+        rec = get_record(record_id)
+        _log = lambda msg: append_log(record_id, msg)
+        update_status(record_id, "running")
+
+        sync_cfg = _load_sync_config()
+        workers = sync_cfg.get("workers", 4)
+        upload_script = sync_cfg.get("upload_script") or None
+
+        mtime_dirs = json.loads(rec.get("mtime_dirs", "[]"))
+        api_key = rec.get("api_key", "")
+        slot = rec.get("key_slot", "all")
+
+        if mode == "export":
+            local_base = _env_dir.parent / "logs_session" / _env_key_name / slot / f"ex-{now_tag}"
+            obs_sub = "session"
+        else:
+            local_base = (_env_dir.parent / "logs_session_analysis" / _env_key_name / slot / f"ex-{now_tag}").resolve()
+            obs_sub = "session_analysis"
+
+        obs_dst = f"{obs_prefix}/{obs_sub}/{_env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
+        local_base.mkdir(parents=True, exist_ok=True)
+
+        update_status(record_id, "running", obs_dst=obs_dst, local_copy_dir=str(local_base))
+
+        _log(f"开始{'质检' if mode == 'eval' else '导出'}: key_slot={slot}, mtime_dirs={mtime_dirs}")
+        _log(f"本地目录: {local_base}")
+        if obs_dst:
+            _log(f"OBS 目标: {obs_dst}")
+
+        errors = []
+        total_sessions = 0
+        total_uploaded = 0
+        total_skipped = 0
+        all_results = []
+        all_entries = []
+
+        for mt in mtime_dirs:
+            mt_src = str(_env_dir / mt)
+            try:
+                if mode == "export":
+                    _log(f"[{mt}] 生成 session_index...")
+                    exp_result = export_session_index(mt_src, force=force)
+                    _log(f"[{mt}] session_index: {exp_result.get('total_sessions', 0)} sessions"
+                         + (" (已是最新，跳过)" if exp_result.get("skipped") else ""))
+
+                    _log(f"[{mt}] 开始同步文件" + (f" (按 key 过滤: ...{api_key[-8:]})" if api_key else " (全量)"))
+                    sync_result = sync_session_index(
+                        mt_src, obs_dst=obs_dst, key=api_key or None,
+                        local_copy_dir=str(local_base), force=force,
+                    )
+                    matched = sync_result.get("matched_sessions", 0)
+                    uploaded = sync_result.get("uploaded", 0)
+                    skipped = sync_result.get("skipped", 0)
+                    total_sessions += matched
+                    total_uploaded += uploaded
+                    total_skipped += skipped
+                    _log(f"[{mt}] 匹配 {matched} sessions, 上传 {uploaded} files, 跳过 {skipped}")
+                    if sync_result.get("failed", 0) > 0:
+                        _log(f"[{mt}] 上传失败!")
+                        errors.append(f"{mt}: upload failed")
+                else:
+                    session_entries = _load_session_index(mt_src)
+                    if api_key:
+                        session_entries = [s for s in session_entries if s.get("api_key") == api_key]
+                    if not session_entries:
+                        _log(f"[{mt}] 无匹配 session，跳过")
+                        continue
+                    _log(f"[{mt}] reformat+analyze: {len(session_entries)} sessions...")
+                    ra_result = reformat_and_analyze(
+                        src_dir=mt_src, out_dir=str(local_base),
+                        session_entries=session_entries, api_key=api_key, workers=workers,
+                        progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
+                    )
+                    all_results.extend(ra_result["results"])
+                    all_entries.extend(session_entries)
+                    total_sessions += len(ra_result["results"])
+                    _log(f"[{mt}] 完成: {ra_result['total_files']} sessions")
+            except Exception as e:
+                _log(f"[{mt}] 错误: {e}")
+                errors.append(f"{mt}: {e}")
+                logger.exception("task failed for %s (mode=%s)", mt, mode)
+
+        eval_report_path = ""
+        if mode == "eval":
+            if all_results:
+                idx_path = local_base / "session_index.jsonl"
+                with open(idx_path, "w", encoding="utf-8") as f:
+                    for entry in all_entries:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                eval_result = evaluate_sessions(
+                    sessions=all_results, report_dir=str(local_base), progress_cb=_log,
+                )
+                eval_report_path = eval_result.get("report_path", "")
+            else:
+                _log("无 session 数据")
+
+            if obs_dst:
+                _log(f"同步到 OBS: {obs_dst}")
+                obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
+                ok, msg = _run_upload_cmd(str(local_base), obs_parent, upload_script)
+                if ok:
+                    _log("上传成功")
+                else:
+                    _log(f"上传失败: {msg}")
+                    errors.append(f"OBS upload: {msg}")
+
+        if errors or (mode == "eval" and not all_results):
+            _log(f"{'质检' if mode == 'eval' else '导出'}失败: {'; '.join(errors) if errors else '无数据'}")
+            update_status(record_id, "failed",
+                          error_message="; ".join(errors) if errors else "无 session 数据",
+                          total_sessions=total_sessions,
+                          files_uploaded=total_uploaded,
+                          files_skipped=total_skipped,
+                          eval_report_path=eval_report_path)
+        else:
+            _log(f"{'质检' if mode == 'eval' else '导出'}完成: {total_sessions} sessions")
+            update_status(record_id, "success",
+                          total_sessions=total_sessions,
+                          files_uploaded=total_uploaded,
+                          files_skipped=total_skipped,
+                          eval_report_path=eval_report_path)
+
+    # -----------------------------------------------------------------
+    # API 端点
+    # -----------------------------------------------------------------
+
     @app.post("/api/export/run")
     async def export_run(request: Request):
         denied = _require_key_api(request)
@@ -228,93 +370,67 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         mtime_dirs = body.get("mtime_dirs", [])
         obs_prefix = body.get("obs_prefix", "").strip().rstrip("/")
         force = body.get("force", False)
+        mode = "eval" if body.get("auto_eval", False) else "export"
 
         if not mtime_dirs:
             return JSONResponse({"detail": "mtime_dirs is required"}, status_code=400)
-
         for mt in mtime_dirs:
             if not (env_dir / mt).is_dir():
                 return JSONResponse({"detail": f"目录不存在: {mt}"}, status_code=400)
 
         slot = _key_slot(api_key)
         now_tag = datetime.now().strftime("%y%m%d%H%M%S")
-        local_base = env_dir.parent / "logs_session" / env_key_name / slot / f"ex-{now_tag}"
-        obs_dst = f"{obs_prefix}/session/{env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
 
         record_id = create_record(
-            api_key=api_key,
-            key_slot=slot,
+            api_key=api_key, key_slot=slot,
             mtime_dirs=json.dumps(mtime_dirs),
-            obs_dst=obs_dst,
-            local_copy_dir=str(local_base),
+            obs_dst="", local_copy_dir="",
+            mode=mode,
         )
 
-        def _do_export():
-            _log = lambda msg: append_log(record_id, msg)
-            update_status(record_id, "running")
-            _log(f"开始导出: key_slot={slot}, mtime_dirs={mtime_dirs}")
-            if obs_dst:
-                _log(f"OBS 目标: {obs_dst}")
-            _log(f"本地目录: {local_base}")
-            total_sessions = 0
-            total_uploaded = 0
-            total_skipped = 0
-            errors = []
-
-            for mt in mtime_dirs:
-                mt_logs_dir = str(env_dir / mt)
-                _log(f"[{mt}] 生成 session_index...")
-                try:
-                    exp_result = export_session_index(mt_logs_dir, force=force)
-                    _log(f"[{mt}] session_index: {exp_result.get('total_sessions', 0)} sessions" +
-                         (" (已是最新，跳过)" if exp_result.get("skipped") else ""))
-
-                    _log(f"[{mt}] 开始同步文件" + (f" (按 key 过滤: ...{api_key[-8:]})" if api_key else " (全量)"))
-                    sync_result = sync_session_index(
-                        mt_logs_dir,
-                        obs_dst=obs_dst,
-                        key=api_key or None,
-                        local_copy_dir=str(local_base),
-                        force=force,
-                    )
-                    matched = sync_result.get("matched_sessions", 0)
-                    uploaded = sync_result.get("uploaded", 0)
-                    skipped = sync_result.get("skipped", 0)
-                    total_sessions += matched
-                    total_uploaded += uploaded
-                    total_skipped += skipped
-                    _log(f"[{mt}] 匹配 {matched} sessions, 上传 {uploaded} files, 跳过 {skipped}")
-                    if sync_result.get("failed", 0) > 0:
-                        _log(f"[{mt}] 上传失败!")
-                        errors.append(f"{mt}: upload failed")
-                except Exception as e:
-                    _log(f"[{mt}] 错误: {e}")
-                    errors.append(f"{mt}: {e}")
-                    logger.exception("export failed for %s", mt)
-
-            _log(f"汇总: {total_sessions} sessions, {total_uploaded} files uploaded, {total_skipped} skipped")
-            if errors:
-                _log(f"导出失败: {'; '.join(errors)}")
-                update_status(
-                    record_id, "failed",
-                    error_message="; ".join(errors),
-                    total_sessions=total_sessions,
-                    files_uploaded=total_uploaded,
-                    files_skipped=total_skipped,
-                )
-            else:
-                _log("导出完成!")
-                update_status(
-                    record_id, "success",
-                    total_sessions=total_sessions,
-                    files_uploaded=total_uploaded,
-                    files_skipped=total_skipped,
-                )
-
-        t = threading.Thread(target=_do_export, daemon=True)
+        t = threading.Thread(
+            target=_run_task,
+            args=(record_id, env_dir, env_key_name, obs_prefix, now_tag, mode),
+            kwargs={"force": force},
+            daemon=True,
+        )
         t.start()
 
-        return JSONResponse({"record_id": record_id, "status": "running"})
+        return JSONResponse({"record_id": record_id, "status": "running", "mode": mode})
+
+    @app.post("/api/export/eval")
+    async def export_eval(request: Request):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        src_record_id = body.get("record_id")
+        if not src_record_id:
+            return JSONResponse({"detail": "record_id is required"}, status_code=400)
+
+        rec = get_record(src_record_id)
+        if not rec:
+            return JSONResponse({"detail": "Record not found"}, status_code=404)
+        if rec["status"] != "success":
+            return JSONResponse({"detail": "导出未完成，无法质检"}, status_code=400)
+
+        obs_prefix = rec.get("obs_dst", "").split("/session/")[0] if rec.get("obs_dst") else ""
+        now_tag = datetime.now().strftime("%y%m%d%H%M%S")
+
+        new_record_id = create_record(
+            api_key=rec["api_key"], key_slot=rec["key_slot"],
+            mtime_dirs=rec["mtime_dirs"],
+            mode="eval",
+        )
+
+        t = threading.Thread(
+            target=_run_task,
+            args=(new_record_id, env_dir, env_key_name, obs_prefix, now_tag, "eval"),
+            daemon=True,
+        )
+        t.start()
+
+        return JSONResponse({"record_id": new_record_id, "status": "running", "mode": "eval"})
 
     @app.get("/api/export/status/{record_id}")
     def export_status(request: Request, record_id: int):
@@ -348,3 +464,17 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             path += "/"
         items = obsutil_ls(path)
         return JSONResponse({"path": path, "items": items})
+
+    @app.get("/api/export/eval/report/{record_id}")
+    def export_eval_report(request: Request, record_id: int):
+        state = load_key_state()
+        if state.get("password") and not _is_key_authenticated(request):
+            return JSONResponse({"detail": "Key management login required"}, status_code=401)
+        rec = get_record(record_id)
+        if not rec:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        report_path = rec.get("eval_report_path", "")
+        if not report_path or not Path(report_path).is_file():
+            return JSONResponse({"detail": "报告未生成"}, status_code=404)
+        content = Path(report_path).read_text(encoding="utf-8")
+        return JSONResponse({"report_md": content, "record_id": record_id})
