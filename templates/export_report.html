@@ -29,7 +29,7 @@
         }
         @media (max-width: 768px) { .report-card { padding: 16px; } }
 
-        /* Markdown 渲染 */
+        /* Markdown 渲染 (legacy fallback) */
         .md-rendered { font-size: .92rem; line-height: 1.7; color: #1f2937; }
         .md-rendered h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 12px; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }
         .md-rendered h2 { font-size: 1.15rem; font-weight: 700; margin: 24px 0 8px; color: #1e40af; }
@@ -88,11 +88,17 @@ new Vue({
             .then(function(d) {
                 if (d.detail) {
                     self.error = d.detail;
-                } else {
-                    var md = d.report_md || '';
-                    self.html = md ? self.renderMarkdown(md) : '<p class="text-muted">报告为空</p>';
-                    document.title = '质检报告 #' + recordId;
+                    return;
                 }
+                if (d.report_html) {
+                    document.open();
+                    document.write(d.report_html);
+                    document.close();
+                    return;
+                }
+                var md = d.report_md || '';
+                self.html = md ? self.renderMarkdown(md) : '<p class="text-muted">报告为空</p>';
+                document.title = '质检报告 #' + recordId;
             })
             .catch(function(e) {
                 if (e !== 'auth') self.error = '加载失败: ' + e;

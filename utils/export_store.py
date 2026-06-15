@@ -50,6 +50,7 @@ def init_db(db_dir: str):
             "eval_status TEXT NOT NULL DEFAULT ''",
             "eval_report_path TEXT NOT NULL DEFAULT ''",
             "mode TEXT NOT NULL DEFAULT 'export'",
+            "analysis_json TEXT NOT NULL DEFAULT ''",
         ]:
             try:
                 _conn.execute(f"ALTER TABLE export_records ADD COLUMN {col_def}")
@@ -93,7 +94,7 @@ def update_status(record_id: int, status: str, **kwargs):
         fields.append("finished_at = datetime('now','localtime')")
     for k, v in kwargs.items():
         if k in ("error_message", "total_sessions", "files_uploaded", "files_skipped",
-                 "obs_dst", "local_copy_dir", "eval_status", "eval_report_path"):
+                 "obs_dst", "local_copy_dir", "eval_status", "eval_report_path", "analysis_json"):
             fields.append(f"{k} = ?")
             values.append(v)
     values.append(record_id)

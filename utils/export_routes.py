@@ -315,6 +315,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 logger.exception("task failed for %s (mode=%s)", mt, mode)
 
         eval_report_path = ""
+        analysis_json_content = ""
         if mode == "eval":
             if all_results:
                 idx_path = local_base / "session_index.jsonl"
@@ -325,6 +326,9 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                     sessions=all_results, report_dir=str(local_base), progress_cb=_log,
                 )
                 eval_report_path = eval_result.get("report_path", "")
+                analysis_json_path = eval_result.get("analysis_json_path", "")
+                if analysis_json_path and Path(analysis_json_path).is_file():
+                    analysis_json_content = Path(analysis_json_path).read_text(encoding="utf-8")
             else:
                 _log("无 session 数据")
 
@@ -345,14 +349,16 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                           total_sessions=total_sessions,
                           files_uploaded=total_uploaded,
                           files_skipped=total_skipped,
-                          eval_report_path=eval_report_path)
+                          eval_report_path=eval_report_path,
+                          analysis_json=analysis_json_content)
         else:
             _log(f"{'质检' if mode == 'eval' else '导出'}完成: {total_sessions} sessions")
             update_status(record_id, "success",
                           total_sessions=total_sessions,
                           files_uploaded=total_uploaded,
                           files_skipped=total_skipped,
-                          eval_report_path=eval_report_path)
+                          eval_report_path=eval_report_path,
+                          analysis_json=analysis_json_content)
 
     # -----------------------------------------------------------------
     # API 端点
@@ -473,8 +479,30 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         rec = get_record(record_id)
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)
+
         report_path = rec.get("eval_report_path", "")
-        if not report_path or not Path(report_path).is_file():
-            return JSONResponse({"detail": "报告未生成"}, status_code=404)
-        content = Path(report_path).read_text(encoding="utf-8")
-        return JSONResponse({"report_md": content, "record_id": record_id})
+        html_path = ""
+        if report_path:
+            html_path = str(Path(report_path).parent / "session_report.html")
+
+        if html_path and Path(html_path).is_file():
+            content = Path(html_path).read_text(encoding="utf-8")
+            return JSONResponse({"report_html": content, "record_id": record_id})
+
+        analysis_json = rec.get("analysis_json", "")
+        if analysis_json:
+            try:
+                from utils.eval.eval import load_analysis_json, compute_stats, render_html_report_string
+                sessions = load_analysis_json(analysis_json)
+                stats = compute_stats(sessions)
+                content = render_html_report_string(sessions, stats)
+                return JSONResponse({"report_html": content, "record_id": record_id})
+            except Exception as e:
+                logger.exception("Failed to rebuild report from analysis JSON")
+                return JSONResponse({"detail": f"报告重建失败: {e}"}, status_code=500)
+
+        if report_path and Path(report_path).is_file():
+            content = Path(report_path).read_text(encoding="utf-8")
+            return JSONResponse({"report_md": content, "record_id": record_id})
+
+        return JSONResponse({"detail": "报告未生成"}, status_code=404)

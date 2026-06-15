@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from jinja2 import Environment, FileSystemLoader
+
 from utils.eval.quality_rules import QualityContext, evaluate_quality, fmt_quality, QUALITY_ERRORS
 
 logger = logging.getLogger(__name__)
@@ -542,6 +544,19 @@ def _bucket_rows(vals: List[float], buckets: List[Tuple], unit: str = "") -> Lis
     return rows
 
 
+def _bucket_df(pd, vals: List[float], buckets: List[Tuple], unit: str = ""):
+    total = len(vals)
+    rows = []
+    for label, lo, hi in buckets:
+        cnt = sum(1 for v in vals if v is not None and lo <= v < hi)
+        rows.append({
+            "区间": f"{label}{unit}",
+            "数量": cnt,
+            "占比(%)": round(cnt / total * 100, 1) if total else 0,
+        })
+    return pd.DataFrame(rows)
+
+
 def _md_table(headers: List[str], rows: List[List[str]]) -> str:
     lines = ["| " + " | ".join(headers) + " |"]
     lines.append("|" + "|".join("---" for _ in headers) + "|")
@@ -791,6 +806,274 @@ def write_excel(sessions: List[Dict], stats: Dict, path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# HTML 报告 — build_context + render (移植自 analyze_sessions.py)
+# ---------------------------------------------------------------------------
+
+def _fmt_duration(s: Optional[float]) -> str:
+    if s is None:
+        return "N/A"
+    if s < 60:
+        return f"{s:.0f}s"
+    if s < 3600:
+        return f"{s / 60:.1f}min"
+    return f"{s / 3600:.1f}h"
+
+
+def _fmt_rate(r: Optional[float]) -> str:
+    return f"{r:.1f}%" if r is not None else "-"
+
+
+def _pct(values: List[float], p: int) -> float:
+    if not values:
+        return 0.0
+    sv = sorted(values)
+    return sv[min(int(len(sv) * p / 100), len(sv) - 1)]
+
+
+def _dist_rows(vals: List, buckets: List[Tuple], unit: str = "") -> List[Dict]:
+    total = len(vals)
+    counts = [sum(1 for v in vals if v is not None and lo <= v < hi) for _, lo, hi in buckets]
+    max_c = max(counts, default=1)
+    return [
+        {
+            "label": f"{label}{unit}",
+            "count": cnt,
+            "pct": round(cnt / total * 100, 1) if total else 0.0,
+            "bar": "█" * (max(1, round(cnt / max(max_c, 1) * 15)) if cnt else 0),
+        }
+        for (label, lo, hi), cnt in zip(buckets, counts)
+    ]
+
+
+def _extract_error_codes(completed) -> List[str]:
+    if completed == 0:
+        return []
+    codes_part = str(completed).split(" ")[0]
+    return [c.strip() for c in codes_part.split(",") if c.strip()]
+
+
+def build_context(sessions: List[Dict], stats: Dict, top_n: int = 10) -> Dict:
+    total = stats["total"]
+    turns_vals = stats["turns_vals"]
+    msg_vals = stats["msg_vals"]
+    api_vals = stats["api_vals"]
+    with_tools = stats["with_tools"]
+    tu_vals = stats["tu_vals"]
+    rate_sessions = stats["rate_sessions"]
+    multi_timed = stats["multi_timed"]
+    dur_vals = stats["dur_vals"]
+    total_tr = stats["total_tr"]
+    single_count = sum(1 for v in api_vals if v == 1)
+
+    ok_count = sum(1 for s in sessions if s["completed"] == 0)
+    fail_count = total - ok_count
+    err_counter: Counter = Counter()
+    for s in sessions:
+        for code in _extract_error_codes(s["completed"]):
+            err_counter[code] += 1
+
+    top_raw = sorted(
+        [s for s in sessions if s.get("duration_s")],
+        key=lambda x: -x["duration_s"],
+    )[:top_n]
+
+    def p(vals, q):
+        return int(_pct(vals, q))
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total": total,
+        "top_n": top_n,
+        "turns": {
+            "avg": f"{sum(turns_vals)/total:.2f}",
+            "max": max(turns_vals),
+            "p50": p(turns_vals, 50),
+            "p90": p(turns_vals, 90),
+            "dist": _dist_rows(turns_vals, [
+                ("1", 1, 2), ("2-3", 2, 4), ("4-7", 4, 8), ("8-15", 8, 16), (">15", 16, 10**9)
+            ], "轮"),
+        },
+        "messages": {
+            "avg": f"{sum(msg_vals)/total:.2f}",
+            "max": max(msg_vals),
+            "min": min(msg_vals),
+            "p50": p(msg_vals, 50),
+            "p90": p(msg_vals, 90),
+            "dist": _dist_rows(msg_vals, [
+                ("1-2", 0, 3), ("3-5", 3, 6), ("6-10", 6, 11),
+                ("11-20", 11, 21), ("21-50", 21, 51), (">50", 51, 10**9)
+            ], "条"),
+        },
+        "api": {
+            "avg": f"{sum(api_vals)/total:.2f}",
+            "max": max(api_vals),
+            "single_count": single_count,
+            "single_pct": f"{single_count/total*100:.1f}",
+            "multi_count": stats["multi_api"],
+            "multi_pct": f"{stats['multi_api']/total*100:.1f}",
+            "err_count": stats["api_err"],
+            "err_pct": f"{stats['api_err']/total*100:.1f}",
+            "dist": _dist_rows(api_vals, [
+                ("1次", 1, 2), ("2-3次", 2, 4), ("4-10次", 4, 11), ("11-30次", 11, 31), (">30次", 31, 10**9)
+            ]),
+        },
+        "tools": {
+            "with_count": len(with_tools),
+            "with_pct": f"{len(with_tools)/total*100:.1f}",
+            "without_count": total - len(with_tools),
+            "without_pct": f"{(total-len(with_tools))/total*100:.1f}",
+            "total_use": stats["total_tu"],
+            "total_result": total_tr,
+            "has_sessions": bool(with_tools),
+            "avg_use": f"{sum(tu_vals)/len(tu_vals):.1f}" if tu_vals else "0",
+            "max_use": max(tu_vals) if tu_vals else 0,
+            "p50_use": p(tu_vals, 50) if tu_vals else 0,
+            "p90_use": p(tu_vals, 90) if tu_vals else 0,
+            "has_results": total_tr > 0,
+            "total_succ": stats["total_succ"],
+            "total_ff": stats["total_ff"],
+            "total_fk": stats["total_fk"],
+            "total_ft": stats["total_ft"],
+            "succ_pct": f"{stats['total_succ']/total_tr*100:.1f}" if total_tr else "0",
+            "ff_pct": f"{stats['total_ff']/total_tr*100:.1f}" if total_tr else "0",
+            "fk_pct": f"{stats['total_fk']/total_tr*100:.1f}" if total_tr else "0",
+            "ft_pct": f"{stats['total_ft']/total_tr*100:.1f}" if total_tr else "0",
+            "overall_rate": f"{stats['total_succ']/total_tr*100:.1f}" if total_tr else "0",
+            "use_dist": _dist_rows(tu_vals, [
+                ("1-5次", 1, 6), ("6-15次", 6, 16), ("16-30次", 16, 31),
+                ("31-50次", 31, 51), (">50次", 51, 10**9)
+            ]) if tu_vals else [],
+            "rate_sessions_count": len(rate_sessions),
+            "rate_dist": _dist_rows(
+                [s["tool_success_rate"] for s in rate_sessions],
+                [("0-50%", 0, 50), ("50-80%", 50, 80), ("80-95%", 80, 95),
+                 ("95-99%", 95, 99), ("100%", 100, 101)]
+            ) if rate_sessions else [],
+        },
+        "duration": {
+            "single_api_count": sum(1 for s in sessions if s["api_call_count"] == 1),
+            "multi_count": len(multi_timed),
+            "has_multi": bool(multi_timed),
+            "avg": _fmt_duration(sum(dur_vals)/len(dur_vals)) if dur_vals else "N/A",
+            "max": _fmt_duration(max(dur_vals)) if dur_vals else "N/A",
+            "min": _fmt_duration(min(dur_vals)) if dur_vals else "N/A",
+            "p50": _fmt_duration(_pct(dur_vals, 50)) if dur_vals else "N/A",
+            "p90": _fmt_duration(_pct(dur_vals, 90)) if dur_vals else "N/A",
+            "dist": _dist_rows(dur_vals, [
+                ("<1min", 0, 60), ("1-5min", 60, 300), ("5-15min", 300, 900),
+                ("15-30min", 900, 1800), (">30min", 1800, 10**9)
+            ]) if dur_vals else [],
+        },
+        "models": [
+            {"name": mdl or "(未知)", "count": cnt, "pct": f"{cnt/total*100:.1f}"}
+            for mdl, cnt in sorted(stats["model_dist"].items(), key=lambda x: -x[1])
+        ],
+        "skills": {
+            "total_use": sum(stats["global_skills"].values()),
+            "distinct_count": len(stats["global_skills"]),
+            "top10": [
+                {
+                    "name": name,
+                    "count": count,
+                    "pct": f"{count / sum(stats['global_skills'].values()) * 100:.1f}" if sum(stats["global_skills"].values()) else "0",
+                }
+                for name, count in stats["global_skills"].most_common(10)
+            ],
+            "has_skills": bool(stats["global_skills"]),
+        },
+        "quality": {
+            "ok_count": ok_count,
+            "ok_pct": f"{ok_count/total*100:.1f}",
+            "fail_count": fail_count,
+            "fail_pct": f"{fail_count/total*100:.1f}",
+            "has_fails": fail_count > 0,
+            "error_dist": [
+                {
+                    "code": code,
+                    "desc": QUALITY_ERRORS.get(code, code),
+                    "count": cnt,
+                    "pct": f"{cnt/total*100:.1f}",
+                }
+                for code, cnt in sorted(err_counter.items(), key=lambda x: -x[1])
+            ],
+        },
+        "top_sessions": [
+            {
+                "session": s["session"],
+                "duration": _fmt_duration(s["duration_s"]),
+                "user_turns": s["user_turns"],
+                "tool_use": s["tool_use_count"],
+                "tool_result": s["tool_result_count"],
+                "rate": _fmt_rate(s["tool_success_rate"]),
+                "api_count": s["api_call_count"],
+                "completed": s["completed"],
+                "completed_note": s.get("completed_note", ""),
+            }
+            for s in top_raw
+        ],
+        "tools_top10": [
+            {
+                "name": name,
+                "calls": calls,
+                "success": stats["global_success"].get(name, 0),
+                "fail": stats["global_fail"].get(name, 0),
+                "rate": f"{stats['global_success'].get(name, 0) / calls * 100:.1f}" if calls else "0",
+            }
+            for name, calls in stats["global_use"].most_common(10)
+        ],
+    }
+
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+
+def render_html_report(sessions: List[Dict], stats: Dict, output_path: Path) -> None:
+    ctx = build_context(sessions, stats)
+    env = Environment(
+        loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+        autoescape=False,
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    output_path.write_text(env.get_template("report.html.j2").render(**ctx), encoding="utf-8")
+
+
+def render_html_report_string(sessions: List[Dict], stats: Dict) -> str:
+    ctx = build_context(sessions, stats)
+    env = Environment(
+        loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+        autoescape=False,
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    return env.get_template("report.html.j2").render(**ctx)
+
+
+def save_analysis_json(sessions: List[Dict], path: Path) -> None:
+    payload = {
+        "version": 1,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "session_count": len(sessions),
+        "sessions": sessions,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_analysis_json(path_or_content) -> List[Dict]:
+    if isinstance(path_or_content, Path):
+        payload = json.loads(path_or_content.read_text(encoding="utf-8"))
+    else:
+        payload = json.loads(path_or_content)
+    if isinstance(payload, dict) and isinstance(payload.get("sessions"), list):
+        return payload["sessions"]
+    if isinstance(payload, list):
+        return payload
+    raise ValueError("Invalid analysis JSON format")
+
+
+# ---------------------------------------------------------------------------
 # 主入口 — evaluate_sessions
 # ---------------------------------------------------------------------------
 
@@ -800,15 +1083,9 @@ def evaluate_sessions(
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
-    接收已分析好的 session 结果列表，聚合统计并生成 Excel 报告。
+    接收已分析好的 session 结果列表，聚合统计并生成报告。
 
-    Args:
-        sessions: reformat_and_analyze 返回的 results 列表
-        report_dir: 报告输出目录
-        progress_cb: 进度回调 fn(msg: str)
-
-    Returns:
-        {"total_sessions": N, "report_path": "...", "stats_summary": {...}}
+    输出: session_report.md + session_report.html + session_analysis.json
     """
     _log = progress_cb or (lambda msg: None)
     out = Path(report_dir)
@@ -816,17 +1093,33 @@ def evaluate_sessions(
 
     if not sessions:
         _log("无 session 数据")
-        return {"total_sessions": 0, "report_path": "", "stats_summary": {}}
+        return {"total_sessions": 0, "report_path": "", "html_report_path": "",
+                "analysis_json_path": "", "stats_summary": {}}
 
     _log(f"生成报告: {len(sessions)} sessions...")
     stats = compute_stats(sessions)
+
+    xlsx_path = out / "session_report.xlsx"
+    write_excel(sessions, stats, xlsx_path)
+    _log("session_report.xlsx 已生成")
+
     report_path = out / "session_report.md"
     write_markdown(sessions, stats, report_path)
-    _log(f"session_report.md 已生成")
+    _log("session_report.md 已生成")
+
+    html_path = out / "session_report.html"
+    render_html_report(sessions, stats, html_path)
+    _log("session_report.html 已生成")
+
+    json_path = out / "session_analysis.json"
+    save_analysis_json(sessions, json_path)
+    _log("session_analysis.json 已保存")
 
     return {
         "total_sessions": len(sessions),
         "report_path": str(report_path),
+        "html_report_path": str(html_path),
+        "analysis_json_path": str(json_path),
         "stats_summary": {
             "total_tool_use": stats["total_tu"],
             "total_tool_result": stats["total_tr"],
