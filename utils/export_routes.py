@@ -255,10 +255,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         slot = rec.get("key_slot", "all")
 
         if mode == "export":
-            local_base = _env_dir.parent / "logs_session" / _env_key_name / slot / f"ex-{now_tag}"
+            local_base = _env_dir.parent.parent / "logs_session" / _env_key_name / slot / f"ex-{now_tag}"
             obs_sub = "session"
         else:
-            local_base = (_env_dir.parent / "logs_session_analysis" / _env_key_name / slot / f"ex-{now_tag}").resolve()
+            local_base = (_env_dir.parent.parent / "logs_session_analysis" / _env_key_name / slot / f"ex-{now_tag}").resolve()
             obs_sub = "session_analysis"
 
         obs_dst = f"{obs_prefix}/{obs_sub}/{_env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
@@ -295,10 +295,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                     matched = sync_result.get("matched_sessions", 0)
                     uploaded = sync_result.get("uploaded", 0)
                     skipped = sync_result.get("skipped", 0)
-                    total_sessions += matched
+                    total_sessions += uploaded
                     total_uploaded += uploaded
                     total_skipped += skipped
-                    _log(f"[{mt}] 匹配 {matched} sessions, 上传 {uploaded} files, 跳过 {skipped}")
+                    _log(f"[{mt}] 匹配 {matched} sessions, 新导出 {uploaded}, 跳过 {skipped}")
                     if sync_result.get("failed", 0) > 0:
                         _log(f"[{mt}] 上传失败!")
                         errors.append(f"{mt}: upload failed")
