@@ -136,3 +136,19 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
             return JSONResponse({"detail": "Invalid invite code"}, status_code=403)
         result = add_key(name or "invite", key_len=state.get("key_len", 24), invite_code=code)
         return JSONResponse(result)
+
+    @app.get("/api/invite")
+    def api_invite_get(invite_code: str = "", name: str = ""):
+        code = invite_code.strip()
+        name = name.strip()
+        if not code:
+            return JSONResponse({"detail": "invite_code is required"}, status_code=400)
+        state = load_key_state()
+        valid_codes = state.get("invite_codes", [])
+        if not valid_codes:
+            return JSONResponse({"detail": "Invite feature is disabled"}, status_code=404)
+        matched = any(hmac.compare_digest(code, c) for c in valid_codes)
+        if not matched:
+            return JSONResponse({"detail": "Invalid invite code"}, status_code=403)
+        result = add_key(name or "invite", key_len=state.get("key_len", 24), invite_code=code)
+        return JSONResponse({"api_key": result["key"], "name": result["name"], "created_at": result["created_at"]})
