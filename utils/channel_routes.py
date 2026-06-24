@@ -1,0 +1,99 @@
+"""
+渠道管理 Web 路由。
+- /channels — 渠道管理界面（与 key 管理共享登录态）
+- /api/channels/* — 渠道 CRUD
+- /api/keys/{key_id}/channels — Key-Channel 绑定
+"""
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.templating import Jinja2Templates
+
+from utils.channel_store import (
+    add_channel, list_channels, toggle_channel_alive, delete_channel,
+    set_key_channels, get_key_channels,
+)
+from utils.key_config import load_key_state
+
+
+def _is_key_authenticated(request: Request) -> bool:
+    return bool(request.session.get("key_authenticated"))
+
+
+def _is_internal_request(request: Request) -> bool:
+    return request.headers.get("x-requested-with") == "XMLHttpRequest"
+
+
+def _require_key_api(request: Request):
+    if not _is_internal_request(request):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    state = load_key_state()
+    if not state.get("password"):
+        return None
+    if _is_key_authenticated(request):
+        return None
+    return JSONResponse({"detail": "Key management login required"}, status_code=401)
+
+
+def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
+
+    @app.get("/channels")
+    def channels_page(request: Request):
+        state = load_key_state()
+        if state.get("password") and not _is_key_authenticated(request):
+            return templates.TemplateResponse("keys_login.html", {"request": request})
+        return templates.TemplateResponse("channels.html", {"request": request})
+
+    @app.get("/api/channels")
+    def api_channels_list(request: Request):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        return JSONResponse({"channels": list_channels()})
+
+    @app.post("/api/channels")
+    async def api_channels_create(request: Request):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        name = body.get("name", "").strip()
+        upstream_url = body.get("upstream_url", "").strip()
+        upstream_key = body.get("upstream_key", "").strip()
+        if not upstream_url or not upstream_key:
+            return JSONResponse({"detail": "upstream_url and upstream_key are required"}, status_code=400)
+        result = add_channel(name, upstream_url, upstream_key)
+        return JSONResponse(result)
+
+    @app.post("/api/channels/{channel_id}/toggle")
+    async def api_channels_toggle(request: Request, channel_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        alive = body.get("alive", True)
+        return JSONResponse({"success": toggle_channel_alive(channel_id, alive)})
+
+    @app.delete("/api/channels/{channel_id}")
+    def api_channels_delete(request: Request, channel_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        return JSONResponse({"success": delete_channel(channel_id)})
+
+    @app.get("/api/keys/{key_id}/channels")
+    def api_key_channels(request: Request, key_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        return JSONResponse({"channels": get_key_channels(key_id)})
+
+    @app.post("/api/keys/{key_id}/channels")
+    async def api_key_channels_set(request: Request, key_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        channel_ids = body.get("channel_ids", [])
+        set_key_channels(key_id, channel_ids)
+        return JSONResponse({"success": True})

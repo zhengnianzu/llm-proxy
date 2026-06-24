@@ -21,9 +21,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from print_stats_summary import statistic_tokens, statistic_keys
-from utils.auth import validate_api_key
+from utils.auth import validate_api_key, resolve_upstream_channel
 from utils.key_store import init_db as init_key_db
 from utils.key_config import init_key_config
+from utils.channel_store import init_db as init_channel_db
 from utils.metrics import (
     get_metrics_snapshot,
     get_rate_history,
@@ -35,6 +36,7 @@ from utils.log_routes import register_log_routes
 from utils.session_routes import register_session_routes
 from utils.key_routes import register_key_routes
 from utils.export_routes import register_export_routes
+from utils.channel_routes import register_channel_routes
 from utils.export_store import init_db as init_export_db, mark_interrupted as mark_export_interrupted
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
@@ -76,6 +78,7 @@ MONITOR_AUTH_PUBLIC_PATHS = {
     "/login",
     "/logout",
     "/keys",
+    "/channels",
     "/invite",
 }
 
@@ -273,8 +276,8 @@ def _parse_extra_headers() -> Dict[str, str]:
 _EXTRA_HEADERS = _parse_extra_headers()
 
 
-def build_upstream_headers(x_auth_token: str, model_id: str) -> Dict[str, str]:
-    ack = os.getenv('UPSTREAM_API_KEY') or x_auth_token
+def build_upstream_headers(x_auth_token: str, model_id: str, upstream_key_override: str = "") -> Dict[str, str]:
+    ack = upstream_key_override or os.getenv('UPSTREAM_API_KEY') or x_auth_token
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {ack}",
@@ -477,7 +480,8 @@ def _extract_q1_preview(messages, kind="anthropic"):
 def _append_index(ts: str, req_file: str, provider: str, model: str = "",
                   tok_in: int = 0, tok_out: int = 0, success: bool = True,
                   api_key: str = "", chain_key: str = "", q1_preview: str = "",
-                  total_attempts: int = 1, start_turn: int = 0):
+                  total_attempts: int = 1, start_turn: int = 0,
+                  channel_key: str = ""):
     """统一追加请求记录到 index.jsonl，并更新内存计数。"""
     global _first_count, _total_count, _valid_count
     entry = {
@@ -494,6 +498,7 @@ def _append_index(ts: str, req_file: str, provider: str, model: str = "",
         "total_attempts": total_attempts,
         "retried": total_attempts > 1,
         "start_turn": start_turn,
+        "channel_key": channel_key,
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
@@ -545,7 +550,7 @@ def _extract_q1_preview_responses(input_data) -> str:
     return ""
 
 
-def _append_index_anthropic(ts, req_path, total_attempts, valid, model="", tok_in=0, tok_out=0, api_key="", messages=None):
+def _append_index_anthropic(ts, req_path, total_attempts, valid, model="", tok_in=0, tok_out=0, api_key="", messages=None, channel_key=""):
     msgs = messages or []
     _append_index(
         ts, req_path, provider="anthropic", model=model,
@@ -555,10 +560,11 @@ def _append_index_anthropic(ts, req_path, total_attempts, valid, model="", tok_i
         q1_preview=_extract_q1_preview(msgs),
         total_attempts=total_attempts,
         start_turn=get_first_user_text(msgs, return_index=True)[1],
+        channel_key=channel_key,
     )
 
 
-def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", messages=None):
+def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", messages=None, channel_key=""):
     msgs = messages or []
     _append_index(
         ts, req_path, provider="openai", model=model,
@@ -566,22 +572,25 @@ def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=Tr
         api_key=api_key,
         chain_key=build_chain_key(msgs),
         q1_preview=_extract_q1_preview(msgs),
+        channel_key=channel_key,
     )
 
 
-def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", input_data=None):
+def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", input_data=None, channel_key=""):
     _append_index(
         ts, req_path, provider="responses", model=model,
         tok_in=tok_in, tok_out=tok_out, success=success,
         api_key=api_key,
         chain_key=_extract_chain_key_responses(input_data),
         q1_preview=_extract_q1_preview_responses(input_data),
+        channel_key=channel_key,
     )
 
 
 # 启动时初始化
 init_key_db(SERVICE_LOG_DIR)
 init_key_config(SERVICE_LOG_DIR)
+init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
 mark_export_interrupted()
 _load_index()
@@ -645,6 +654,8 @@ def _sanitize_messages(messages: Any) -> Any:
 async def anthropic_messages(req: Request):
     """anthropic透传"""
     _api_key = await validate_api_key(req)
+    _channel = resolve_upstream_channel(_api_key)
+    _channel_key = _channel["upstream_key"][-4:] if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -677,11 +688,13 @@ async def anthropic_messages(req: Request):
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
-    upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/messages"
+    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel else os.environ['UPSTREAM_URL'].rstrip('/')
+    upstream_url = f"{_upstream_base}/messages"
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
-    upstream_headers = build_upstream_headers(x_auth_token, model)
+    _key_override = _channel["upstream_key"] if _channel else ""
+    upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
     body["model"] = upstream_headers['Model-Id']
 
     # 根据当前请求是否开启 ban_explore 来处理 Task 工具描述
@@ -743,7 +756,7 @@ async def anthropic_messages(req: Request):
                     if attempt < MAX_RETRIES - 1:
                         await asyncio.sleep(0.5)
                         x_auth_token = await get_x_auth_token(req)
-                        upstream_headers = build_upstream_headers(x_auth_token, model)
+                        upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
         except Exception as e:
             last_exception = e
             logging.error(f"Failed to create httpx client (anthropic non-stream): {e}")
@@ -754,7 +767,7 @@ async def anthropic_messages(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (anthropic non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []))
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -764,7 +777,7 @@ async def anthropic_messages(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []))
+                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
                 return JSONResponse(
                     status_code=502,
                     content={"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}},
@@ -779,7 +792,7 @@ async def anthropic_messages(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, api_key=_api_key, messages=body.get("messages", []))
+        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -823,7 +836,7 @@ async def anthropic_messages(req: Request):
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
                                     retry_token = await get_x_auth_token(req)
-                                    retry_headers = build_upstream_headers(retry_token, model)
+                                    retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                 continue
 
                             # Connection established — from here we yield directly, no more retries
@@ -876,7 +889,7 @@ async def anthropic_messages(req: Request):
                                     up_chunks.clear()
                                     await asyncio.sleep(0.5)
                                     retry_token = await get_x_auth_token(req)
-                                    retry_headers = build_upstream_headers(retry_token, model)
+                                    retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                     continue
                                 else:
                                     connection_established = True
@@ -903,7 +916,7 @@ async def anthropic_messages(req: Request):
                         if attempt < MAX_RETRIES - 1:
                             await asyncio.sleep(0.5)
                             retry_token = await get_x_auth_token(req)
-                            retry_headers = build_upstream_headers(retry_token, model)
+                            retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
 
                 # All retries exhausted without connecting
                 error_msg = str(last_exception) if last_exception else (f"HTTP {last_retry_status}" if last_retry_status else "unknown")
@@ -924,7 +937,7 @@ async def anthropic_messages(req: Request):
                     if _u:
                         _tok_in = (_u.get("input_tokens") or 0) + (_u.get("cache_creation_input_tokens") or 0) + (_u.get("cache_read_input_tokens") or 0)
                         _tok_out = _u.get("output_tokens") or 0
-            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, api_key=_api_key, messages=body.get("messages", []))
+            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
 
 
     return StreamingResponse(
@@ -944,6 +957,8 @@ async def openai_chat_completions(req: Request):
       - stream: upstream OpenAI SSE pass-through
     """
     _api_key = await validate_api_key(req)
+    _channel = resolve_upstream_channel(_api_key)
+    _channel_key = _channel["upstream_key"][-4:] if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -977,11 +992,13 @@ async def openai_chat_completions(req: Request):
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
-    upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/chat/completions"
+    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel else os.environ['UPSTREAM_URL'].rstrip('/')
+    upstream_url = f"{_upstream_base}/chat/completions"
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
-    upstream_headers = build_upstream_headers(x_auth_token, model)
+    _key_override = _channel["upstream_key"] if _channel else ""
+    upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
     body["model"] = upstream_headers['Model-Id']
     # 根据当前请求是否开启 ban_explore 来处理 Task 工具描述
     tools = _strip_task_explore_line(body.get("tools"), ban_explore=ban_explore)
@@ -1026,7 +1043,7 @@ async def openai_chat_completions(req: Request):
                     if attempt < MAX_RETRIES - 1:
                         await asyncio.sleep(0.5)
                         x_auth_token = await get_x_auth_token(req)
-                        upstream_headers = build_upstream_headers(x_auth_token, model)
+                        upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
         except Exception as e:
             last_exception = e
             logging.error(f"Failed to create httpx client (openai non-stream): {e}")
@@ -1037,7 +1054,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (openai non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []))
+                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -1047,7 +1064,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []))
+                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
@@ -1062,7 +1079,7 @@ async def openai_chat_completions(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []))
+        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1106,7 +1123,7 @@ async def openai_chat_completions(req: Request):
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
                                     retry_token = await get_x_auth_token(req)
-                                    retry_headers = build_upstream_headers(retry_token, model)
+                                    retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                 continue
 
                             connection_established = True
@@ -1137,7 +1154,7 @@ async def openai_chat_completions(req: Request):
                         if attempt < MAX_RETRIES - 1:
                             await asyncio.sleep(0.5)
                             retry_token = await get_x_auth_token(req)
-                            retry_headers = build_upstream_headers(retry_token, model)
+                            retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
 
                 # All retries exhausted
                 error_msg = str(last_exception) if last_exception else (f"HTTP {last_retry_status}" if last_retry_status else "unknown")
@@ -1161,7 +1178,7 @@ async def openai_chat_completions(req: Request):
                     _u = _c.get("usage") or {}
                     _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
-            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []))
+            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
 
     return StreamingResponse(
         sse_passthrough(),
@@ -1179,6 +1196,8 @@ async def openai_responses(req: Request):
       - stream: upstream SSE pass-through (event: xxx\ndata: {...})
     """
     _api_key = await validate_api_key(req)
+    _channel = resolve_upstream_channel(_api_key)
+    _channel_key = _channel["upstream_key"][-4:] if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -1211,11 +1230,13 @@ async def openai_responses(req: Request):
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
-    upstream_url = f"{os.environ['UPSTREAM_URL'].rstrip('/')}/responses"
+    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel else os.environ['UPSTREAM_URL'].rstrip('/')
+    upstream_url = f"{_upstream_base}/responses"
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
-    upstream_headers = build_upstream_headers(x_auth_token, model)
+    _key_override = _channel["upstream_key"] if _channel else ""
+    upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
     body["model"] = upstream_headers['Model-Id']
 
     # ban_explore 处理 tools
@@ -1261,7 +1282,7 @@ async def openai_responses(req: Request):
                     if attempt < MAX_RETRIES - 1:
                         await asyncio.sleep(0.5)
                         x_auth_token = await get_x_auth_token(req)
-                        upstream_headers = build_upstream_headers(x_auth_token, model)
+                        upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
         except Exception as e:
             last_exception = e
             logging.error(f"Failed to create httpx client (responses non-stream): {e}")
@@ -1271,7 +1292,7 @@ async def openai_responses(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (responses non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data)
+                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -1281,7 +1302,7 @@ async def openai_responses(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (responses non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data)
+                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
@@ -1296,7 +1317,7 @@ async def openai_responses(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        _append_index_responses(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data)
+        _append_index_responses(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1339,7 +1360,7 @@ async def openai_responses(req: Request):
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
                                     retry_token = await get_x_auth_token(req)
-                                    retry_headers = build_upstream_headers(retry_token, model)
+                                    retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                 continue
 
                             connection_established = True
@@ -1370,7 +1391,7 @@ async def openai_responses(req: Request):
                         if attempt < MAX_RETRIES - 1:
                             await asyncio.sleep(0.5)
                             retry_token = await get_x_auth_token(req)
-                            retry_headers = build_upstream_headers(retry_token, model)
+                            retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
 
                 # All retries exhausted
                 error_msg = str(last_exception) if last_exception else (f"HTTP {last_retry_status}" if last_retry_status else "unknown")
@@ -1392,7 +1413,7 @@ async def openai_responses(req: Request):
                     _u = _c.get("usage") or {}
                     _tok_in = _tok_in or (_u.get("input_tokens") or _u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("output_tokens") or _u.get("completion_tokens") or 0)
-            _append_index_responses(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data)
+            _append_index_responses(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
 
     return StreamingResponse(
         responses_sse_passthrough(),
@@ -1633,6 +1654,7 @@ def logs_debug_file(filename: str):
 register_log_routes(app)
 register_session_routes(app, LOGS_DIR)
 register_key_routes(app, templates)
+register_channel_routes(app, templates)
 register_export_routes(app, LOGS_DIR)
 
 

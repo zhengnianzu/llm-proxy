@@ -38,6 +38,13 @@
         .auth-off .dot { background: #ef4444; }
         .auth-nokey { background: #fef9c3; border: 1px solid #fde68a; color: #854d0e; }
         .auth-nokey .dot { background: #eab308; }
+        .form-switch .form-check-input { cursor: pointer; }
+        .modal-backdrop-custom { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 1040; }
+        .modal-custom {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: #fff; border-radius: 14px; padding: 24px; z-index: 1050;
+            box-shadow: 0 20px 60px rgba(0,0,0,.2); width: 90%; max-width: 520px;
+        }
     </style>
 </head>
 <body>
@@ -49,6 +56,7 @@
             <a class="nav-pill" href="/">监控总览</a>
             <a class="nav-pill" href="/query">查询统计</a>
             <a class="nav-pill active" href="/keys">Key 管理</a>
+            <a class="nav-pill" href="/channels">渠道管理</a>
             <a class="nav-pill" href="/keys/export">Session 导出</a>
             <a class="nav-pill" href="/logout">退出登录</a>
         </div>
@@ -59,12 +67,16 @@
         <span v-if="!authStatus.enabled"><strong>Key 验证已关闭</strong> — {{ authStatus.reason }}</span>
         <span v-else-if="authStatus.reason.includes('未配置')"><strong>Key 验证已启用</strong> — {{ authStatus.reason }}</span>
         <span v-else><strong>Key 验证已启用</strong> — {{ authStatus.reason }}</span>
+        <span style="flex:1"></span>
+        <div class="form-check form-switch mb-0" style="min-height:auto">
+            <input class="form-check-input" type="checkbox" role="switch" :checked="authStatus.enabled" @change="toggleAuth(!authStatus.enabled)">
+        </div>
     </div>
 
     <div class="panel">
         <div class="d-flex justify-content-between align-items-center mb-3">
             <h5 class="mb-0">数据库 Key</h5>
-            <button class="btn btn-primary btn-sm" @click="showCreate = true">新建 Key</button>
+            <button class="btn btn-primary btn-sm" @click="openCreateModal">新建 Key</button>
         </div>
 
         <div v-if="createdKey" class="created-key mb-3">
@@ -75,20 +87,13 @@
             <button class="btn btn-outline-secondary btn-sm mt-2 ms-2" @click="createdKey = null">关闭</button>
         </div>
 
-        <div v-if="showCreate && !createdKey" class="mb-3 p-3" style="background:#f8fafc; border-radius:8px;">
-            <div class="d-flex align-items-center gap-2">
-                <input v-model="newName" class="form-control form-control-sm" placeholder="Key 名称（可选）" style="max-width:300px">
-                <button class="btn btn-success btn-sm" @click="createKey">创建</button>
-                <button class="btn btn-outline-secondary btn-sm" @click="showCreate = false">取消</button>
-            </div>
-        </div>
-
         <table class="table table-sm table-hover mb-0" v-if="dbKeys.length">
             <thead><tr>
                 <th style="width:50px">ID</th>
                 <th>名称</th>
                 <th>Key</th>
                 <th style="width:80px">状态</th>
+                <th>渠道</th>
                 <th style="width:100px">邀请码</th>
                 <th style="width:160px">创建时间</th>
                 <th style="width:150px">操作</th>
@@ -103,6 +108,10 @@
                             {{ k.status === 'active' ? '启用' : '停用' }}
                         </span>
                     </td>
+                    <td>
+                        <span v-for="ch in k.channels" :key="ch" class="badge bg-info text-dark me-1" style="font-size:.75rem;font-family:monospace">{{ ch }}</span>
+                        <button class="btn btn-outline-secondary btn-sm" style="font-size:.65rem;padding:1px 5px" @click="editChannels(k.id)">编辑</button>
+                    </td>
                     <td class="text-muted small">{{ k.invite_code || '-' }}</td>
                     <td class="text-muted small">{{ k.created_at }}</td>
                     <td>
@@ -114,6 +123,22 @@
             </tbody>
         </table>
         <div v-else class="text-muted text-center py-4">暂无数据库 Key，点击「新建 Key」创建</div>
+
+        <div v-if="editingKeyId" class="mt-3 p-3" style="background:#f0f4ff; border-radius:8px; border:1px solid #c7d2fe;">
+            <h6 class="mb-2">编辑渠道绑定 — Key #{{ editingKeyId }}</h6>
+            <div v-if="!allChannels.length" class="text-muted small">暂无渠道，请先在<a href="/channels">渠道管理</a>中创建</div>
+            <div v-else class="d-flex flex-wrap gap-2">
+                <label v-for="ch in allChannels" :key="ch.id" class="form-check form-check-inline mb-0" style="font-size:.85rem">
+                    <input type="checkbox" :value="ch.id" v-model="selectedChannelIds" class="form-check-input">
+                    {{ ch.name || '未命名' }} ({{ ch.key_suffix }})
+                    <span v-if="!ch.alive" class="text-danger">[离线]</span>
+                </label>
+            </div>
+            <div class="mt-2">
+                <button class="btn btn-primary btn-sm" @click="saveChannels">保存</button>
+                <button class="btn btn-outline-secondary btn-sm ms-2" @click="editingKeyId = null">取消</button>
+            </div>
+        </div>
     </div>
 
     <div class="panel" v-if="envKeys.length">
@@ -128,6 +153,32 @@
             </tbody>
         </table>
     </div>
+
+    <!-- 新建 Key 弹窗 -->
+    <div v-if="showCreateModal">
+        <div class="modal-backdrop-custom" @click="showCreateModal = false"></div>
+        <div class="modal-custom">
+            <h5 class="mb-3">新建 Key</h5>
+            <div class="mb-3">
+                <label class="form-label small">Key 名称（可选）</label>
+                <input v-model="newName" class="form-control form-control-sm" placeholder="输入名称">
+            </div>
+            <div v-if="allChannels.length" class="mb-3">
+                <label class="form-label small">选择渠道（可多选）</label>
+                <div class="d-flex flex-wrap gap-2" style="max-height:200px;overflow-y:auto;">
+                    <label v-for="ch in allChannels" :key="ch.id" class="form-check form-check-inline mb-0" style="font-size:.85rem">
+                        <input type="checkbox" :value="ch.id" v-model="newChannelIds" class="form-check-input">
+                        {{ ch.name || '未命名' }} ({{ ch.key_suffix }})
+                        <span v-if="!ch.alive" class="text-danger">[离线]</span>
+                    </label>
+                </div>
+            </div>
+            <div class="d-flex justify-content-end gap-2">
+                <button class="btn btn-outline-secondary btn-sm" @click="showCreateModal = false">取消</button>
+                <button class="btn btn-success btn-sm" @click="createKey">创建</button>
+            </div>
+        </div>
+    </div>
 {% endraw %}
 </div>
 
@@ -136,10 +187,12 @@ new Vue({
     el: '#app',
     data: {
         dbKeys: [], envKeys: [],
-        showCreate: false, newName: '', createdKey: null,
+        showCreateModal: false, newName: '', createdKey: null,
         authStatus: null,
+        allChannels: [], newChannelIds: [],
+        editingKeyId: null, selectedChannelIds: [],
     },
-    mounted() { this.fetchKeys(); },
+    mounted() { this.fetchKeys(); this.fetchAllChannels(); },
     methods: {
         _h(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
         fetchKeys() {
@@ -149,15 +202,21 @@ new Vue({
                 this.authStatus = d.auth_status || null;
             });
         },
+        openCreateModal() {
+            this.newName = '';
+            this.newChannelIds = [];
+            this.showCreateModal = true;
+        },
         createKey() {
             fetch('/api/keys', {
                 method: 'POST',
                 headers: this._h({'Content-Type': 'application/json'}),
-                body: JSON.stringify({name: this.newName})
+                body: JSON.stringify({name: this.newName, channel_ids: this.newChannelIds})
             }).then(r => r.json()).then(d => {
                 this.createdKey = d;
                 this.newName = '';
-                this.showCreate = false;
+                this.newChannelIds = [];
+                this.showCreateModal = false;
                 this.fetchKeys();
             });
         },
@@ -172,6 +231,33 @@ new Vue({
         },
         copyKey(key) {
             navigator.clipboard.writeText(key).then(() => alert('已复制到剪贴板'));
+        },
+        toggleAuth(enabled) {
+            fetch('/api/keys/auth-toggle', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({enabled: enabled})
+            }).then(r => r.json()).then(d => {
+                if (d.auth_status) this.authStatus = d.auth_status;
+            });
+        },
+        fetchAllChannels() {
+            fetch('/api/channels', {headers: this._h()}).then(r => r.json()).then(d => {
+                this.allChannels = d.channels || [];
+            });
+        },
+        editChannels(keyId) {
+            this.editingKeyId = keyId;
+            fetch('/api/keys/' + keyId + '/channels', {headers: this._h()})
+                .then(r => r.json())
+                .then(d => { this.selectedChannelIds = (d.channels || []).map(c => c.id); });
+        },
+        saveChannels() {
+            fetch('/api/keys/' + this.editingKeyId + '/channels', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({channel_ids: this.selectedChannelIds})
+            }).then(() => { this.editingKeyId = null; this.fetchKeys(); });
         }
     }
 });

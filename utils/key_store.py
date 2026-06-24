@@ -129,6 +129,16 @@ def find_key(identifier: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_key_id_by_value(raw_key: str) -> int | None:
+    """按 key 值查找对应的数据库 ID。"""
+    if _conn is None:
+        return None
+    row = _conn.execute(
+        "SELECT id FROM api_keys WHERE key = ?", (raw_key,)
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def validate_key(raw_key: str) -> str | None:
     if _conn is None:
         return None

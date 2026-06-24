@@ -6,6 +6,7 @@ Key 管理 Web 路由。
 """
 
 import hmac
+import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -13,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from utils.key_store import add_key, list_keys, disable_key, enable_key, delete_key, mask_key
 from utils.auth import get_configured_api_keys, get_auth_status
 from utils.key_config import load_key_state
+from utils.channel_store import get_channels_for_key_display, set_key_channels
 
 
 def _is_key_authenticated(request: Request) -> bool:
@@ -76,6 +78,8 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
             return denied
         state = load_key_state()
         db_keys = list_keys()
+        for k in db_keys:
+            k["channels"] = get_channels_for_key_display(k["id"])
         env_keys = get_configured_api_keys()
         env_list = [{"key": mask_key(k), "source": "env"} for k in env_keys]
         yaml_keys = [{"name": k.get("name", ""), "key": mask_key(k.get("value", "")), "source": "yaml"} for k in state.get("keys", [])]
@@ -89,7 +93,10 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         state = load_key_state()
         body = await request.json()
         name = body.get("name", "").strip()
+        channel_ids = body.get("channel_ids", [])
         result = add_key(name, key_len=state.get("key_len", 24))
+        if channel_ids:
+            set_key_channels(result["id"], channel_ids)
         return JSONResponse(result)
 
     @app.post("/api/keys/{key_id}/disable")
@@ -112,6 +119,16 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         if denied:
             return denied
         return JSONResponse({"success": delete_key(key_id)})
+
+    @app.post("/api/keys/auth-toggle")
+    async def api_keys_auth_toggle(request: Request):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        enabled = body.get("enabled", True)
+        os.environ["ENABLE_KEY_ACCESS"] = "true" if enabled else "false"
+        return JSONResponse({"success": True, "auth_status": get_auth_status()})
 
     @app.get("/invite")
     def invite_page(request: Request):

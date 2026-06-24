@@ -456,28 +456,59 @@ def cmd_connect(args: argparse.Namespace) -> int:
         base_url = upstream_url
     else:
         base_url = f"http://{host}:{port}"
-        # 从 env 文件读取 API_KEY（客户端 key），取第一个；fallback 到 DB
-        raw_api_key = env_values.get("API_KEY", "").strip().strip('"')
-        api_key = raw_api_key.split(",")[0].strip() if raw_api_key else ""
-        if not api_key:
-            try:
-                sys.path.insert(0, str(BASE_DIR))
-                from utils.key_store import init_db, list_keys as _list_keys
-                service_key = get_service_key(env_path)
-                service_slug = get_service_slug(service_key)
-                key_suffix = get_api_key_suffix(env_values)
-                svc_dir = _service_log_dir(port, service_slug, key_suffix)
-                init_db(str(svc_dir))
-                db_keys = _list_keys()
-                active = [k for k in db_keys if k.get("status") == "active"]
-                if active:
-                    from utils.key_store import get_key_full
-                    full = get_key_full(active[0]["id"])
-                    if full:
-                        api_key = full["key"]
-            except Exception:
-                pass
+        if args.key:
+            api_key = args.key
+        else:
+            # 从 env 文件读取 API_KEY（客户端 key），取第一个；fallback 到 DB
+            raw_api_key = env_values.get("API_KEY", "").strip().strip('"')
+            api_key = raw_api_key.split(",")[0].strip() if raw_api_key else ""
+            if not api_key:
+                try:
+                    sys.path.insert(0, str(BASE_DIR))
+                    from utils.key_store import init_db, list_keys as _list_keys
+                    service_key = get_service_key(env_path)
+                    service_slug = get_service_slug(service_key)
+                    key_suffix = get_api_key_suffix(env_values)
+                    svc_dir = _service_log_dir(port, service_slug, key_suffix)
+                    init_db(str(svc_dir))
+                    db_keys = _list_keys()
+                    active = [k for k in db_keys if k.get("status") == "active"]
+                    if active:
+                        from utils.key_store import get_key_full
+                        full = get_key_full(active[0]["id"])
+                        if full:
+                            api_key = full["key"]
+                except Exception:
+                    pass
         print(f"[connect] via proxy: {base_url}")
+
+    # 查找 key 对应的渠道绑定
+    if not args.noproxy and api_key:
+        try:
+            sys.path.insert(0, str(BASE_DIR))
+            from utils.key_store import init_db as _init_key_db, get_key_id_by_value
+            from utils.channel_store import init_db as _init_ch_db, get_key_channels
+            service_key = get_service_key(env_path)
+            service_slug = get_service_slug(service_key)
+            key_suffix = get_api_key_suffix(env_values)
+            svc_dir = _service_log_dir(port, service_slug, key_suffix)
+            _init_key_db(str(svc_dir))
+            _init_ch_db(str(svc_dir))
+            kid = get_key_id_by_value(api_key)
+            if kid is not None:
+                chs = get_key_channels(kid)
+                if chs:
+                    ch_list = ", ".join(
+                        f"{c.get('name') or '?'}({c['key_suffix']})"
+                        + ("" if c.get("alive") else "[离线]")
+                        for c in chs
+                    )
+                    alive_count = sum(1 for c in chs if c.get("alive"))
+                    print(f"[connect] channels({alive_count}/{len(chs)}): {ch_list}")
+                else:
+                    print("[connect] channels: (none, fallback to .env upstream)")
+        except Exception:
+            pass
 
     print(f"[connect] method={method} model={model}")
     if args.message:
@@ -1267,6 +1298,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_connect.add_argument("--noproxy", action="store_true", help="Test upstream directly, bypassing proxy")
     p_connect.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
     p_connect.add_argument("--message", "-m", default="", help="Custom prompt message")
+    p_connect.add_argument("--key", default="", help="Specify API key to test (overrides auto-detection)")
     p_connect.set_defaults(func=cmd_connect)
 
     # --- sess subcommands ---

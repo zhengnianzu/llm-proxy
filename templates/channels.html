@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>渠道管理</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <script src="/static/js/vue.min.js"></script>
+    <style>
+        body { background: #f4f6fb; color: #1f2937; }
+        .page-shell { max-width: 1200px; margin: 0 auto; padding: 24px 16px 40px; }
+        .topbar {
+            background: linear-gradient(135deg, #0f172a, #1d4ed8);
+            color: #fff; padding: 10px 20px; border-radius: 10px; margin-bottom: 16px;
+            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+        }
+        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
+        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
+        .nav-pill {
+            display: inline-flex; align-items: center; justify-content: center;
+            padding: 6px 12px; border-radius: 999px; text-decoration: none;
+            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
+            border: 1px solid rgba(255,255,255,.14);
+        }
+        .nav-pill.active { background: #fff; color: #0f172a; }
+        .panel { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15,23,42,.06); margin-bottom: 20px; }
+        .badge-alive { background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
+        .badge-offline { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
+        .key-text { font-family: monospace; font-size: .85rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }
+        .suffix-badge { background: #e0e7ff; color: #3730a3; padding: 3px 8px; border-radius: 999px; font-size: .8rem; font-family: monospace; }
+    </style>
+</head>
+<body>
+<div id="app" class="page-shell">
+{% raw %}
+    <div class="topbar">
+        <h1 class="brand-title">渠道管理</h1>
+        <div class="nav-pills-wrap">
+            <a class="nav-pill" href="/">监控总览</a>
+            <a class="nav-pill" href="/query">查询统计</a>
+            <a class="nav-pill" href="/keys">Key 管理</a>
+            <a class="nav-pill active" href="/channels">渠道管理</a>
+            <a class="nav-pill" href="/keys/export">Session 导出</a>
+            <a class="nav-pill" href="/logout">退出登录</a>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="mb-0">渠道列表</h5>
+            <button class="btn btn-primary btn-sm" @click="showCreate = true">新建渠道</button>
+        </div>
+
+        <div v-if="showCreate" class="mb-3 p-3" style="background:#f8fafc; border-radius:8px;">
+            <div class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label small">名称</label>
+                    <input v-model="newName" class="form-control form-control-sm" placeholder="渠道名称（可选）">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small">上游地址</label>
+                    <input v-model="newUrl" class="form-control form-control-sm" placeholder="https://api.example.com/v1">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">上游 Key</label>
+                    <input v-model="newKey" class="form-control form-control-sm" placeholder="sk-xxx">
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-success btn-sm w-100" @click="createChannel">创建</button>
+                    <button class="btn btn-outline-secondary btn-sm w-100 mt-1" @click="showCreate = false">取消</button>
+                </div>
+            </div>
+        </div>
+
+        <table class="table table-sm table-hover mb-0" v-if="channels.length">
+            <thead><tr>
+                <th style="width:50px">ID</th>
+                <th>名称</th>
+                <th>上游地址</th>
+                <th>Key</th>
+                <th style="width:70px">标识</th>
+                <th style="width:80px">状态</th>
+                <th style="width:160px">创建时间</th>
+                <th style="width:150px">操作</th>
+            </tr></thead>
+            <tbody>
+                <tr v-for="ch in channels" :key="ch.id">
+                    <td>{{ ch.id }}</td>
+                    <td>{{ ch.name || '-' }}</td>
+                    <td class="small text-muted" style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="ch.upstream_url">{{ ch.upstream_url }}</td>
+                    <td><span class="key-text">{{ ch.upstream_key }}</span></td>
+                    <td><span class="suffix-badge">{{ ch.key_suffix }}</span></td>
+                    <td>
+                        <span :class="ch.alive ? 'badge-alive' : 'badge-offline'">
+                            {{ ch.alive ? '在线' : '离线' }}
+                        </span>
+                    </td>
+                    <td class="text-muted small">{{ ch.created_at }}</td>
+                    <td>
+                        <button v-if="ch.alive" class="btn btn-outline-warning btn-sm" @click="toggleAlive(ch.id, false)">下线</button>
+                        <button v-else class="btn btn-outline-success btn-sm" @click="toggleAlive(ch.id, true)">上线</button>
+                        <button class="btn btn-outline-danger btn-sm ms-1" @click="removeChannel(ch.id, ch.name)">删除</button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        <div v-else class="text-muted text-center py-4">暂无渠道，点击「新建渠道」创建</div>
+    </div>
+{% endraw %}
+</div>
+
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        channels: [],
+        showCreate: false,
+        newName: '', newUrl: '', newKey: '',
+    },
+    mounted() { this.fetchChannels(); },
+    methods: {
+        _h(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
+        fetchChannels() {
+            fetch('/api/channels', {headers: this._h()}).then(r => r.json()).then(d => {
+                this.channels = d.channels || [];
+            });
+        },
+        createChannel() {
+            if (!this.newUrl.trim() || !this.newKey.trim()) {
+                alert('上游地址和 Key 不能为空');
+                return;
+            }
+            fetch('/api/channels', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({name: this.newName, upstream_url: this.newUrl, upstream_key: this.newKey})
+            }).then(r => r.json()).then(() => {
+                this.newName = ''; this.newUrl = ''; this.newKey = '';
+                this.showCreate = false;
+                this.fetchChannels();
+            });
+        },
+        toggleAlive(id, alive) {
+            fetch('/api/channels/' + id + '/toggle', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({alive: alive})
+            }).then(() => this.fetchChannels());
+        },
+        removeChannel(id, name) {
+            if (!confirm('确认删除渠道 ' + (name || '#' + id) + '？')) return;
+            fetch('/api/channels/' + id, {method: 'DELETE', headers: this._h()})
+                .then(() => this.fetchChannels());
+        }
+    }
+});
+</script>
+</body>
+</html>
