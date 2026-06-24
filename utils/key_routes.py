@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from utils.key_store import add_key, list_keys, disable_key, enable_key, delete_key, mask_key
 from utils.auth import get_configured_api_keys, get_auth_status
 from utils.key_config import load_key_state
-from utils.channel_store import get_channels_for_key_display, set_key_channels
+from utils.channel_store import get_channels_for_key_display, set_key_channels, get_channel_ids_by_invite_code, get_default_channel_id, get_all_channel_invite_codes
 
 
 def _is_key_authenticated(request: Request) -> bool:
@@ -130,10 +130,23 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         os.environ["ENABLE_KEY_ACCESS"] = "true" if enabled else "false"
         return JSONResponse({"success": True, "auth_status": get_auth_status()})
 
+    def _bind_channels_for_invite(key_id: int, code: str):
+        """invite 创建 key 后自动绑定渠道：按 invite_code 匹配，多个则随机选一个；无匹配则绑定默认渠道。"""
+        ch_ids = get_channel_ids_by_invite_code(code)
+        if ch_ids:
+            import random
+            set_key_channels(key_id, [random.choice(ch_ids)])
+            return
+        default_id = get_default_channel_id()
+        if default_id is not None:
+            set_key_channels(key_id, [default_id])
+
     @app.get("/invite")
     def invite_page(request: Request):
         state = load_key_state()
-        if not state.get("invite_codes"):
+        yaml_codes = state.get("invite_codes", [])
+        channel_codes = get_all_channel_invite_codes()
+        if not yaml_codes and not channel_codes:
             return JSONResponse({"detail": "Invite feature is disabled"}, status_code=404)
         return templates.TemplateResponse("invite.html", {"request": request})
 
@@ -142,16 +155,18 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         if not _is_internal_request(request):
             return JSONResponse({"detail": "Not found"}, status_code=404)
         state = load_key_state()
-        valid_codes = state.get("invite_codes", [])
-        if not valid_codes:
+        yaml_codes = state.get("invite_codes", [])
+        channel_codes = get_all_channel_invite_codes()
+        if not yaml_codes and not channel_codes:
             return JSONResponse({"detail": "Invite feature is disabled"}, status_code=404)
         body = await request.json()
         code = body.get("invite_code", "").strip()
         name = body.get("name", "").strip()
-        matched = any(hmac.compare_digest(code, c) for c in valid_codes)
+        matched = any(hmac.compare_digest(code, c) for c in yaml_codes) or code in channel_codes
         if not matched:
             return JSONResponse({"detail": "Invalid invite code"}, status_code=403)
         result = add_key(name or "invite", key_len=state.get("key_len", 24), invite_code=code)
+        _bind_channels_for_invite(result["id"], code)
         return JSONResponse(result)
 
     @app.get("/api/invite")
@@ -161,11 +176,13 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         if not code:
             return JSONResponse({"detail": "invite_code is required"}, status_code=400)
         state = load_key_state()
-        valid_codes = state.get("invite_codes", [])
-        if not valid_codes:
+        yaml_codes = state.get("invite_codes", [])
+        channel_codes = get_all_channel_invite_codes()
+        if not yaml_codes and not channel_codes:
             return JSONResponse({"detail": "Invite feature is disabled"}, status_code=404)
-        matched = any(hmac.compare_digest(code, c) for c in valid_codes)
+        matched = any(hmac.compare_digest(code, c) for c in yaml_codes) or code in channel_codes
         if not matched:
             return JSONResponse({"detail": "Invalid invite code"}, status_code=403)
         result = add_key(name or "invite", key_len=state.get("key_len", 24), invite_code=code)
+        _bind_channels_for_invite(result["id"], code)
         return JSONResponse({"api_key": result["key"], "name": result["name"], "created_at": result["created_at"]})

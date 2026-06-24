@@ -28,6 +28,7 @@
         .badge-offline { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
         .key-text { font-family: monospace; font-size: .85rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }
         .suffix-badge { background: #e0e7ff; color: #3730a3; padding: 3px 8px; border-radius: 999px; font-size: .8rem; font-family: monospace; }
+        .badge-default { background: #fef3c7; color: #92400e; padding: 3px 10px; border-radius: 999px; font-size: .8rem; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -53,7 +54,7 @@
 
         <div v-if="showCreate" class="mb-3 p-3" style="background:#f8fafc; border-radius:8px;">
             <div class="row g-2 align-items-end">
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <label class="form-label small">名称</label>
                     <input v-model="newName" class="form-control form-control-sm" placeholder="渠道名称（可选）">
                 </div>
@@ -61,9 +62,13 @@
                     <label class="form-label small">上游地址</label>
                     <input v-model="newUrl" class="form-control form-control-sm" placeholder="https://api.example.com/v1">
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <label class="form-label small">上游 Key</label>
                     <input v-model="newKey" class="form-control form-control-sm" placeholder="sk-xxx">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">邀请码（可选）</label>
+                    <input v-model="newInviteCode" class="form-control form-control-sm" placeholder="多个用逗号分隔">
                 </div>
                 <div class="col-md-2">
                     <button class="btn btn-success btn-sm w-100" @click="createChannel">创建</button>
@@ -79,9 +84,11 @@
                 <th>上游地址</th>
                 <th>Key</th>
                 <th style="width:70px">标识</th>
+                <th style="width:80px">默认</th>
+                <th>邀请码</th>
                 <th style="width:80px">状态</th>
                 <th style="width:160px">创建时间</th>
-                <th style="width:150px">操作</th>
+                <th style="width:180px">操作</th>
             </tr></thead>
             <tbody>
                 <tr v-for="ch in channels" :key="ch.id">
@@ -91,14 +98,32 @@
                     <td><span class="key-text">{{ ch.upstream_key }}</span></td>
                     <td><span class="suffix-badge">{{ ch.key_suffix }}</span></td>
                     <td>
+                        <span v-if="ch.is_default" class="badge-default">默认</span>
+                    </td>
+                    <td class="small">
+                        <template v-if="editingInviteId !== ch.id">
+                            <template v-if="ch.invite_code">
+                                <span v-for="c in ch.invite_code.split(',')" :key="c" class="badge bg-secondary me-1" style="font-size:.7rem">{{ c.trim() }}</span>
+                            </template>
+                            <span v-else class="text-muted">-</span>
+                            <button class="btn btn-outline-secondary btn-sm ms-1" style="font-size:.6rem;padding:0px 4px" @click="startEditInvite(ch)">编辑</button>
+                        </template>
+                        <span v-else class="d-flex gap-1 align-items-center">
+                            <input v-model="editInviteCode" class="form-control form-control-sm" style="width:120px" @keyup.enter="saveInviteCode(ch.id)" placeholder="多个用逗号分隔">
+                            <button class="btn btn-primary btn-sm" style="font-size:.65rem;padding:1px 6px" @click="saveInviteCode(ch.id)">保存</button>
+                            <button class="btn btn-outline-secondary btn-sm" style="font-size:.65rem;padding:1px 6px" @click="editingInviteId = null">取消</button>
+                        </span>
+                    </td>
+                    <td>
                         <span :class="ch.alive ? 'badge-alive' : 'badge-offline'">
                             {{ ch.alive ? '在线' : '离线' }}
                         </span>
                     </td>
                     <td class="text-muted small">{{ ch.created_at }}</td>
                     <td>
-                        <button v-if="ch.alive" class="btn btn-outline-warning btn-sm" @click="toggleAlive(ch.id, false)">下线</button>
-                        <button v-else class="btn btn-outline-success btn-sm" @click="toggleAlive(ch.id, true)">上线</button>
+                        <button v-if="!ch.is_default" class="btn btn-outline-info btn-sm" @click="setDefault(ch.id)">设为默认</button>
+                        <button v-if="ch.alive" class="btn btn-outline-warning btn-sm ms-1" @click="toggleAlive(ch.id, false)">下线</button>
+                        <button v-else class="btn btn-outline-success btn-sm ms-1" @click="toggleAlive(ch.id, true)">上线</button>
                         <button class="btn btn-outline-danger btn-sm ms-1" @click="removeChannel(ch.id, ch.name)">删除</button>
                     </td>
                 </tr>
@@ -115,7 +140,8 @@ new Vue({
     data: {
         channels: [],
         showCreate: false,
-        newName: '', newUrl: '', newKey: '',
+        newName: '', newUrl: '', newKey: '', newInviteCode: '',
+        editingInviteId: null, editInviteCode: '',
     },
     mounted() { this.fetchChannels(); },
     methods: {
@@ -133,9 +159,9 @@ new Vue({
             fetch('/api/channels', {
                 method: 'POST',
                 headers: this._h({'Content-Type': 'application/json'}),
-                body: JSON.stringify({name: this.newName, upstream_url: this.newUrl, upstream_key: this.newKey})
+                body: JSON.stringify({name: this.newName, upstream_url: this.newUrl, upstream_key: this.newKey, invite_code: this.newInviteCode})
             }).then(r => r.json()).then(() => {
-                this.newName = ''; this.newUrl = ''; this.newKey = '';
+                this.newName = ''; this.newUrl = ''; this.newKey = ''; this.newInviteCode = '';
                 this.showCreate = false;
                 this.fetchChannels();
             });
@@ -151,6 +177,21 @@ new Vue({
             if (!confirm('确认删除渠道 ' + (name || '#' + id) + '？')) return;
             fetch('/api/channels/' + id, {method: 'DELETE', headers: this._h()})
                 .then(() => this.fetchChannels());
+        },
+        setDefault(id) {
+            fetch('/api/channels/' + id + '/set-default', {method: 'POST', headers: this._h()})
+                .then(() => this.fetchChannels());
+        },
+        startEditInvite(ch) {
+            this.editingInviteId = ch.id;
+            this.editInviteCode = ch.invite_code || '';
+        },
+        saveInviteCode(id) {
+            fetch('/api/channels/' + id + '/invite-code', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({invite_code: this.editInviteCode})
+            }).then(() => { this.editingInviteId = null; this.fetchChannels(); });
         }
     }
 });

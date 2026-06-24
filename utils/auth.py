@@ -8,7 +8,7 @@ from fastapi import Request, HTTPException, status
 
 from utils.key_store import validate_key as db_validate_key, has_active_keys as db_has_active_keys, get_key_id_by_value
 from utils.key_config import validate_static_key, get_static_keys
-from utils.channel_store import resolve_channel_for_key
+from utils.channel_store import resolve_channel_for_key, get_default_channel
 
 
 def get_configured_api_keys() -> list[str]:
@@ -85,10 +85,12 @@ async def validate_api_key(request: Request) -> str:
 
 
 def resolve_upstream_channel(api_key: str) -> Optional[dict]:
-    """根据已验证的 api_key 解析要使用的上游渠道。仅对 DB key 生效。"""
-    if not api_key:
-        return None
-    key_id = get_key_id_by_value(api_key)
-    if key_id is None:
-        return None
-    return resolve_channel_for_key(key_id)
+    """根据已验证的 api_key 解析要使用的上游渠道。
+    优先级：DB key 绑定的渠道 > 默认渠道 > None（回退到 .env）。"""
+    if api_key:
+        key_id = get_key_id_by_value(api_key)
+        if key_id is not None:
+            ch = resolve_channel_for_key(key_id)
+            if ch:
+                return ch
+    return get_default_channel()

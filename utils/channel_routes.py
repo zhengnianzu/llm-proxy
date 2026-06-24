@@ -11,7 +11,8 @@ from fastapi.templating import Jinja2Templates
 
 from utils.channel_store import (
     add_channel, list_channels, toggle_channel_alive, delete_channel,
-    set_key_channels, get_key_channels,
+    set_key_channels, get_key_channels, set_default_channel,
+    update_channel_invite_code,
 )
 from utils.key_config import load_key_state
 
@@ -60,9 +61,10 @@ def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
         name = body.get("name", "").strip()
         upstream_url = body.get("upstream_url", "").strip()
         upstream_key = body.get("upstream_key", "").strip()
+        invite_code = body.get("invite_code", "").strip()
         if not upstream_url or not upstream_key:
             return JSONResponse({"detail": "upstream_url and upstream_key are required"}, status_code=400)
-        result = add_channel(name, upstream_url, upstream_key)
+        result = add_channel(name, upstream_url, upstream_key, invite_code=invite_code)
         return JSONResponse(result)
 
     @app.post("/api/channels/{channel_id}/toggle")
@@ -80,6 +82,22 @@ def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
         if denied:
             return denied
         return JSONResponse({"success": delete_channel(channel_id)})
+
+    @app.post("/api/channels/{channel_id}/set-default")
+    def api_channels_set_default(request: Request, channel_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        return JSONResponse({"success": set_default_channel(channel_id)})
+
+    @app.post("/api/channels/{channel_id}/invite-code")
+    async def api_channels_update_invite_code(request: Request, channel_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        invite_code = body.get("invite_code", "").strip()
+        return JSONResponse({"success": update_channel_invite_code(channel_id, invite_code)})
 
     @app.get("/api/keys/{key_id}/channels")
     def api_key_channels(request: Request, key_id: int):

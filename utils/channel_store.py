@@ -32,6 +32,8 @@ def init_db(db_dir: str = "data"):
                 upstream_url TEXT NOT NULL,
                 upstream_key TEXT NOT NULL,
                 alive INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                invite_code TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             )
         """)
@@ -43,6 +45,46 @@ def init_db(db_dir: str = "data"):
             )
         """)
         _conn.commit()
+        _migrate_add_is_default()
+        _migrate_add_invite_code()
+        _auto_import_env_channel()
+
+
+def _migrate_add_is_default():
+    """已有数据库可能缺少 is_default 列，补上。"""
+    conn = _conn
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
+    if "is_default" not in cols:
+        conn.execute("ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+
+
+def _migrate_add_invite_code():
+    conn = _conn
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
+    if "invite_code" not in cols:
+        conn.execute("ALTER TABLE channels ADD COLUMN invite_code TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+
+def _auto_import_env_channel():
+    """启动时检查 .env 的 UPSTREAM_URL + UPSTREAM_API_KEY，如果该 key 不存在于渠道表则自动导入为默认渠道。"""
+    conn = _conn
+    url = os.getenv("UPSTREAM_URL", "").strip()
+    key = os.getenv("UPSTREAM_API_KEY", "").strip()
+    if not url or not key:
+        return
+    existing = conn.execute(
+        "SELECT id FROM channels WHERE upstream_key = ?", (key,)
+    ).fetchone()
+    if existing:
+        return
+    has_default = conn.execute("SELECT 1 FROM channels WHERE is_default = 1").fetchone()
+    conn.execute(
+        "INSERT INTO channels (name, upstream_url, upstream_key, is_default) VALUES (?, ?, ?, ?)",
+        ("env-default", url, key, 0 if has_default else 1),
+    )
+    conn.commit()
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -61,12 +103,12 @@ def key_suffix(key: str) -> str:
     return key[-4:] if len(key) >= 4 else key
 
 
-def add_channel(name: str, upstream_url: str, upstream_key: str) -> dict:
+def add_channel(name: str, upstream_url: str, upstream_key: str, invite_code: str = "") -> dict:
     conn = _get_conn()
     with _lock:
         cur = conn.execute(
-            "INSERT INTO channels (name, upstream_url, upstream_key) VALUES (?, ?, ?)",
-            (name, upstream_url, upstream_key),
+            "INSERT INTO channels (name, upstream_url, upstream_key, invite_code) VALUES (?, ?, ?, ?)",
+            (name, upstream_url, upstream_key, invite_code),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM channels WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -79,7 +121,7 @@ def add_channel(name: str, upstream_url: str, upstream_key: str) -> dict:
 def list_channels() -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT id, name, upstream_url, upstream_key, alive, created_at FROM channels ORDER BY id"
+        "SELECT id, name, upstream_url, upstream_key, alive, is_default, invite_code, created_at FROM channels ORDER BY id"
     ).fetchall()
     result = []
     for r in rows:
@@ -111,6 +153,35 @@ def delete_channel(channel_id: int) -> bool:
     with _lock:
         conn.execute("DELETE FROM key_channel_bindings WHERE channel_id = ?", (channel_id,))
         cur = conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def update_channel_invite_code(channel_id: int, invite_code: str) -> bool:
+    conn = _get_conn()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE channels SET invite_code = ? WHERE id = ?", (invite_code, channel_id)
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def get_default_channel() -> Optional[dict]:
+    """返回默认渠道（含完整 upstream_key），无默认则返回 None。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, upstream_url, upstream_key FROM channels WHERE is_default = 1 AND alive = 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_default_channel(channel_id: int) -> bool:
+    """设置某个渠道为默认（清除旧默认）。"""
+    conn = _get_conn()
+    with _lock:
+        conn.execute("UPDATE channels SET is_default = 0 WHERE is_default = 1")
+        cur = conn.execute("UPDATE channels SET is_default = 1 WHERE id = ?", (channel_id,))
         conn.commit()
     return cur.rowcount > 0
 
@@ -179,3 +250,38 @@ def get_channels_for_key_display(key_id: int) -> list[str]:
         (key_id,),
     ).fetchall()
     return [key_suffix(r["upstream_key"]) for r in rows]
+
+
+# ---- Invite Code 相关 ----
+
+def get_channel_ids_by_invite_code(code: str) -> list[int]:
+    """查找所有 alive 且 invite_code 包含指定 code 的渠道 ID（invite_code 逗号分隔多值）。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, invite_code FROM channels WHERE invite_code != '' AND alive = 1"
+    ).fetchall()
+    return [r["id"] for r in rows if code in [c.strip() for c in r["invite_code"].split(",")]]
+
+
+def get_default_channel_id() -> Optional[int]:
+    """返回默认渠道 ID，无默认则返回 None。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id FROM channels WHERE is_default = 1"
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def get_all_channel_invite_codes() -> list[str]:
+    """返回渠道表中所有非空去重 invite_code（支持逗号分隔多值）。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT invite_code FROM channels WHERE invite_code != ''"
+    ).fetchall()
+    codes = set()
+    for r in rows:
+        for c in r["invite_code"].split(","):
+            c = c.strip()
+            if c:
+                codes.add(c)
+    return list(codes)
