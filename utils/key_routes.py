@@ -68,8 +68,8 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
     def keys_page(request: Request):
         state = load_key_state()
         if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse("keys_login.html", {"request": request})
-        return templates.TemplateResponse("keys.html", {"request": request})
+            return templates.TemplateResponse(request, "keys_login.html")
+        return templates.TemplateResponse(request, "keys.html")
 
     @app.get("/api/keys")
     def api_keys_list(request: Request):
@@ -148,7 +148,7 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         channel_codes = get_all_channel_invite_codes()
         if not yaml_codes and not channel_codes:
             return JSONResponse({"detail": "Invite feature is disabled"}, status_code=404)
-        return templates.TemplateResponse("invite.html", {"request": request})
+        return templates.TemplateResponse(request, "invite.html")
 
     @app.post("/api/invite")
     async def api_invite(request: Request):

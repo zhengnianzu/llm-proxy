@@ -129,14 +129,14 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
     def export_page(request: Request):
         state = load_key_state()
         if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse("keys_login.html", {"request": request})
+            return templates.TemplateResponse(request, "keys_login.html")
         return FileResponse(path="templates/export.html")
 
     @app.get("/keys/export/report/{record_id}")
     def export_report_page(request: Request, record_id: int):
         state = load_key_state()
         if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse("keys_login.html", {"request": request})
+            return templates.TemplateResponse(request, "keys_login.html")
         return FileResponse(path="templates/export_report.html")
 
     @app.get("/api/export/config")

@@ -42,8 +42,8 @@ def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
     def channels_page(request: Request):
         state = load_key_state()
         if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse("keys_login.html", {"request": request})
-        return templates.TemplateResponse("channels.html", {"request": request})
+            return templates.TemplateResponse(request, "keys_login.html")
+        return templates.TemplateResponse(request, "channels.html")
 
     @app.get("/api/channels")
     def api_channels_list(request: Request):

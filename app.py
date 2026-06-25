@@ -354,9 +354,9 @@ async def monitor_login_page(request: Request, next: str = "/"):
     if _is_monitor_authenticated(request):
         return RedirectResponse(url=_normalize_next_path(next), status_code=303)
     return templates.TemplateResponse(
+        request,
         "login.html",
-        {
-            "request": request,
+        context={
             "next_path": _normalize_next_path(next),
             "error": "",
         },
@@ -382,9 +382,9 @@ async def monitor_login_submit(request: Request):
         return RedirectResponse(url=next_path, status_code=303)
 
     return templates.TemplateResponse(
+        request,
         "login.html",
-        {
-            "request": request,
+        context={
             "next_path": next_path,
             "error": "用户名或密码错误",
         },
@@ -1438,10 +1438,8 @@ async def query_page():
 @app.get("/history")
 async def chat_viewer(request: Request):
     return templates.TemplateResponse(
+        request,
         "chat-viewer.html",
-        {
-            "request": request,
-        },
     )
 
 
