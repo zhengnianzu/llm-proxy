@@ -196,7 +196,7 @@ def _is_monitor_auth_enabled() -> bool:
     explicit = os.getenv("MONITOR_AUTH_ENABLED")
     if explicit is not None:
         return _env_enabled("MONITOR_AUTH_ENABLED")
-    return True
+    return bool(os.getenv("MONITOR_USERNAME", "").strip())
 
 
 def _is_monitor_login_valid(username: str, password: str) -> tuple[bool, str, str]:
@@ -424,12 +424,6 @@ async def monitor_login_page(request: Request, next: str = "/", add: str = ""):
         return RedirectResponse(url="/", status_code=303)
     if _is_monitor_authenticated(request) and not add:
         return RedirectResponse(url=_normalize_next_path(next), status_code=303)
-    env_user = os.getenv("MONITOR_USERNAME", "").strip()
-    env_pass = os.getenv("MONITOR_PASSWORD", "").strip()
-    if not env_user or not env_pass:
-        from utils.user_store import has_users
-        if not has_users():
-            return RedirectResponse(url="/register?next=" + _normalize_next_path(next), status_code=303)
     registered = request.query_params.get("registered")
     return templates.TemplateResponse(
         request,
@@ -511,21 +505,24 @@ async def list_accounts(request: Request):
 
 @app.get("/register")
 async def register_page(request: Request):
+    if not _is_monitor_auth_enabled():
+        return RedirectResponse(url="/", status_code=303)
     from utils.user_store import has_users
-    env_has_creds = bool(os.getenv("MONITOR_USERNAME", "").strip() and os.getenv("MONITOR_PASSWORD", "").strip())
-    is_first = not has_users() and not env_has_creds
-    if not is_first and not _is_monitor_authenticated(request):
+    no_db_users = not has_users()
+    if not no_db_users and not _is_monitor_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
     return templates.TemplateResponse(
         request,
         "register.html",
-        context={"error": "", "is_first_user": is_first},
+        context={"error": "", "is_first_user": False},
         headers={"Cache-Control": "no-store"},
     )
 
 
 @app.post("/register")
 async def register_submit(request: Request):
+    if not _is_monitor_auth_enabled():
+        return RedirectResponse(url="/", status_code=303)
     body_bytes = await request.body()
     form = parse_qs(body_bytes.decode("utf-8"), keep_blank_values=True)
     username = (form.get("username", [""])[0]).strip()
@@ -533,16 +530,15 @@ async def register_submit(request: Request):
     password2 = form.get("password2", [""])[0]
 
     from utils.user_store import has_users
-    env_has_creds = bool(os.getenv("MONITOR_USERNAME", "").strip() and os.getenv("MONITOR_PASSWORD", "").strip())
-    is_first = not has_users() and not env_has_creds
+    no_db_users = not has_users()
 
-    if not is_first and not _is_monitor_authenticated(request):
+    if not no_db_users and not _is_monitor_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
 
     def _render_error(msg, code=400):
         return templates.TemplateResponse(
             request, "register.html",
-            context={"error": msg, "is_first_user": is_first},
+            context={"error": msg, "is_first_user": False},
             status_code=code, headers={"Cache-Control": "no-store"},
         )
 
@@ -558,7 +554,7 @@ async def register_submit(request: Request):
     if len(password) < 6:
         return _render_error("密码长度至少 6 个字符")
 
-    role = "admin" if is_first else "user"
+    role = "user"
     user = create_user(username, password, role=role)
     if user is None:
         return _render_error("该用户名已被注册", 409)
