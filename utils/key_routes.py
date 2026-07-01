@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from utils.key_store import add_key, list_keys, disable_key, enable_key, delete_key, mask_key
+from utils.key_store import add_key, list_keys, disable_key, enable_key, delete_key, mask_key, get_key_full
 from utils.auth import get_configured_api_keys, get_auth_status
 from utils.key_config import load_key_state
 from utils.channel_store import get_channels_for_key_display, set_key_channels, get_channel_ids_by_invite_code, get_default_channel_id, get_all_channel_invite_codes
@@ -81,6 +81,16 @@ def register_key_routes(app: FastAPI, templates: Jinja2Templates):
         if denied:
             return denied
         return JSONResponse({"success": delete_key(key_id)})
+
+    @app.get("/api/keys/{key_id}/reveal")
+    def api_keys_reveal(request: Request, key_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        row = get_key_full(key_id)
+        if not row:
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        return JSONResponse({"key": row["key"]})
 
     @app.post("/api/keys/auth-toggle")
     async def api_keys_auth_toggle(request: Request):

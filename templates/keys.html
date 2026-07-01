@@ -72,7 +72,13 @@
                 <tr v-for="k in filteredKeys" :key="k.id">
                     <td>{{ k.id }}</td>
                     <td>{{ k.name || '-' }}</td>
-                    <td><span class="code-inline">{{ k.key }}</span></td>
+                    <td>
+                        <span class="code-inline">{{ k._revealedKey || k.key }}</span>
+                        <button class="btn btn-ghost btn-sm" style="padding:1px 4px;font-size:.8rem;vertical-align:middle;margin-left:4px" @click="revealKey(k)" :title="k._revealedKey ? '隐藏' : '显示完整 Key'">
+                            <svg v-if="!k._revealedKey" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                        </button>
+                    </td>
                     <td>
                         <span :class="k.status === 'active' ? 'badge badge-success' : 'badge badge-danger'">
                             {{ k.status === 'active' ? '启用' : '停用' }}
@@ -250,6 +256,15 @@ new Vue({
                 headers: this._h({'Content-Type': 'application/json'}),
                 body: JSON.stringify({channel_ids: this.selectedChannelIds})
             }).then(() => { this.editingKeyId = null; this.fetchKeys(); });
+        },
+        revealKey(k) {
+            if (k._revealedKey) {
+                this.$set(k, '_revealedKey', '');
+                return;
+            }
+            fetch('/api/keys/' + k.id + '/reveal', {headers: this._h()})
+                .then(r => r.json())
+                .then(d => { if (d.key) this.$set(k, '_revealedKey', d.key); });
         }
     }
 });
