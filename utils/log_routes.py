@@ -538,13 +538,16 @@ def register_log_routes(app: FastAPI) -> None:
     @app.get("/logs/dirs")
     def logs_dirs():
         """列出 env-key 目录下所有时间戳子目录，当前目录排在第一个。"""
+        from utils.stats_index import refresh_index, get_dir_counts
         current_tag = Path(_current_log_dir).name
         dirs = []
         env_path = Path(_env_dir)
         if env_path.is_dir():
+            index = refresh_index(env_path)
+            counts = get_dir_counts(index)
             for sub in sorted(env_path.iterdir(), reverse=True):
                 if sub.is_dir():
-                    count = sum(1 for f in sub.iterdir() if f.name.endswith("-req.json"))
+                    count = counts.get(sub.name, 0)
                     dirs.append({
                         "name": sub.name,
                         "current": sub.name == current_tag,

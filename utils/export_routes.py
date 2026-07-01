@@ -30,7 +30,7 @@ from utils.key_config import load_key_state
 from utils.key_store import list_keys, mask_key
 from utils.log_paths import get_service_log_dir
 from utils.obs_utils import load_obs_base, obsutil_ls
-from utils.session_routes import _build_stats_json, _load_sessions
+from utils.stats_index import refresh_index, build_stats_from_index, get_date_to_mtime_map
 
 logger = logging.getLogger(__name__)
 
@@ -64,45 +64,6 @@ def _require_key_api(request: Request):
     if request.headers.get("x-requested-with") != "XMLHttpRequest":
         return JSONResponse({"detail": "Not found"}, status_code=404)
     return None
-
-
-def _date_to_mtime_map(env_dir: Path) -> dict:
-    """建立 session 日期 (2026-06-01) 到 mtime 目录名 (26060115) 的映射。
-
-    一个日期可能跨多个 mtime 目录（如 26060100 和 26060115 都包含 2026-06-01 的请求）。
-    返回 {date_str: [mtime_dir_name, ...]}
-    """
-    mapping = {}
-    for sub in sorted(env_dir.iterdir()):
-        if not sub.is_dir():
-            continue
-        cache_file = sub / ".session_cache.jsonl"
-        if not cache_file.is_file():
-            continue
-        dates_in_dir = set()
-        try:
-            with open(cache_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if obj.get("_meta"):
-                        continue
-                    ts = obj.get("first_ts", "")
-                    if ts:
-                        date_str = ts.split("_")[0]
-                        dates_in_dir.add(date_str)
-        except OSError:
-            continue
-        for d in dates_in_dir:
-            mapping.setdefault(d, [])
-            if sub.name not in mapping[d]:
-                mapping[d].append(sub.name)
-    return mapping
 
 
 def _key_slot(api_key: str) -> str:
@@ -155,7 +116,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if not env_dir.is_dir():
             return JSONResponse({"keys": [], "mtimes": []})
 
-        stats = _build_stats_json(env_dir, threshold)
+        index = refresh_index(env_dir, threshold)
+        stats = build_stats_from_index(index, threshold)
 
         db_keys = {}
         db_key_created = {}
