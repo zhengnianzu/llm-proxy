@@ -1,66 +1,43 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>质检报告</title>
-    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+{% extends "_layout.html" %}
+{% set active_page = 'export' %}
+
+{% block title %}质检报告{% endblock %}
+{% block mobile_title %}质检报告{% endblock %}
+
+{% block head_extra %}
     <script src="/static/js/vue.min.js"></script>
-    <style>
-        body { background: #f4f6fb; color: #1f2937; }
-        .page-shell { max-width: 1200px; margin: 0 auto; padding: 24px 16px 40px; }
-        .topbar {
-            background: linear-gradient(135deg, #0f172a, #1d4ed8);
-            color: #fff; padding: 10px 20px; border-radius: 10px; margin-bottom: 16px;
-            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
-        }
-        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
-        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
-        .nav-pill {
-            display: inline-flex; align-items: center; justify-content: center;
-            padding: 6px 12px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
-            border: 1px solid rgba(255,255,255,.14);
-        }
-        .nav-pill.active { background: #fff; color: #0f172a; }
-        .report-card {
-            background: #fff; border-radius: 14px; padding: 28px 32px;
-            box-shadow: 0 8px 24px rgba(15,23,42,.06);
-        }
-        @media (max-width: 768px) { .report-card { padding: 16px; } }
+{% endblock %}
+
+{% block page_styles %}
+        .report-shell { max-width: 1200px; margin: 0 auto; padding: 8px 0 40px; }
 
         /* Markdown 渲染 (legacy fallback) */
-        .md-rendered { font-size: .92rem; line-height: 1.7; color: #1f2937; }
-        .md-rendered h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 12px; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }
-        .md-rendered h2 { font-size: 1.15rem; font-weight: 700; margin: 24px 0 8px; color: #1e40af; }
-        .md-rendered h3 { font-size: 1rem; font-weight: 600; margin: 16px 0 6px; color: #334155; }
-        .md-rendered blockquote { background: #f0f9ff; border-left: 3px solid #3b82f6; padding: 10px 16px; margin: 8px 0; font-size: .88rem; color: #475569; border-radius: 0 6px 6px 0; }
+        .md-rendered { font-size: .92rem; line-height: 1.7; color: var(--foreground); }
+        .md-rendered h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 12px; color: var(--foreground); border-bottom: 2px solid var(--border); padding-bottom: 8px; }
+        .md-rendered h2 { font-size: 1.15rem; font-weight: 700; margin: 24px 0 8px; color: var(--primary); }
+        .md-rendered h3 { font-size: 1rem; font-weight: 600; margin: 16px 0 6px; color: var(--foreground); }
+        .md-rendered blockquote { background: var(--accent); border-left: 3px solid var(--primary); padding: 10px 16px; margin: 8px 0; font-size: .88rem; color: var(--muted-foreground); border-radius: 0 var(--radius) var(--radius) 0; }
         .md-rendered table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: .85rem; }
-        .md-rendered th { background: #f1f5f9; font-weight: 600; text-align: left; padding: 8px 10px; border: 1px solid #e2e8f0; white-space: nowrap; position: sticky; top: 0; }
-        .md-rendered td { padding: 6px 10px; border: 1px solid #e2e8f0; vertical-align: top; }
-        .md-rendered tr:nth-child(even) { background: #f8fafc; }
-        .md-rendered tr:hover { background: #eff6ff; }
+        .md-rendered th { background: var(--muted); font-weight: 600; text-align: left; padding: 8px 10px; border: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; }
+        .md-rendered td { padding: 6px 10px; border: 1px solid var(--border); vertical-align: top; }
+        .md-rendered tr:nth-child(even) { background: var(--secondary); }
+        .md-rendered tr:hover { background: var(--accent); }
         .md-rendered p { margin: 6px 0; }
-    </style>
-</head>
-<body>
-<div id="app" class="page-shell">
-    <div class="topbar">
-        <h1 class="brand-title">质检报告</h1>
-        <div class="nav-pills-wrap">
-            <a class="nav-pill" href="/keys/export">返回导出</a>
-            <a class="nav-pill" href="/keys">Key 管理</a>
-            <a class="nav-pill" href="/">监控总览</a>
-        </div>
-    </div>
+{% endblock %}
 
-    <div class="report-card">
-        <div v-if="loading" class="text-center text-muted py-5">加载中…</div>
-        <div v-else-if="error" class="text-center text-danger py-5">{{ error }}</div>
+{% block content %}
+{% raw %}
+<div id="app" class="report-shell">
+    <div class="card">
+        <div v-if="loading" class="text-center text-muted" style="padding:40px 0;">加载中…</div>
+        <div v-else-if="error" class="text-center text-danger" style="padding:40px 0;">{{ error }}</div>
         <div v-else class="md-rendered" v-html="html"></div>
     </div>
 </div>
+{% endraw %}
+{% endblock %}
 
+{% block scripts %}
 <script>
 new Vue({
     el: '#app',
@@ -165,5 +142,4 @@ new Vue({
     }
 });
 </script>
-</body>
-</html>
+{% endblock %}

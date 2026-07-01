@@ -544,9 +544,11 @@ def register_log_routes(app: FastAPI) -> None:
         if env_path.is_dir():
             for sub in sorted(env_path.iterdir(), reverse=True):
                 if sub.is_dir():
+                    count = sum(1 for f in sub.iterdir() if f.name.endswith("-req.json"))
                     dirs.append({
                         "name": sub.name,
                         "current": sub.name == current_tag,
+                        "count": count,
                     })
         return JSONResponse({"dirs": dirs, "current": current_tag})
 

@@ -1,116 +1,81 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>服务代理监控系统</title>
-    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+{% extends "_layout.html" %}
+
+{% block title %}服务代理监控系统{% endblock %}
+{% block mobile_title %}监控总览{% endblock %}
+
+{% block head_extra %}
     <script src="/static/js/vue.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <style>
-        body { background: #f4f6fb; color: #1f2937; }
-        .page-shell { max-width: 1400px; margin: 0 auto; padding: 24px 16px 40px; }
-        .topbar {
-            background: linear-gradient(135deg, #0f172a, #1d4ed8);
-            color: #fff; padding: 10px 20px; border-radius: 10px; margin-bottom: 16px;
-            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
-        }
-        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
-        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
-        .nav-pill {
-            display: inline-flex; align-items: center; justify-content: center;
-            padding: 6px 12px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
-            border: 1px solid rgba(255,255,255,.14);
-        }
-        .nav-pill.active { background: #fff; color: #0f172a; }
-        .dashboard { background: #111827; color: #fff; border-radius: 14px; padding: 18px 16px; margin-bottom: 20px; }
-        .dashboard h5 { color: #93c5fd; font-size: .85rem; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .05em; }
-        .dash-val { font-size: 1.75rem; font-weight: 700; line-height: 1; }
-        .dash-sub { font-size: .75rem; color: #94a3b8; margin-top: 3px; }
-        .dash-divider { border-left: 1px solid #273449; }
-        .dash-status-good { color: #4ade80; }
-        .dash-status-warn { color: #fbbf24; }
-        .dash-status-danger { color: #f87171; }
+{% endblock %}
+
+{% block page_styles %}
+        .main-content { display: flex; flex-direction: column; justify-content: center; min-height: 100vh; }
+        .dashboard-panel h5 { color: var(--primary); font-size: .85rem; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .05em; }
+        .dash-divider { border-left: 1px solid var(--border); }
         .blink { animation: blink 1.5s infinite; }
         @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
-        .panel { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15, 23, 42, .06); }
         .chart-wrap { position: relative; height: 220px; }
-        .chart-title { font-size: .84rem; color: #6b7280; text-align: center; margin-top: 8px; }
-        .control-label { font-size: .84rem; color: #6b7280; margin-bottom: 0; }
-        .model-pill {
-            cursor: pointer; border-radius: 999px; padding: 5px 14px; font-size: .82rem;
-            border: 1px solid #dbe3f0; background: #fff; transition: .15s; user-select: none;
-        }
-        .model-pill.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
-        .model-pill:hover:not(.active) { background: #eff6ff; border-color: #93c5fd; }
+        .chart-title { font-size: .84rem; color: var(--muted-foreground); text-align: center; margin-top: 8px; }
+        .control-label { font-size: .84rem; color: var(--muted-foreground); margin-bottom: 0; }
+        .text-good { color: var(--success); }
+        .text-warn { color: var(--warning); }
+        .text-danger { color: var(--destructive); }
         @media (max-width: 768px) {
-            .brand-title { font-size: 1.5rem; }
-            .dash-divider { border-left: none; border-top: 1px solid #273449; }
+            .dash-divider { border-left: none; border-top: 1px solid var(--border); }
+            .main-content { min-height: auto; }
         }
-    </style>
-</head>
-<body>
-<div id="app" class="page-shell">
-    <div class="topbar">
-        <h1 class="brand-title">服务代理监控系统</h1>
-        <div class="nav-pills-wrap">
-            <a class="nav-pill active" href="/">监控总览</a>
-            <a class="nav-pill" href="/query">查询统计</a>
-            <a class="nav-pill" href="/sessions">Session 统计</a>
-            <a class="nav-pill" href="/history">对话历史记录</a>
-            <a class="nav-pill" href="/failures">失败历史记录</a>
-            <a class="nav-pill" href="/logout">退出登录</a>
-        </div>
-    </div>
+{% endblock %}
 
-    <div class="dashboard">
-        <div class="row g-3 text-center">
-            <div class="col-md-2 col-6">
+{% block content %}
+{% raw %}
+<div id="app">
+    <div class="dashboard-panel">
+        <div class="grid grid-6 text-center">
+            <div>
                 <h5>首次请求</h5>
-                <div class="dash-val">{{ indexStats.first_count }}</div>
-                <div class="dash-sub">累计</div>
+                <div class="stat-value">{{ indexStats.first_count }}</div>
+                <div class="stat-sub">累计</div>
             </div>
-            <div class="col-md-2 col-6 dash-divider">
+            <div class="dash-divider">
                 <h5>有效请求</h5>
-                <div class="dash-val">{{ indexStats.valid_count }}</div>
-                <div class="dash-sub">累计</div>
+                <div class="stat-value">{{ indexStats.valid_count }}</div>
+                <div class="stat-sub">累计</div>
             </div>
-            <div class="col-md-2 col-6 dash-divider">
+            <div class="dash-divider">
                 <h5>重试次数</h5>
-                <div class="dash-val">{{ totalRetries }}</div>
-                <div class="dash-sub">总上游 {{ indexStats.total_count }}</div>
+                <div class="stat-value">{{ totalRetries }}</div>
+                <div class="stat-sub">总上游 {{ indexStats.total_count }}</div>
             </div>
-            <div class="col-md-2 col-6 dash-divider">
+            <div class="dash-divider">
                 <h5>当前 RPM</h5>
-                <div class="dash-val">{{ latestRpm }}</div>
-                <div class="dash-sub">本分钟请求数</div>
+                <div class="stat-value">{{ latestRpm }}</div>
+                <div class="stat-sub">本分钟请求数</div>
             </div>
-            <div class="col-md-2 col-6 dash-divider">
+            <div class="dash-divider">
                 <h5>TPM 输入</h5>
-                <div class="dash-val">{{ latestTpmIn }}</div>
-                <div class="dash-sub">本分钟 tokens</div>
+                <div class="stat-value">{{ latestTpmIn }}</div>
+                <div class="stat-sub">本分钟 tokens</div>
             </div>
-            <div class="col-md-2 col-6 dash-divider">
+            <div class="dash-divider">
                 <h5>有效率</h5>
-                <div class="dash-val" :class="'dash-status-' + rateLevel">{{ successRatePct }}%</div>
-                <div class="dash-sub">
-                    <span class="blink" :class="'dash-status-' + rateLevel">●</span>
+                <div class="stat-value" :class="'text-' + rateLevel">{{ successRatePct }}%</div>
+                <div class="stat-sub">
+                    <span class="blink" :class="'text-' + rateLevel">●</span>
                     {{ rateLevel === 'good' ? '正常' : rateLevel === 'warn' ? '偏低' : '异常' }}
                 </div>
             </div>
         </div>
     </div>
 
-    <div class="panel">
-        <div class="d-flex align-items-center justify-content-between gap-3 mb-3 flex-wrap">
+    <div class="card">
+        <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
             <div>
-                <div class="fw-semibold">实时监控</div>
-                <div class="text-muted small">RPM 随时间流式刷新，默认展示最近 2 小时</div>
+                <div class="font-semibold">实时监控</div>
+                <div class="text-muted text-sm">RPM 随时间流式刷新，默认展示最近 2 小时</div>
             </div>
-            <div class="d-flex align-items-center gap-2 flex-wrap">
+            <div class="flex items-center gap-3 flex-wrap">
                 <label class="control-label">时间范围</label>
-                <select class="form-select form-select-sm" style="width:auto" v-model.number="selectedHours" @change="fetchRealtime">
+                <select class="input input-sm" style="width:auto" v-model.number="selectedHours" @change="fetchRealtime">
                     <option :value="1">最近 1 小时</option>
                     <option :value="2">最近 2 小时</option>
                     <option :value="4">最近 4 小时</option>
@@ -118,36 +83,39 @@
                     <option :value="12">最近 12 小时</option>
                     <option :value="24">最近 24 小时</option>
                 </select>
-                <label class="control-label ms-2">模型</label>
-                <div class="d-flex gap-2 flex-wrap">
-                    <span class="model-pill" :class="{ active: selectedModel === '__all__' }" @click="setModel('__all__')">全部</span>
-                    <span v-for="m in modelList" :key="m" class="model-pill" :class="{ active: selectedModel === m }" @click="setModel(m)">
+                <label class="control-label" style="margin-left: 8px">模型</label>
+                <div class="flex gap-3 flex-wrap">
+                    <span class="pill" :class="{ active: selectedModel === '__all__' }" @click="setModel('__all__')">全部</span>
+                    <span v-for="m in modelList" :key="m" class="pill" :class="{ active: selectedModel === m }" @click="setModel(m)">
                         {{ m }}
                     </span>
                 </div>
-                <button class="btn btn-outline-secondary btn-sm ms-2" @click="toggleAutoRefresh">
+                <button class="btn btn-outline btn-sm" style="margin-left: 8px" @click="toggleAutoRefresh">
                     {{ autoRefresh ? '暂停刷新' : '恢复刷新' }}
                 </button>
             </div>
         </div>
 
-        <div class="row g-4">
-            <div class="col-lg-4">
+        <div class="grid grid-3">
+            <div>
                 <div class="chart-wrap"><canvas id="chartRpm"></canvas></div>
                 <div class="chart-title">RPM 每分钟请求数</div>
             </div>
-            <div class="col-lg-4">
+            <div>
                 <div class="chart-wrap"><canvas id="chartTpm"></canvas></div>
                 <div class="chart-title">TPM 输入 / 输出</div>
             </div>
-            <div class="col-lg-4">
+            <div>
                 <div class="chart-wrap"><canvas id="chartRate"></canvas></div>
                 <div class="chart-title">有效率趋势</div>
             </div>
         </div>
     </div>
 </div>
+{% endraw %}
+{% endblock %}
 
+{% block scripts %}
 <script>
 const app = new Vue({
     el: '#app',
@@ -297,5 +265,4 @@ const app = new Vue({
     }
 });
 </script>
-</body>
-</html>
+{% endblock %}

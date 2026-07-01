@@ -1,107 +1,127 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>服务代理监控系统 - 失败历史记录</title>
-    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+{% extends "_layout.html" %}
+
+{% block title %}服务代理监控系统 - 失败历史记录{% endblock %}
+{% block mobile_title %}失败记录{% endblock %}
+
+{% block head_extra %}
     <script src="/static/js/vue.min.js"></script>
-    <style>
-        body { background: #f4f6fb; color: #1f2937; }
-        .page-shell { max-width: 1500px; margin: 0 auto; padding: 24px 16px 40px; }
-        .topbar {
-            background: linear-gradient(135deg, #0f172a, #1d4ed8);
-            color: #fff; padding: 10px 20px; border-radius: 10px;
-            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+{% endblock %}
+
+{% block page_styles %}
+        .log-list {
+            max-height: 70vh;
+            overflow: auto;
+            border-right: 1px solid var(--border);
         }
-        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
-        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
-        .nav-pill {
-            display: inline-flex; align-items: center; justify-content: center;
-            padding: 6px 12px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
-            border: 1px solid rgba(255,255,255,.14);
+        .log-item {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
         }
-        .nav-pill.active { background: #fff; color: #0f172a; }
-        .panel { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15, 23, 42, .06); }
-        .log-list { max-height: 70vh; overflow: auto; border-right: 1px solid #e5e7eb; }
-        .log-item { padding: 12px 14px; border-bottom: 1px solid #eef2f7; cursor: pointer; }
-        .log-item:hover { background: #f8fafc; }
-        .log-item.active { background: #eff6ff; border-left: 3px solid #2563eb; }
-        .log-meta { color: #6b7280; font-size: .82rem; margin-top: 4px; }
-        .log-content {
-            background: #0f172a; color: #dbeafe; border-radius: 12px; padding: 16px;
-            min-height: 70vh; white-space: pre-wrap; word-break: break-word; overflow: auto;
-            font-family: Consolas, Monaco, monospace; font-size: 13px; line-height: 1.6;
+        .log-item:hover {
+            background: var(--muted);
+        }
+        .log-item.active {
+            background: var(--accent);
+            border-left: 3px solid var(--primary);
+        }
+        .log-meta {
+            color: var(--muted-foreground);
+            font-size: .82rem;
+            margin-top: 4px;
+        }
+        .log-env {
+            color: var(--primary);
+            font-weight: 600;
         }
         .empty-box {
-            display: flex; align-items: center; justify-content: center; min-height: 70vh;
-            border: 1px dashed #cbd5e1; border-radius: 12px; color: #64748b; background: #f8fafc;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 70vh;
+            border: 1px dashed var(--border);
+            border-radius: var(--radius-lg);
+            color: var(--muted-foreground);
+            background: var(--muted);
         }
-    </style>
-</head>
-<body>
-<div id="app" class="page-shell">
-    <div class="topbar">
-        <h1 class="brand-title">服务代理监控系统</h1>
-        <div class="nav-pills-wrap">
-            <a class="nav-pill" href="/">监控总览</a>
-            <a class="nav-pill" href="/query">查询统计</a>
-            <a class="nav-pill" href="/sessions">Session 统计</a>
-            <a class="nav-pill" href="/history">对话历史记录</a>
-            <a class="nav-pill active" href="/failures">失败历史记录</a>
-            <a class="nav-pill" href="/logout">退出登录</a>
-        </div>
-    </div>
+        .failures-split {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 0;
+        }
+        .failures-detail {
+            padding-left: 12px;
+        }
+        @media (max-width: 991px) {
+            .failures-split {
+                grid-template-columns: 1fr;
+            }
+            .log-list {
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+                max-height: 40vh;
+            }
+            .failures-detail {
+                padding-left: 0;
+                padding-top: 12px;
+            }
+        }
+{% endblock %}
 
-    <div class="panel mb-3">
-        <div class="row g-3 align-items-end">
-            <div class="col-md-3">
-                <label class="form-label small">环境</label>
-                <select class="form-select form-select-sm" v-model="envFilter" @change="loadList">
+{% block content %}
+{% raw %}
+<div id="app">
+    <div class="card mb-3">
+        <div class="grid grid-4 items-end">
+            <div>
+                <label class="text-sm text-muted">环境</label>
+                <select class="input input-sm" v-model="envFilter" @change="loadList">
                     <option value="">全部环境</option>
                     <option v-for="e in envList" :key="e" :value="e">{{ e }}</option>
                 </select>
             </div>
-            <div class="col-md-3">
-                <label class="form-label small">关键字</label>
-                <input class="form-control form-control-sm" v-model="keyword" @keyup.enter="loadList" placeholder="按文件名 / 模型 / reason 过滤">
+            <div>
+                <label class="text-sm text-muted">关键字</label>
+                <input class="input input-sm" v-model="keyword" @keyup.enter="loadList" placeholder="按文件名 / 模型 / reason 过滤">
             </div>
-            <div class="col-md-2">
-                <label class="form-label small">数量</label>
-                <select class="form-select form-select-sm" v-model.number="limit" @change="loadList">
+            <div>
+                <label class="text-sm text-muted">数量</label>
+                <select class="input input-sm" v-model.number="limit" @change="loadList">
                     <option :value="50">50</option>
                     <option :value="100">100</option>
                     <option :value="200">200</option>
                     <option :value="500">500</option>
                 </select>
             </div>
-            <div class="col-md-2">
-                <button class="btn btn-primary btn-sm w-100" @click="loadList">刷新列表</button>
+            <div>
+                <button class="btn btn-primary btn-sm w-full" @click="loadList">刷新列表</button>
             </div>
         </div>
     </div>
 
-    <div class="panel">
-        <div class="row g-0">
-            <div class="col-lg-4 log-list">
+    <div class="card">
+        <div class="failures-split">
+            <div class="log-list">
                 <div v-if="!items.length" class="empty-box" style="min-height:70vh">暂无失败日志</div>
                 <div v-for="item in items" :key="item.filename" class="log-item" :class="{ active: selected && selected.filename === item.filename }" @click="selectItem(item)">
-                    <div class="fw-semibold">{{ item.reason || 'unknown' }}</div>
-                    <div class="log-meta">{{ item.created_at }} · attempt {{ item.attempt || '-' }}</div>
+                    <div class="font-semibold">{{ item.reason || 'unknown' }}</div>
+                    <div class="log-meta">{{ item.created_at }} · <span v-if="item.attempt_count > 1" class="badge badge-warning" style="font-size:.7rem;padding:1px 6px;">{{ item.attempt_count }} 次重试</span><span v-else>attempt {{ item.attempt || '-' }}</span></div>
                     <div class="log-meta">{{ item.model || 'unknown model' }} · {{ item.filename }}</div>
-                    <div v-if="item.env" class="log-meta" style="color:#2563eb;font-weight:600;">{{ item.env }}</div>
+                    <div v-if="item.env" class="log-meta log-env">{{ item.env }}</div>
                     <div class="log-meta">{{ formatSize(item.size) }}</div>
                 </div>
             </div>
-            <div class="col-lg-8 ps-lg-3 pt-3 pt-lg-0">
-                <div v-if="selectedContent" class="log-content">{{ selectedContent }}</div>
+            <div class="failures-detail">
+                <div v-if="selectedContent" class="code-block" style="min-height:70vh">{{ selectedContent }}</div>
                 <div v-else class="empty-box">从左侧选择一条失败记录</div>
             </div>
         </div>
     </div>
 </div>
+{% endraw %}
+{% endblock %}
 
+{% block scripts %}
 <script>
 new Vue({
     el: '#app',
@@ -159,5 +179,4 @@ new Vue({
     }
 });
 </script>
-</body>
-</html>
+{% endblock %}

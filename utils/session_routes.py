@@ -12,8 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from utils.log_paths import get_service_log_dir
 
@@ -152,10 +152,12 @@ def _save_cache(cache_path: str, data: Dict[str, Any]) -> None:
 def register_session_routes(app: FastAPI, logs_dir: str) -> None:
     env_dir = str(Path(logs_dir).parent)
     cache_path = os.path.join(get_service_log_dir(), ".sessions_status.json")
+    from fastapi.templating import Jinja2Templates
+    _templates = Jinja2Templates(directory="templates")
 
     @app.get("/sessions")
-    async def sessions_page():
-        return FileResponse(path="templates/sessions.html")
+    async def sessions_page(request: Request):
+        return _templates.TemplateResponse(request, "sessions.html", context={"active_page": "sessions", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
 
     @app.get("/sessions/stats")
     def sessions_stats(threshold: int = QUALIFIED_THRESHOLD, refresh: bool = False):

@@ -1,84 +1,77 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>监控统计</title>
-    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+{% extends "_layout.html" %}
+
+{% block title %}监控统计{% endblock %}
+{% block mobile_title %}监控统计{% endblock %}
+
+{% block head_extra %}
     <script src="/static/js/vue.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <style>
-        body { background: #f4f6fb; }
-        /* 仪表盘 */
-        .dashboard { background: #1e2a3a; color: #fff; border-radius: 12px; padding: 18px 24px; margin-bottom: 20px; }
-        .dashboard h5 { color: #a8b8d0; font-size: .85rem; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .05em; }
+{% endblock %}
+
+{% block page_styles %}
+        .dashboard-panel h5 { color: var(--panel-dark-accent); font-size: .85rem; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .05em; }
         .dash-val { font-size: 1.75rem; font-weight: 700; line-height: 1; }
-        .dash-sub { font-size: .75rem; color: #7a8fa6; margin-top: 3px; }
-        .dash-divider { border-left: 1px solid #2d3f55; }
-        .dash-status-good   { color: #4ade80; }
-        .dash-status-warn   { color: #fbbf24; }
-        .dash-status-danger { color: #f87171; }
+        .dash-sub { font-size: .75rem; color: var(--panel-dark-muted); margin-top: 3px; }
+        .dash-divider { border-left: 1px solid var(--panel-dark-border); }
+        .dash-status-good   { color: var(--success); }
+        .dash-status-warn   { color: var(--warning); }
+        .dash-status-danger { color: var(--destructive); }
         .blink { animation: blink 1.5s infinite; }
         @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-        /* 实时监控区 */
-        .rt-card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
         .chart-wrap { position: relative; height: 170px; }
-        .chart-title { font-size: .8rem; color: #6c757d; text-align: center; margin-top: 6px; }
-        /* 模型选择器 */
-        .model-pill { cursor: pointer; border-radius: 20px; padding: 4px 14px; font-size: .82rem; border: 1.5px solid #dee2e6; background: #fff; transition: .15s; user-select: none; }
-        .model-pill.active { background: #0d6efd; color: #fff; border-color: #0d6efd; }
-        .model-pill:hover:not(.active) { background: #e9f0ff; border-color: #0d6efd; color: #0d6efd; }
-        /* 历史统计 */
-        .filter-row { background: #fff; border-radius: 10px; padding: 18px; margin-bottom: 18px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
-        .summary-card { border-left: 4px solid; }
-        .summary-card.success { border-left-color: #28a745; background: #f0fff4; }
-        .summary-card.error   { border-left-color: #dc3545; background: #fff5f5; }
-        .badge-success { background-color: #28a745; color: #fff; }
-        .badge-error   { background-color: #dc3545; color: #fff; }
-        .sortable { cursor: pointer; user-select: none; }
-        .sortable:hover { background: #e9ecef; }
+        .chart-title { font-size: .8rem; color: var(--muted-foreground); text-align: center; margin-top: 6px; }
+        .summary-card.summary-card-success { background: color-mix(in srgb, var(--success) 8%, var(--card)); }
+        .summary-card.summary-card-danger  { background: color-mix(in srgb, var(--destructive) 8%, var(--card)); }
         .arrow { font-size: .8rem; margin-left: 4px; }
-    </style>
-</head>
-<body>
-<div id="app" class="container-lg py-4">
-    <div class="d-flex align-items-center mb-3 gap-3">
-        <h2 class="mb-0">📊 监控统计</h2>
+        @media (max-width: 768px) {
+            .grid-6 { grid-template-columns: repeat(3, 1fr); }
+        }
+        .auto-refresh-bar { display: flex; align-items: center; gap: .75rem; }
+{% endblock %}
+
+{% block content %}
+{% raw %}
+<div id="app">
+    <div class="page-header">
+        <h1 class="page-title">监控统计</h1>
+    </div>
+
+    <div class="auto-refresh-bar" style="margin-bottom: 1rem;">
         <span class="text-muted small">自动刷新 {{ refreshInterval }}s</span>
-        <button class="btn btn-sm btn-outline-secondary ms-auto" @click="toggleAutoRefresh">
-            {{ autoRefresh ? '⏸ 暂停' : '▶ 继续' }}
+        <button class="btn btn-outline btn-sm" @click="toggleAutoRefresh">
+            {{ autoRefresh ? '暂停' : '继续' }}
         </button>
     </div>
 
     <!-- ===== 仪表盘 ===== -->
-    <div class="dashboard">
-        <div class="row g-0 text-center">
-            <div class="col">
+    <div class="dashboard-panel">
+        <div class="grid grid-6 text-center">
+            <div>
                 <h5>首次请求</h5>
                 <div class="dash-val">{{ indexStats.first_count }}</div>
                 <div class="dash-sub">累计</div>
             </div>
-            <div class="col dash-divider">
+            <div class="dash-divider">
                 <h5>有效请求</h5>
                 <div class="dash-val">{{ indexStats.valid_count }}</div>
                 <div class="dash-sub">累计</div>
             </div>
-            <div class="col dash-divider">
+            <div class="dash-divider">
                 <h5>重试次数</h5>
                 <div class="dash-val">{{ totalRetries }}</div>
                 <div class="dash-sub">总上游 {{ indexStats.total_count }}</div>
             </div>
-            <div class="col dash-divider">
+            <div class="dash-divider">
                 <h5>当前 RPM</h5>
                 <div class="dash-val">{{ latestRpm }}</div>
                 <div class="dash-sub">本分钟请求数</div>
             </div>
-            <div class="col dash-divider">
+            <div class="dash-divider">
                 <h5>TPM 输入</h5>
                 <div class="dash-val">{{ latestTpmIn }}</div>
                 <div class="dash-sub">本分钟 tokens</div>
             </div>
-            <div class="col dash-divider">
+            <div class="dash-divider">
                 <h5>有效率</h5>
                 <div class="dash-val" :class="'dash-status-' + rateLevel">{{ successRatePct }}%</div>
                 <div class="dash-sub">
@@ -90,29 +83,29 @@
     </div>
 
     <!-- ===== 实时监控 ===== -->
-    <div class="rt-card mb-4">
-        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
-            <span class="fw-semibold">⚡ 实时监控</span>
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="flex" style="align-items: center; gap: .5rem; margin-bottom: 1rem; flex-wrap: wrap;">
+            <span class="fw-semibold">实时监控</span>
             <span class="text-muted small">（最近 120 分钟）</span>
-            <div class="ms-3 d-flex gap-2 flex-wrap align-items-center">
+            <div style="margin-left: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center;">
                 <span class="text-muted small">模型：</span>
-                <span class="model-pill" :class="{ active: selectedModel === '__all__' }" @click="setModel('__all__')">全部</span>
+                <span class="pill" :class="{ active: selectedModel === '__all__' }" @click="setModel('__all__')">全部</span>
                 <span v-for="m in modelList" :key="m"
-                      class="model-pill" :class="{ active: selectedModel === m }" @click="setModel(m)">
+                      class="pill" :class="{ active: selectedModel === m }" @click="setModel(m)">
                     {{ m }}
                 </span>
             </div>
         </div>
-        <div class="row g-3">
-            <div class="col-md-4">
+        <div class="grid grid-3">
+            <div>
                 <div class="chart-wrap"><canvas id="chartRpm"></canvas></div>
                 <div class="chart-title">RPM — 每分钟请求数</div>
             </div>
-            <div class="col-md-4">
+            <div>
                 <div class="chart-wrap"><canvas id="chartTpm"></canvas></div>
                 <div class="chart-title">TPM — 每分钟 Token 数</div>
             </div>
-            <div class="col-md-4">
+            <div>
                 <div class="chart-wrap"><canvas id="chartRate"></canvas></div>
                 <div class="chart-title">有效率 % — 最近 60 分钟</div>
             </div>
@@ -120,94 +113,94 @@
     </div>
 
     <!-- ===== 历史统计筛选 ===== -->
-    <div class="filter-row">
-        <div class="row g-3 align-items-end">
-            <div class="col-md-3">
+    <div class="filter-bar">
+        <div class="grid" style="grid-template-columns: 1fr 1fr 1fr 1fr auto; align-items: end; gap: 1rem;">
+            <div>
                 <label class="form-label small">开始日期</label>
-                <input type="date" class="form-control form-control-sm" v-model="startDate">
+                <input type="date" class="input" v-model="startDate">
             </div>
-            <div class="col-md-3">
+            <div>
                 <label class="form-label small">结束日期</label>
-                <input type="date" class="form-control form-control-sm" v-model="endDate">
+                <input type="date" class="input" v-model="endDate">
             </div>
-            <div class="col-md-2">
+            <div>
                 <label class="form-label small">模型</label>
-                <input type="text" class="form-control form-control-sm" v-model="histModel" placeholder="多个用 , 分隔">
+                <input type="text" class="input" v-model="histModel" placeholder="多个用 , 分隔">
             </div>
-            <div class="col-md-2">
+            <div>
                 <label class="form-label small">状态</label>
-                <select class="form-select form-select-sm" v-model="statusFilter">
+                <select class="input" v-model="statusFilter">
                     <option value="">全部</option>
                     <option value="success">成功</option>
                     <option value="error">失败</option>
                 </select>
             </div>
-            <div class="col-md-2 d-flex gap-2">
-                <button class="btn btn-primary btn-sm flex-grow-1" @click="fetchData" :disabled="loading">
+            <div class="flex" style="gap: .5rem;">
+                <button class="btn btn-primary btn-sm" @click="fetchData" :disabled="loading" style="flex-grow: 1;">
                     {{ loading ? '查询中…' : '查询' }}
                 </button>
-                <button class="btn btn-outline-secondary btn-sm" @click="resetFilter" :disabled="loading">重置</button>
+                <button class="btn btn-outline btn-sm" @click="resetFilter" :disabled="loading">重置</button>
             </div>
         </div>
     </div>
 
     <!-- 汇总 -->
-    <div v-if="summaryList.length" class="row g-3 mb-3">
-        <div v-for="(stat, i) in summaryList" :key="i" class="col-md-6">
-            <div class="card summary-card" :class="stat.status">
-                <div class="card-body py-2">
-                    <h6 class="card-title mb-2">
-                        <span class="badge" :class="stat.status === 'success' ? 'badge-success' : 'badge-error'">
+    <div v-if="summaryList.length" class="grid grid-2" style="margin-bottom: 1rem;">
+        <div v-for="(stat, i) in summaryList" :key="i">
+            <div class="card summary-card" :class="stat.status === 'success' ? 'summary-card-success' : 'summary-card-danger'">
+                <div style="padding: .5rem 1rem;">
+                    <h6 style="margin-bottom: .5rem;">
+                        <span class="badge" :class="stat.status === 'success' ? 'badge-success' : 'badge-danger'">
                             {{ stat.status === 'success' ? '成功' : '失败' }}
                         </span>
                     </h6>
-                    <div class="row text-center">
-                        <div class="col-4"><small class="text-muted d-block">记录数</small><strong>{{ stat.count }}</strong></div>
-                        <div class="col-4"><small class="text-muted d-block">输入 Token</small><strong>{{ stat.total_input }}</strong></div>
-                        <div class="col-4"><small class="text-muted d-block">输出 Token</small><strong>{{ stat.total_output }}</strong></div>
+                    <div class="grid" style="grid-template-columns: repeat(3, 1fr); text-align: center;">
+                        <div><small class="text-muted" style="display: block;">记录数</small><strong>{{ stat.count }}</strong></div>
+                        <div><small class="text-muted" style="display: block;">输入 Token</small><strong>{{ stat.total_input }}</strong></div>
+                        <div><small class="text-muted" style="display: block;">输出 Token</small><strong>{{ stat.total_output }}</strong></div>
                     </div>
                 </div>
             </div>
         </div>
-        <div v-if="summaryList.length === 2" class="col-md-12">
-            <div class="card bg-light">
-                <div class="card-body py-2">
-                    <h6 class="mb-2">📌 总计</h6>
-                    <div class="row text-center">
-                        <div class="col-4"><small class="text-muted d-block">总记录数</small><strong>{{ totalCount }}</strong></div>
-                        <div class="col-4"><small class="text-muted d-block">总输入 Token</small><strong>{{ totalInput }}</strong></div>
-                        <div class="col-4"><small class="text-muted d-block">总输出 Token</small><strong>{{ totalOutput }}</strong></div>
+        <div v-if="summaryList.length === 2" style="grid-column: 1 / -1;">
+            <div class="card" style="background: var(--muted);">
+                <div style="padding: .5rem 1rem;">
+                    <h6 style="margin-bottom: .5rem;">总计</h6>
+                    <div class="grid" style="grid-template-columns: repeat(3, 1fr); text-align: center;">
+                        <div><small class="text-muted" style="display: block;">总记录数</small><strong>{{ totalCount }}</strong></div>
+                        <div><small class="text-muted" style="display: block;">总输入 Token</small><strong>{{ totalInput }}</strong></div>
+                        <div><small class="text-muted" style="display: block;">总输出 Token</small><strong>{{ totalOutput }}</strong></div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
-    <div v-else class="alert alert-info py-2 small">暂无汇总数据</div>
+    <div v-else class="alert alert-info" style="padding: .5rem; font-size: .875rem;">暂无汇总数据</div>
 
     <!-- 明细表 -->
     <div class="card">
-        <div class="table-responsive">
-            <table class="table table-striped table-hover align-middle mb-0">
-                <thead class="table-light">
+        <div style="overflow-x: auto;">
+            <table class="data-table">
+                <thead>
                     <tr>
-                        <th @click="sortBy('model')" class="sortable">模型<span v-if="sortField==='model'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
-                        <th @click="sortBy('date_start')" class="sortable">开始日期<span v-if="sortField==='date_start'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
-                        <th @click="sortBy('date_end')" class="sortable">结束日期<span v-if="sortField==='date_end'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
-                        <th @click="sortBy('status')" class="sortable">状态<span v-if="sortField==='status'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
-                        <th @click="sortBy('count')" class="sortable text-end">请求次数<span v-if="sortField==='count'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
-                        <th @click="sortBy('input_token_num')" class="sortable text-end">输入Token<span v-if="sortField==='input_token_num'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
-                        <th @click="sortBy('output_token_num')" class="sortable text-end">输出Token<span v-if="sortField==='output_token_num'" class="arrow">{{ sortAsc?'▲':'▼' }}</span></th>
+                        <th @click="sortBy('model')" class="sortable">模型<span v-if="sortField==='model'" class="arrow">{{ sortAsc?'&#9650;':'&#9660;' }}</span></th>
+                        <th @click="sortBy('date_start')" class="sortable">开始日期<span v-if="sortField==='date_start'" class="arrow">{{ sortAsc?'&#9650;':'&#9660;' }}</span></th>
+                        <th @click="sortBy('date_end')" class="sortable">结束日期<span v-if="sortField==='date_end'" class="arrow">{{ sortAsc?'&#9650;':'&#9660;' }}</span></th>
+                        <th @click="sortBy('status')" class="sortable">状态<span v-if="sortField==='status'" class="arrow">{{ sortAsc?'&#9650;':'&#9660;' }}</span></th>
+                        <th @click="sortBy('count')" class="sortable text-end">请求次数<span v-if="sortField==='count'" class="arrow">{{ sortAsc?'&#9650;':'&#9660;' }}</span></th>
+                        <th @click="sortBy('input_token_num')" class="sortable text-end">输入Token<span v-if="sortField==='input_token_num'" class="arrow">{{ sortAsc?'&#9650;':'&#9660;' }}</span></th>
+                        <th @click="sortBy('output_token_num')" class="sortable text-end">输出Token<span v-if="sortField==='output_token_num'" class="arrow">{{ sortAsc?'&#9650;':'&#9660;' }}</span></th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr v-if="!items.length">
-                        <td colspan="7" class="text-center text-muted py-4">暂无数据</td>
+                        <td colspan="7" class="text-center text-muted" style="padding: 1.5rem;">暂无数据</td>
                     </tr>
                     <tr v-for="(item, i) in items" :key="i">
                         <td>{{ item.model }}</td>
                         <td>{{ item.date_start }}</td>
                         <td>{{ item.date_end }}</td>
-                        <td><span class="badge" :class="item.status==='success'?'badge-success':'badge-error'">{{ item.status==='success'?'成功':'失败' }}</span></td>
+                        <td><span class="badge" :class="item.status==='success'?'badge-success':'badge-danger'">{{ item.status==='success'?'成功':'失败' }}</span></td>
                         <td class="text-end">{{ item.count }}</td>
                         <td class="text-end">{{ item.input_token_num }}</td>
                         <td class="text-end">{{ item.output_token_num }}</td>
@@ -216,9 +209,12 @@
             </table>
         </div>
     </div>
-    <div v-if="loading" class="text-center text-muted py-3 small">加载中…</div>
+    <div v-if="loading" class="text-center text-muted" style="padding: 1rem; font-size: .875rem;">加载中…</div>
 </div>
+{% endraw %}
+{% endblock %}
 
+{% block scripts %}
 <script>
 const app = new Vue({
     el: '#app',
@@ -260,7 +256,7 @@ const app = new Vue({
             if (this.startDate)    p.append('date_start', this.startDate);
             if (this.endDate)      p.append('date_end', this.endDate);
             if (this.statusFilter) p.append('status', this.statusFilter);
-            fetch('/statistic?' + p)
+            fetch('/api/statistic?' + p)
                 .then(r => r.json())
                 .then(d => { this.items = d.data||[]; this.summaryList = d.summary||[]; this.applySort(); })
                 .catch(e => alert('加载失败：' + e))
@@ -407,5 +403,4 @@ const app = new Vue({
     beforeDestroy() { clearInterval(this._refreshTimer); }
 });
 </script>
-</body>
-</html>
+{% endblock %}

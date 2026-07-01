@@ -1,8 +1,9 @@
 """
-print_stats_summary.py 支持多日志目录参数，并且支持两种写法：
+token_stats.py — Token 用量统计与聚合
 
-  python print_stats_summary.py -d logs_anthropic logs_session_anthropic
-  python print_stats_summary.py -d logs_anthropic,logs_session_anthropic
+支持多日志目录参数，支持两种写法：
+  python -m utils.token_stats -d logs_anthropic logs_session_anthropic
+  python -m utils.token_stats -d logs_anthropic,logs_session_anthropic
 """
 
 import os
@@ -18,17 +19,11 @@ from utils.log_paths import INDEX_FILENAME
 
 
 def check_date_range(file: Path, date_start: str, date_end: str):
-    """判断日志是否符合筛选日期"""
     file_date = file.name.split('_')[0]
     return True if date_start <= file_date <= date_end else False
 
 
 def find_first_key_value(obj, target_key, value_type):
-    """
-    深度优先递归遍历 JSON 对象（dict/list），
-    返回第一个键为 target_key 且值为 target_type 类型的 (key, value) 对，
-    若未找到则返回 None。
-    """
     if isinstance(obj, dict):
         for key, value in obj.items():
             if key == target_key and isinstance(value, value_type):
@@ -50,7 +45,6 @@ def find_first_key_value(obj, target_key, value_type):
 
 
 class DataItem(BaseModel):
-    """对应 /statistic 返回的 data 列表中的单个记录"""
     model: str
     date_start: str
     date_end: str
@@ -61,7 +55,6 @@ class DataItem(BaseModel):
 
 
 class SummaryItem(BaseModel):
-    """对应 /statistic 返回的 summary 列表中的单个汇总项"""
     count: int = 0
     status: Literal['success', 'error']
     total_input: int = 0
@@ -69,7 +62,6 @@ class SummaryItem(BaseModel):
 
 
 def find_files(dirs=None, filter_suffix="*-res.json"):
-    """扫描日志目录。dirs 为 None 时自动扫描当前目录下所有 logs_ 开头的子目录。"""
     if dirs:
         search_dirs = [Path(d) for d in dirs if Path(d).is_dir()]
     else:
@@ -80,7 +72,6 @@ def find_files(dirs=None, filter_suffix="*-res.json"):
 
 
 def _load_index_file(index_path: str) -> Optional[list]:
-    """从 index.jsonl 加载条目。文件不存在时返回 None（触发降级扫描）。"""
     if not os.path.exists(index_path):
         return None
     entries = []
@@ -97,7 +88,6 @@ def _load_index_file(index_path: str) -> Optional[list]:
 
 
 def _normalize_dirs(dirs) -> Optional[list[Path]]:
-    """统一处理目录参数，支持 None、字符串、字符串列表。"""
     if dirs is None:
         return None
 
@@ -126,7 +116,6 @@ def _normalize_dirs(dirs) -> Optional[list[Path]]:
 
 
 def _collect_index_files(dirs=None) -> list[Path]:
-    """收集目标日志根目录下已有的 index.jsonl。"""
     index_files: list[Path] = []
     search_dirs = _normalize_dirs(dirs)
     root_dirs = search_dirs or [
@@ -140,26 +129,27 @@ def _collect_index_files(dirs=None) -> list[Path]:
     return index_files
 
 
-def _aggregate_index_entries(entries, model_filter, date_start, date_end, status, model_count_data):
-    """将 index 条目聚合到 model_count_data 字典中。"""
+def _aggregate_index_entries(entries, model_filter, date_start, date_end, status, model_count_data, channel_key_filter=""):
     for entry in entries:
-        # 日期过滤：ts 前10位为 YYYY-MM-DD
         entry_date = entry.get("ts", "")[:10]
         if not (date_start <= entry_date <= date_end):
             continue
+
+        if channel_key_filter:
+            entry_channel = entry.get("channel_key", "") or ""
+            if entry_channel != channel_key_filter:
+                continue
 
         _model = entry.get("model", "") or ""
         if not _model:
             continue
 
-        # 模型过滤
         if model_filter and _model.lower() not in model_filter.lower():
             continue
 
         tok_in  = entry.get("tok_in", 0) or 0
         tok_out = entry.get("tok_out", 0) or 0
 
-        # 判断成功/失败：Anthropic 用 valid，OpenAI 用 success
         if "valid" in entry:
             is_success = bool(entry["valid"]) and tok_out > 0
         else:
@@ -180,27 +170,26 @@ def _aggregate_index_entries(entries, model_filter, date_start, date_end, status
             model_count_data[_model]["error"].input_token_num += tok_in
 
 
-def statistic_tokens(model: str = '', date_start: str = '2000-01-01', date_end: str = '9999-12-31', status: str = '全部', dirs=None, **kwargs) -> dict:
+def statistic_tokens(model: str = '', date_start: str = '2000-01-01', date_end: str = '9999-12-31',
+                     status: str = '全部', channel_key: str = '', dirs=None, **kwargs) -> dict:
     """
     统计token数。优先从 index.jsonl 快速加载，不存在时降级扫描 res 文件。
     :param model: 过滤模型，忽略大小写，多个模型用,拼接
     :param date_start: 过滤日期-开启，格式YYYY-MM-DD
     :param date_end: 过滤日期-结束，格式YYYY-MM-DD
     :param status: 过滤状态: 全部、成功、失败
+    :param channel_key: 过滤渠道 key，为空时不过滤
     """
     model_count_data = dict()
     normalized_dirs = _normalize_dirs(dirs)
 
-    # ---- 快速路径：index.jsonl ----
     index_files = _collect_index_files(normalized_dirs)
     if index_files:
         for index_file in index_files:
             entries = _load_index_file(str(index_file))
             if entries is not None:
-                _aggregate_index_entries(entries, model, date_start, date_end, status, model_count_data)
+                _aggregate_index_entries(entries, model, date_start, date_end, status, model_count_data, channel_key)
 
-        # 指定目录时，只有“目录本身带 index”的才走快速路径；
-        # 其他目录（例如某个具体 session 子目录）仍需补扫 res 文件。
         if normalized_dirs is None:
             return _build_result(model_count_data, date_start, date_end)
         indexed_dirs = {index_file.parent.resolve() for index_file in index_files}
@@ -208,7 +197,6 @@ def statistic_tokens(model: str = '', date_start: str = '2000-01-01', date_end: 
         if not normalized_dirs:
             return _build_result(model_count_data, date_start, date_end)
 
-    # ---- 降级路径：扫描所有 res 文件（原始逻辑）----
     scan_dirs = [str(d) for d in normalized_dirs] if normalized_dirs is not None else None
     for file in find_files(dirs=scan_dirs):
         if not check_date_range(file, date_start, date_end):
@@ -248,13 +236,11 @@ def statistic_tokens(model: str = '', date_start: str = '2000-01-01', date_end: 
         elif status in ["全部", "失败"] and tok_out == 0:
             model_count_data[_model]["error"].count += 1
             model_count_data[_model]["error"].input_token_num += tok_in
-        model_count_data[_model] = model_count_data[_model]  # noop, keep reference
 
     return _build_result(model_count_data, date_start, date_end)
 
 
 def _build_result(model_count_data: dict, date_start: str, date_end: str) -> dict:
-    """将聚合数据转换为标准响应格式并打印摘要。"""
     res_data = []
     for val in model_count_data.values():
         if val['success'].count > 0:
@@ -298,7 +284,6 @@ API 调用统计摘要
 
 
 def _mask_api_key(key: str) -> str:
-    """脱敏 api_key：保留前4位和后4位，中间用 ... 代替。"""
     if not key or len(key) <= 8:
         return key or "(empty)"
     return f"{key[:4]}...{key[-4:]}"
@@ -307,12 +292,12 @@ def _mask_api_key(key: str) -> str:
 def statistic_keys(date_start: str = '2000-01-01', date_end: str = '9999-12-31', dirs=None) -> dict:
     """
     按 API Key 维度聚合统计。
-    返回格式：{"keys": [{"key": "sk-a...xz9f", "count": N, "tok_in": N, "tok_out": N}]}
+    返回格式：{"keys": [{"key": "sk-a...xz9f", "count": N, "tok_in": N, "tok_out": N, "sessions": N}]}
     """
     normalized_dirs = _normalize_dirs(dirs)
     index_files = _collect_index_files(normalized_dirs)
 
-    key_data: dict = {}  # raw_key -> {count, tok_in, tok_out, sessions}
+    key_data: dict = {}
 
     for index_file in index_files:
         entries = _load_index_file(str(index_file))
@@ -342,21 +327,6 @@ def statistic_keys(date_start: str = '2000-01-01', date_end: str = '9999-12-31',
     ]
     keys_list.sort(key=lambda x: x["count"], reverse=True)
     return {"keys": keys_list}
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个，支持空格分隔或逗号分隔），不指定则扫描当前目录下 logs_ 开头的目录")
-    parser.add_argument("--model", "-m", type=str, default="", help="过滤模型，忽略大小写，多个模型用,拼接")
-    parser.add_argument("--date_start", "-s", type=str, default="2000-01-01", help="过滤日期-开启，格式YYYY-MM-DD，默认2000-01-01")
-    parser.add_argument("--date_end", "-e", type=str, default="9999-12-31", help="过滤日期-结束，格式YYYY-MM-DD，默认9999-12-31")
-    parser.add_argument("--status", "-t", type=str, default="全部", help="过滤状态: 全部、成功、失败")
-    args = parser.parse_args()
-
-    # args.date_start = '2026-03-10'
-    # args.date_end = '2026-03-10'
-    # print(args.__dict__)
-    statistic_tokens(**args.__dict__)
 
 
 def statistic_channels(date_start: str = '2000-01-01', date_end: str = '9999-12-31', dirs=None) -> dict:
@@ -397,3 +367,30 @@ def statistic_channels(date_start: str = '2000-01-01', date_end: str = '9999-12-
     ]
     ch_list.sort(key=lambda x: x["count"], reverse=True)
     return {"channels": ch_list}
+
+
+def list_known_channel_keys(dirs=None) -> list[str]:
+    """扫描 index 获取所有出现过的 channel_key 值。"""
+    normalized_dirs = _normalize_dirs(dirs)
+    index_files = _collect_index_files(normalized_dirs)
+    keys: set[str] = set()
+    for index_file in index_files:
+        entries = _load_index_file(str(index_file))
+        if entries is None:
+            continue
+        for entry in entries:
+            ck = entry.get("channel_key", "")
+            if ck:
+                keys.add(ck)
+    return sorted(keys)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dirs", "-d", nargs="+", default=None, help="指定日志目录（可多个，支持空格分隔或逗号分隔），不指定则扫描当前目录下 logs_ 开头的目录")
+    parser.add_argument("--model", "-m", type=str, default="", help="过滤模型，忽略大小写，多个模型用,拼接")
+    parser.add_argument("--date_start", "-s", type=str, default="2000-01-01", help="过滤日期-开启，格式YYYY-MM-DD，默认2000-01-01")
+    parser.add_argument("--date_end", "-e", type=str, default="9999-12-31", help="过滤日期-结束，格式YYYY-MM-DD，默认9999-12-31")
+    parser.add_argument("--status", "-t", type=str, default="全部", help="过滤状态: 全部、成功、失败")
+    args = parser.parse_args()
+    statistic_tokens(**args.__dict__)

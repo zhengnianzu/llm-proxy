@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}LLM Proxy{% endblock %}</title>
+    <link href="/static/css/tokens.css" rel="stylesheet">
+    <script src="/static/js/theme.js"></script>
+    {% block head_extra %}{% endblock %}
+    <style>
+        {% block page_styles %}{% endblock %}
+    </style>
+</head>
+<body>
+<div class="app-shell">
+    <!-- ===== Sidebar ===== -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <a href="/" class="sidebar-brand">
+                <span class="sidebar-brand-dot"></span>
+                <span>LLM Proxy</span>
+            </a>
+            <button class="sidebar-collapse-btn" onclick="toggleSidebar()" title="收起/展开">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
+            </button>
+        </div>
+
+        <nav class="sidebar-nav">
+            <!-- Monitor Section -->
+            <div class="sidebar-section">
+                <div class="sidebar-section-label">监控</div>
+                <a href="/" class="sidebar-item {% if active_page == 'dashboard' %}active{% endif %}" title="监控总览">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                    <span>监控总览</span>
+                </a>
+                <a href="/query" class="sidebar-item {% if active_page == 'query' %}active{% endif %}" title="查询统计">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <span>查询统计</span>
+                </a>
+                <a href="/sessions" class="sidebar-item {% if active_page == 'sessions' %}active{% endif %}" title="Session 统计">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <span>Session 统计</span>
+                </a>
+            </div>
+
+            <!-- History Section -->
+            <div class="sidebar-section">
+                <div class="sidebar-section-label">历史</div>
+                <a href="/history" class="sidebar-item {% if active_page == 'history' %}active{% endif %}" title="对话历史">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+                    <span>对话历史</span>
+                </a>
+                <a href="/failures" class="sidebar-item {% if active_page == 'failures' %}active{% endif %}" title="失败记录">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                    <span>失败记录</span>
+                </a>
+            </div>
+
+            <!-- Management Section (permission-based) -->
+            {% set user_permissions = user_permissions|default([]) %}
+            {% set show_keys = user_role == 'admin' or 'keys' in user_permissions %}
+            {% set show_channels = user_role == 'admin' or 'channels' in user_permissions %}
+            {% set show_export = user_role == 'admin' or 'export' in user_permissions %}
+            {% if show_keys or show_channels or show_export or user_role == 'admin' %}
+            <div class="sidebar-section">
+                <div class="sidebar-section-label">管理</div>
+                {% if show_keys %}
+                <a href="/keys" class="sidebar-item {% if active_page == 'keys' %}active{% endif %}" title="Key 管理">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                    <span>Key 管理</span>
+                </a>
+                {% endif %}
+                {% if show_channels %}
+                <a href="/channels" class="sidebar-item {% if active_page == 'channels' %}active{% endif %}" title="渠道管理">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+                    <span>渠道管理</span>
+                </a>
+                {% endif %}
+                {% if show_export %}
+                <a href="/keys/export" class="sidebar-item {% if active_page == 'export' %}active{% endif %}" title="Session 导出">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span>Session 导出</span>
+                </a>
+                {% endif %}
+                {% if user_role == 'admin' %}
+                <a href="/users" class="sidebar-item {% if active_page == 'users' %}active{% endif %}" title="用户管理">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    <span>用户管理</span>
+                </a>
+                {% endif %}
+            </div>
+            {% endif %}
+        </nav>
+
+        <div class="sidebar-footer">
+            <button class="sidebar-item w-full" onclick="toggleTheme()" style="border:none; background:none; cursor:pointer; width:100%; text-align:left;" title="切换主题">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                <span class="theme-label">暗色模式</span>
+            </button>
+            {% if user_name %}
+            <div class="sidebar-user-wrap" id="userWrap">
+                <button class="sidebar-user" onclick="this.parentElement.classList.toggle('open')" title="{{ user_name }} ({{ user_role }})">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                    <span class="sidebar-user-info">
+                        <span class="sidebar-user-name">{{ user_name }}</span>
+                        <span class="sidebar-user-role">{{ user_role }}</span>
+                    </span>
+                    <svg class="sidebar-user-chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="sidebar-user-menu">
+                    <div class="sidebar-user-menu-label">切换用户</div>
+                    <div id="accountsList"></div>
+                    <a href="/login?add=1" class="sidebar-user-menu-item">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        <span>添加用户</span>
+                    </a>
+                    <div class="sidebar-user-menu-divider"></div>
+                    <a href="/logout" class="sidebar-user-menu-item">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                        <span>退出登录</span>
+                    </a>
+                </div>
+            </div>
+            {% else %}
+            <a href="/logout" class="sidebar-item" title="退出登录">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                <span>退出登录</span>
+            </a>
+            {% endif %}
+        </div>
+    </aside>
+
+    <!-- ===== Main Content ===== -->
+    <main class="main-content">
+        <!-- Mobile header -->
+        <div class="mobile-topbar">
+            <button class="btn btn-ghost btn-icon sidebar-toggle-btn" onclick="document.getElementById('sidebar').classList.toggle('open')">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+            <span class="font-semibold">{% block mobile_title %}LLM Proxy{% endblock %}</span>
+        </div>
+
+        {% block content %}{% endblock %}
+    </main>
+</div>
+
+<!-- Sidebar collapse + close on mobile -->
+<script>
+(function() {
+    var SIDEBAR_KEY = 'llm-proxy-sidebar-collapsed';
+    var sidebar = document.getElementById('sidebar');
+
+    if (localStorage.getItem(SIDEBAR_KEY) === 'true') {
+        sidebar.classList.add('collapsed');
+    }
+
+    window.toggleSidebar = function() {
+        sidebar.classList.toggle('collapsed');
+        localStorage.setItem(SIDEBAR_KEY, sidebar.classList.contains('collapsed'));
+    };
+
+    document.addEventListener('click', function(e) {
+        var toggle = document.querySelector('.sidebar-toggle-btn');
+        if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !toggle.contains(e.target)) {
+            sidebar.classList.remove('open');
+        }
+        var userWrap = document.querySelector('.sidebar-user-wrap');
+        if (userWrap && !userWrap.contains(e.target)) {
+            userWrap.classList.remove('open');
+        }
+    });
+    // Load saved accounts for user switching
+    var accountsList = document.getElementById('accountsList');
+    if (accountsList) {
+        fetch('/api/accounts').then(function(r) { return r.json(); }).then(function(data) {
+            var accounts = data.accounts || [];
+            var current = data.current || '';
+            accountsList.innerHTML = '';
+            accounts.forEach(function(acct) {
+                var el = document.createElement('button');
+                el.className = 'sidebar-user-menu-item w-full';
+                el.style.border = 'none';
+                el.style.background = 'none';
+                el.style.cursor = 'pointer';
+                el.style.textAlign = 'left';
+                el.style.display = 'flex';
+                el.style.alignItems = 'center';
+                el.style.gap = '8px';
+                var dot = acct.username === current ? '<span style="width:6px;height:6px;border-radius:50%;background:var(--primary);flex-shrink:0;"></span>' : '<span style="width:6px;height:6px;flex-shrink:0;"></span>';
+                var roleTag = acct.role === 'admin' ? ' <span style="font-size:.65rem;color:var(--muted-foreground);">(admin)</span>' : '';
+                el.innerHTML = dot + '<span>' + acct.username + roleTag + '</span>';
+                if (acct.username === current) {
+                    el.style.fontWeight = '600';
+                    el.disabled = true;
+                    el.style.opacity = '0.7';
+                    el.style.cursor = 'default';
+                } else {
+                    el.onclick = function() {
+                        fetch('/api/switch-user', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({username: acct.username})
+                        }).then(function(r) {
+                            if (r.ok) window.location.reload();
+                        });
+                    };
+                }
+                accountsList.appendChild(el);
+            });
+        }).catch(function() {});
+    }
+})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

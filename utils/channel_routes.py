@@ -1,6 +1,6 @@
 """
 渠道管理 Web 路由。
-- /channels — 渠道管理界面（与 key 管理共享登录态）
+- /channels — 渠道管理界面（需 admin 登录，由 MonitorAuthMiddleware 控制）
 - /api/channels/* — 渠道 CRUD
 - /api/keys/{key_id}/channels — Key-Channel 绑定
 """
@@ -14,11 +14,6 @@ from utils.channel_store import (
     set_key_channels, get_key_channels, set_default_channel,
     update_channel_invite_code,
 )
-from utils.key_config import load_key_state
-
-
-def _is_key_authenticated(request: Request) -> bool:
-    return bool(request.session.get("key_authenticated"))
 
 
 def _is_internal_request(request: Request) -> bool:
@@ -28,22 +23,14 @@ def _is_internal_request(request: Request) -> bool:
 def _require_key_api(request: Request):
     if not _is_internal_request(request):
         return JSONResponse({"detail": "Not found"}, status_code=404)
-    state = load_key_state()
-    if not state.get("password"):
-        return None
-    if _is_key_authenticated(request):
-        return None
-    return JSONResponse({"detail": "Key management login required"}, status_code=401)
+    return None
 
 
 def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
 
     @app.get("/channels")
     def channels_page(request: Request):
-        state = load_key_state()
-        if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse(request, "keys_login.html")
-        return templates.TemplateResponse(request, "channels.html")
+        return templates.TemplateResponse(request, "channels.html", context={"active_page": "channels", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
 
     @app.get("/api/channels")
     def api_channels_list(request: Request):

@@ -1,83 +1,108 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>渠道管理</title>
-    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
-    <script src="/static/js/vue.min.js"></script>
-    <style>
-        body { background: #f4f6fb; color: #1f2937; }
-        .page-shell { max-width: 1200px; margin: 0 auto; padding: 24px 16px 40px; }
-        .topbar {
-            background: linear-gradient(135deg, #0f172a, #1d4ed8);
-            color: #fff; padding: 10px 20px; border-radius: 10px; margin-bottom: 16px;
-            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
-        }
-        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
-        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
-        .nav-pill {
-            display: inline-flex; align-items: center; justify-content: center;
-            padding: 6px 12px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
-            border: 1px solid rgba(255,255,255,.14);
-        }
-        .nav-pill.active { background: #fff; color: #0f172a; }
-        .panel { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15,23,42,.06); margin-bottom: 20px; }
-        .badge-alive { background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
-        .badge-offline { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
-        .key-text { font-family: monospace; font-size: .85rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }
-        .suffix-badge { background: #e0e7ff; color: #3730a3; padding: 3px 8px; border-radius: 999px; font-size: .8rem; font-family: monospace; }
-        .badge-default { background: #fef3c7; color: #92400e; padding: 3px 10px; border-radius: 999px; font-size: .8rem; font-weight: 600; }
-    </style>
-</head>
-<body>
-<div id="app" class="page-shell">
-{% raw %}
-    <div class="topbar">
-        <h1 class="brand-title">渠道管理</h1>
-        <div class="nav-pills-wrap">
-            <a class="nav-pill" href="/">监控总览</a>
-            <a class="nav-pill" href="/query">查询统计</a>
-            <a class="nav-pill" href="/keys">Key 管理</a>
-            <a class="nav-pill active" href="/channels">渠道管理</a>
-            <a class="nav-pill" href="/keys/export">Session 导出</a>
-            <a class="nav-pill" href="/logout">退出登录</a>
-        </div>
-    </div>
+{% extends "_layout.html" %}
 
-    <div class="panel">
-        <div class="d-flex justify-content-between align-items-center mb-3">
+{% block title %}渠道管理{% endblock %}
+{% block mobile_title %}渠道管理{% endblock %}
+
+{% block head_extra %}
+    <script src="/static/js/vue.min.js"></script>
+{% endblock %}
+
+{% block page_styles %}
+        .create-form {
+            background: var(--muted);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .create-form .form-grid {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: end;
+        }
+        .create-form .form-grid .form-field {
+            flex: 1;
+            min-width: 140px;
+        }
+        .create-form .form-grid .form-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 100px;
+        }
+        .form-label-sm {
+            display: block;
+            font-size: .8rem;
+            color: var(--muted-foreground);
+            margin-bottom: 4px;
+        }
+        .invite-edit-wrap {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+        .cell-truncate {
+            max-width: 250px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .action-menu-wrap { position: relative; display: inline-block; }
+        .action-menu-btn { cursor: pointer; }
+        .action-menu {
+            display: none;
+            position: absolute; right: 0; top: 100%;
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: var(--radius); box-shadow: var(--shadow-lg);
+            min-width: 100px; z-index: 100; padding: 4px 0;
+        }
+        .action-menu.open { display: block; }
+        .action-menu-item {
+            display: block; width: 100%; padding: 6px 14px;
+            font-size: .8rem; text-align: left; cursor: pointer;
+            background: none; border: none; color: var(--foreground);
+            white-space: nowrap;
+        }
+        .action-menu-item:hover { background: var(--muted); }
+        .action-menu-item.danger { color: var(--destructive); }
+        .action-menu-item.danger:hover { background: color-mix(in srgb, var(--destructive) 8%, var(--card)); }
+{% endblock %}
+
+{% block content %}
+<div id="app">
+{% raw %}
+    <div class="card">
+        <div class="flex justify-between items-center mb-3">
             <h5 class="mb-0">渠道列表</h5>
             <button class="btn btn-primary btn-sm" @click="showCreate = true">新建渠道</button>
         </div>
 
-        <div v-if="showCreate" class="mb-3 p-3" style="background:#f8fafc; border-radius:8px;">
-            <div class="row g-2 align-items-end">
-                <div class="col-md-2">
-                    <label class="form-label small">名称</label>
-                    <input v-model="newName" class="form-control form-control-sm" placeholder="渠道名称（可选）">
+        <div v-if="showCreate" class="create-form">
+            <div class="form-grid">
+                <div class="form-field">
+                    <label class="form-label-sm">名称</label>
+                    <input v-model="newName" class="input input-sm" placeholder="渠道名称（可选）">
                 </div>
-                <div class="col-md-4">
-                    <label class="form-label small">上游地址</label>
-                    <input v-model="newUrl" class="form-control form-control-sm" placeholder="https://api.example.com/v1">
+                <div class="form-field" style="flex:2">
+                    <label class="form-label-sm">上游地址</label>
+                    <input v-model="newUrl" class="input input-sm" placeholder="https://api.example.com/v1">
                 </div>
-                <div class="col-md-2">
-                    <label class="form-label small">上游 Key</label>
-                    <input v-model="newKey" class="form-control form-control-sm" placeholder="sk-xxx">
+                <div class="form-field">
+                    <label class="form-label-sm">上游 Key</label>
+                    <input v-model="newKey" class="input input-sm" placeholder="sk-xxx">
                 </div>
-                <div class="col-md-2">
-                    <label class="form-label small">邀请码（可选）</label>
-                    <input v-model="newInviteCode" class="form-control form-control-sm" placeholder="多个用逗号分隔">
+                <div class="form-field">
+                    <label class="form-label-sm">邀请码（可选）</label>
+                    <input v-model="newInviteCode" class="input input-sm" placeholder="多个用逗号分隔">
                 </div>
-                <div class="col-md-2">
-                    <button class="btn btn-success btn-sm w-100" @click="createChannel">创建</button>
-                    <button class="btn btn-outline-secondary btn-sm w-100 mt-1" @click="showCreate = false">取消</button>
+                <div class="form-actions">
+                    <button class="btn btn-primary btn-sm" style="width:100%" @click="createChannel">创建</button>
+                    <button class="btn btn-outline btn-sm" style="width:100%" @click="showCreate = false">取消</button>
                 </div>
             </div>
         </div>
 
-        <table class="table table-sm table-hover mb-0" v-if="channels.length">
+        <table class="data-table" v-if="channels.length">
             <thead><tr>
                 <th style="width:50px">ID</th>
                 <th>名称</th>
@@ -88,52 +113,59 @@
                 <th>邀请码</th>
                 <th style="width:80px">状态</th>
                 <th style="width:160px">创建时间</th>
-                <th style="width:180px">操作</th>
+                <th style="width:80px">操作</th>
             </tr></thead>
             <tbody>
                 <tr v-for="ch in channels" :key="ch.id">
                     <td>{{ ch.id }}</td>
                     <td>{{ ch.name || '-' }}</td>
-                    <td class="small text-muted" style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="ch.upstream_url">{{ ch.upstream_url }}</td>
-                    <td><span class="key-text">{{ ch.upstream_key }}</span></td>
-                    <td><span class="suffix-badge">{{ ch.key_suffix }}</span></td>
+                    <td class="text-sm text-muted cell-truncate" :title="ch.upstream_url">{{ ch.upstream_url }}</td>
+                    <td><span class="code-inline">{{ ch.upstream_key }}</span></td>
+                    <td><span class="badge badge-info">{{ ch.key_suffix }}</span></td>
                     <td>
-                        <span v-if="ch.is_default" class="badge-default">默认</span>
+                        <span v-if="ch.is_default" class="badge badge-warning">默认</span>
                     </td>
-                    <td class="small">
+                    <td class="text-sm">
                         <template v-if="editingInviteId !== ch.id">
                             <template v-if="ch.invite_code">
-                                <span v-for="c in ch.invite_code.split(',')" :key="c" class="badge bg-secondary me-1" style="font-size:.7rem">{{ c.trim() }}</span>
+                                <span v-for="c in ch.invite_code.split(',')" :key="c" class="badge" style="font-size:.7rem; margin-right:4px">{{ c.trim() }}</span>
                             </template>
                             <span v-else class="text-muted">-</span>
-                            <button class="btn btn-outline-secondary btn-sm ms-1" style="font-size:.6rem;padding:0px 4px" @click="startEditInvite(ch)">编辑</button>
+                            <button class="btn btn-outline btn-sm" style="font-size:.6rem;padding:0px 4px; margin-left:4px" @click="startEditInvite(ch)">编辑</button>
                         </template>
-                        <span v-else class="d-flex gap-1 align-items-center">
-                            <input v-model="editInviteCode" class="form-control form-control-sm" style="width:120px" @keyup.enter="saveInviteCode(ch.id)" placeholder="多个用逗号分隔">
+                        <span v-else class="invite-edit-wrap">
+                            <input v-model="editInviteCode" class="input input-sm" style="width:120px" @keyup.enter="saveInviteCode(ch.id)" placeholder="多个用逗号分隔">
                             <button class="btn btn-primary btn-sm" style="font-size:.65rem;padding:1px 6px" @click="saveInviteCode(ch.id)">保存</button>
-                            <button class="btn btn-outline-secondary btn-sm" style="font-size:.65rem;padding:1px 6px" @click="editingInviteId = null">取消</button>
+                            <button class="btn btn-outline btn-sm" style="font-size:.65rem;padding:1px 6px" @click="editingInviteId = null">取消</button>
                         </span>
                     </td>
                     <td>
-                        <span :class="ch.alive ? 'badge-alive' : 'badge-offline'">
+                        <span :class="ch.alive ? 'badge badge-success' : 'badge badge-danger'">
                             {{ ch.alive ? '在线' : '离线' }}
                         </span>
                     </td>
-                    <td class="text-muted small">{{ ch.created_at }}</td>
+                    <td class="text-muted text-sm">{{ ch.created_at }}</td>
                     <td>
-                        <button v-if="!ch.is_default" class="btn btn-outline-info btn-sm" @click="setDefault(ch.id)">设为默认</button>
-                        <button v-if="ch.alive" class="btn btn-outline-warning btn-sm ms-1" @click="toggleAlive(ch.id, false)">下线</button>
-                        <button v-else class="btn btn-outline-success btn-sm ms-1" @click="toggleAlive(ch.id, true)">上线</button>
-                        <button class="btn btn-outline-danger btn-sm ms-1" @click="removeChannel(ch.id, ch.name)">删除</button>
+                        <div class="action-menu-wrap" :id="'action-' + ch.id">
+                            <button class="btn btn-outline btn-sm action-menu-btn" @click="toggleActionMenu(ch.id)">更多 ▾</button>
+                            <div class="action-menu" :class="{open: openMenuId === ch.id}">
+                                <button v-if="!ch.is_default" class="action-menu-item" @click="setDefault(ch.id)">设为默认</button>
+                                <button v-if="ch.alive" class="action-menu-item" @click="toggleAlive(ch.id, false)">下线</button>
+                                <button v-else class="action-menu-item" @click="toggleAlive(ch.id, true)">上线</button>
+                                <button class="action-menu-item danger" @click="removeChannel(ch.id, ch.name)">删除</button>
+                            </div>
+                        </div>
                     </td>
                 </tr>
             </tbody>
         </table>
-        <div v-else class="text-muted text-center py-4">暂无渠道，点击「新建渠道」创建</div>
+        <div v-else class="text-muted text-center" style="padding:24px 0">暂无渠道，点击「新建渠道」创建</div>
     </div>
 {% endraw %}
 </div>
+{% endblock %}
 
+{% block scripts %}
 <script>
 new Vue({
     el: '#app',
@@ -142,10 +174,23 @@ new Vue({
         showCreate: false,
         newName: '', newUrl: '', newKey: '', newInviteCode: '',
         editingInviteId: null, editInviteCode: '',
+        openMenuId: null,
     },
-    mounted() { this.fetchChannels(); },
+    mounted() {
+        this.fetchChannels();
+        var self = this;
+        document.addEventListener('click', function(e) {
+            if (self.openMenuId !== null) {
+                var wrap = document.getElementById('action-' + self.openMenuId);
+                if (!wrap || !wrap.contains(e.target)) self.openMenuId = null;
+            }
+        });
+    },
     methods: {
         _h(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
+        toggleActionMenu(id) {
+            this.openMenuId = this.openMenuId === id ? null : id;
+        },
         fetchChannels() {
             fetch('/api/channels', {headers: this._h()}).then(r => r.json()).then(d => {
                 this.channels = d.channels || [];
@@ -167,6 +212,7 @@ new Vue({
             });
         },
         toggleAlive(id, alive) {
+            this.openMenuId = null;
             fetch('/api/channels/' + id + '/toggle', {
                 method: 'POST',
                 headers: this._h({'Content-Type': 'application/json'}),
@@ -174,11 +220,13 @@ new Vue({
             }).then(() => this.fetchChannels());
         },
         removeChannel(id, name) {
+            this.openMenuId = null;
             if (!confirm('确认删除渠道 ' + (name || '#' + id) + '？')) return;
             fetch('/api/channels/' + id, {method: 'DELETE', headers: this._h()})
                 .then(() => this.fetchChannels());
         },
         setDefault(id) {
+            this.openMenuId = null;
             fetch('/api/channels/' + id + '/set-default', {method: 'POST', headers: this._h()})
                 .then(() => this.fetchChannels());
         },
@@ -196,5 +244,4 @@ new Vue({
     }
 });
 </script>
-</body>
-</html>
+{% endblock %}

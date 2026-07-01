@@ -1,93 +1,63 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Key 管理</title>
-    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
-    <script src="/static/js/vue.min.js"></script>
-    <style>
-        body { background: #f4f6fb; color: #1f2937; }
-        .page-shell { max-width: 1200px; margin: 0 auto; padding: 24px 16px 40px; }
-        .topbar {
-            background: linear-gradient(135deg, #0f172a, #1d4ed8);
-            color: #fff; padding: 10px 20px; border-radius: 10px; margin-bottom: 16px;
-            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
-        }
-        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
-        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
-        .nav-pill {
-            display: inline-flex; align-items: center; justify-content: center;
-            padding: 6px 12px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
-            border: 1px solid rgba(255,255,255,.14);
-        }
-        .nav-pill.active { background: #fff; color: #0f172a; }
-        .panel { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15,23,42,.06); margin-bottom: 20px; }
-        .badge-active { background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
-        .badge-disabled { background: #fee2e2; color: #991b1b; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
-        .badge-env { background: #e0e7ff; color: #3730a3; padding: 3px 10px; border-radius: 999px; font-size: .8rem; }
-        .key-text { font-family: monospace; font-size: .85rem; background: #f1f5f9; padding: 2px 8px; border-radius: 4px; }
-        .created-key { background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 14px; margin-top: 12px; }
-        .created-key code { font-size: 1rem; word-break: break-all; }
-        .auth-banner { border-radius: 8px; padding: 10px 16px; margin-bottom: 16px; font-size: .9rem; display: flex; align-items: center; gap: 8px; }
-        .auth-banner .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-        .auth-on { background: #dcfce7; border: 1px solid #86efac; color: #166534; }
-        .auth-on .dot { background: #22c55e; }
-        .auth-off { background: #fee2e2; border: 1px solid #fca5a5; color: #991b1b; }
-        .auth-off .dot { background: #ef4444; }
-        .auth-nokey { background: #fef9c3; border: 1px solid #fde68a; color: #854d0e; }
-        .auth-nokey .dot { background: #eab308; }
-        .form-switch .form-check-input { cursor: pointer; }
-        .modal-backdrop-custom { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 1040; }
-        .modal-custom {
-            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            background: #fff; border-radius: 14px; padding: 24px; z-index: 1050;
-            box-shadow: 0 20px 60px rgba(0,0,0,.2); width: 90%; max-width: 520px;
-        }
-    </style>
-</head>
-<body>
-<div id="app" class="page-shell">
+{% extends "_layout.html" %}
+
+{% block title %}Key 管理{% endblock %}
+{% block mobile_title %}Key 管理{% endblock %}
+
+{% block head_extra %}
+<script src="/static/js/vue.min.js"></script>
+{% endblock %}
+
+{% block page_styles %}
+.created-key { background: color-mix(in srgb, var(--success) 8%, var(--card)); border: 1px solid var(--success); border-radius: 8px; padding: 14px; margin-top: 12px; }
+.created-key code { font-size: 1rem; word-break: break-all; }
+.channel-edit-panel { background: color-mix(in srgb, var(--info) 8%, var(--card)); border-radius: 8px; border: 1px solid var(--info); }
+.auth-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    cursor: pointer; user-select: none; transition: all var(--transition);
+}
+.auth-badge-on { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); }
+.auth-badge-off { background: color-mix(in srgb, var(--destructive) 12%, transparent); color: var(--destructive); }
+.auth-badge-warn { background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--warning); }
+.auth-badge .dot { width: 6px; height: 6px; border-radius: 50%; }
+.auth-badge-on .dot { background: var(--success); }
+.auth-badge-off .dot { background: var(--destructive); }
+.auth-badge-warn .dot { background: var(--warning); }
+.copy-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--foreground); color: var(--background); padding: 8px 20px; border-radius: var(--radius); font-size: 13px; z-index: 9999; }
+{% endblock %}
+
+{% block content %}
+<div id="app">
 {% raw %}
-    <div class="topbar">
-        <h1 class="brand-title">Key 管理</h1>
-        <div class="nav-pills-wrap">
-            <a class="nav-pill" href="/">监控总览</a>
-            <a class="nav-pill" href="/query">查询统计</a>
-            <a class="nav-pill active" href="/keys">Key 管理</a>
-            <a class="nav-pill" href="/channels">渠道管理</a>
-            <a class="nav-pill" href="/keys/export">Session 导出</a>
-            <a class="nav-pill" href="/logout">退出登录</a>
+    <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+        <div class="flex items-center gap-3">
+            <span v-if="authStatus" class="auth-badge" :class="!authStatus.enabled ? 'auth-badge-off' : authStatus.reason.includes('未配置') ? 'auth-badge-warn' : 'auth-badge-on'" @click="toggleAuth(!authStatus.enabled)" :title="authStatus.reason">
+                <span class="dot"></span>
+                <span v-if="!authStatus.enabled">验证关闭</span>
+                <span v-else>验证开启</span>
+            </span>
         </div>
-    </div>
-
-    <div v-if="authStatus" class="auth-banner" :class="!authStatus.enabled ? 'auth-off' : authStatus.reason.includes('未配置') ? 'auth-nokey' : 'auth-on'">
-        <span class="dot"></span>
-        <span v-if="!authStatus.enabled"><strong>Key 验证已关闭</strong> — {{ authStatus.reason }}</span>
-        <span v-else-if="authStatus.reason.includes('未配置')"><strong>Key 验证已启用</strong> — {{ authStatus.reason }}</span>
-        <span v-else><strong>Key 验证已启用</strong> — {{ authStatus.reason }}</span>
-        <span style="flex:1"></span>
-        <div class="form-check form-switch mb-0" style="min-height:auto">
-            <input class="form-check-input" type="checkbox" role="switch" :checked="authStatus.enabled" @change="toggleAuth(!authStatus.enabled)">
-        </div>
-    </div>
-
-    <div class="panel">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <h5 class="mb-0">数据库 Key</h5>
+        <div class="flex items-center gap-2">
+            <input v-model="filterName" class="input input-sm" placeholder="搜索名称…" style="width:140px;">
+            <input v-model="filterInvite" class="input input-sm" placeholder="搜索邀请码…" style="width:140px;">
+            <button class="btn btn-outline btn-sm" @click="copyInviteLink">邀请链接</button>
             <button class="btn btn-primary btn-sm" @click="openCreateModal">新建 Key</button>
         </div>
+    </div>
+
+    <div v-if="toastMsg" class="copy-toast">{{ toastMsg }}</div>
+
+    <div class="card">
 
         <div v-if="createdKey" class="created-key mb-3">
             <strong>Key 已创建，请立即复制保存（刷新后不再显示）：</strong>
             <div class="mt-2"><code>{{ createdKey.key }}</code></div>
             <div class="mt-1 text-muted small">名称: {{ createdKey.name || '(unnamed)' }} | ID: {{ createdKey.id }}</div>
-            <button class="btn btn-outline-secondary btn-sm mt-2" @click="copyKey(createdKey.key)">复制 Key</button>
-            <button class="btn btn-outline-secondary btn-sm mt-2 ms-2" @click="createdKey = null">关闭</button>
+            <button class="btn btn-ghost btn-sm mt-2" @click="copyKey(createdKey.key)">复制 Key</button>
+            <button class="btn btn-ghost btn-sm mt-2 ms-2" @click="createdKey = null">关闭</button>
         </div>
 
-        <table class="table table-sm table-hover mb-0" v-if="dbKeys.length">
+        <table class="data-table" v-if="filteredKeys.length">
             <thead><tr>
                 <th style="width:50px">ID</th>
                 <th>名称</th>
@@ -99,35 +69,35 @@
                 <th style="width:150px">操作</th>
             </tr></thead>
             <tbody>
-                <tr v-for="k in dbKeys" :key="k.id">
+                <tr v-for="k in filteredKeys" :key="k.id">
                     <td>{{ k.id }}</td>
                     <td>{{ k.name || '-' }}</td>
-                    <td><span class="key-text">{{ k.key }}</span></td>
+                    <td><span class="code-inline">{{ k.key }}</span></td>
                     <td>
-                        <span :class="k.status === 'active' ? 'badge-active' : 'badge-disabled'">
+                        <span :class="k.status === 'active' ? 'badge badge-success' : 'badge badge-danger'">
                             {{ k.status === 'active' ? '启用' : '停用' }}
                         </span>
                     </td>
                     <td>
-                        <span v-for="ch in k.channels" :key="ch" class="badge bg-info text-dark me-1" style="font-size:.75rem;font-family:monospace">{{ ch }}</span>
-                        <button class="btn btn-outline-secondary btn-sm" style="font-size:.65rem;padding:1px 5px" @click="editChannels(k.id)">编辑</button>
+                        <span v-for="ch in k.channels" :key="ch" class="badge badge-info me-1" style="font-size:.75rem;font-family:monospace">{{ ch }}</span>
+                        <button class="btn btn-ghost btn-sm" style="font-size:.65rem;padding:1px 5px" @click="editChannels(k.id)">编辑</button>
                     </td>
                     <td class="text-muted small">{{ k.invite_code || '-' }}</td>
                     <td class="text-muted small">{{ k.created_at }}</td>
                     <td>
-                        <button v-if="k.status === 'active'" class="btn btn-outline-warning btn-sm" @click="toggleKey(k.id, 'disable')">停用</button>
-                        <button v-else class="btn btn-outline-success btn-sm" @click="toggleKey(k.id, 'enable')">启用</button>
-                        <button class="btn btn-outline-danger btn-sm ms-1" @click="removeKey(k.id, k.key)">删除</button>
+                        <button v-if="k.status === 'active'" class="btn btn-ghost btn-sm" @click="toggleKey(k.id, 'disable')">停用</button>
+                        <button v-else class="btn btn-ghost btn-sm" @click="toggleKey(k.id, 'enable')">启用</button>
+                        <button class="btn btn-destructive btn-sm ms-1" @click="removeKey(k.id, k.key)">删除</button>
                     </td>
                 </tr>
             </tbody>
         </table>
         <div v-else class="text-muted text-center py-4">暂无数据库 Key，点击「新建 Key」创建</div>
 
-        <div v-if="editingKeyId" class="mt-3 p-3" style="background:#f0f4ff; border-radius:8px; border:1px solid #c7d2fe;">
+        <div v-if="editingKeyId" class="mt-3 p-3 channel-edit-panel">
             <h6 class="mb-2">编辑渠道绑定 — Key #{{ editingKeyId }}</h6>
             <div v-if="!allChannels.length" class="text-muted small">暂无渠道，请先在<a href="/channels">渠道管理</a>中创建</div>
-            <div v-else class="d-flex flex-wrap gap-2">
+            <div v-else class="flex flex-wrap gap-2">
                 <label v-for="ch in allChannels" :key="ch.id" class="form-check form-check-inline mb-0" style="font-size:.85rem">
                     <input type="checkbox" :value="ch.id" v-model="selectedChannelIds" class="form-check-input">
                     {{ ch.name || '未命名' }} ({{ ch.key_suffix }})
@@ -136,19 +106,19 @@
             </div>
             <div class="mt-2">
                 <button class="btn btn-primary btn-sm" @click="saveChannels">保存</button>
-                <button class="btn btn-outline-secondary btn-sm ms-2" @click="editingKeyId = null">取消</button>
+                <button class="btn btn-ghost btn-sm ms-2" @click="editingKeyId = null">取消</button>
             </div>
         </div>
     </div>
 
-    <div class="panel" v-if="envKeys.length">
+    <div class="card" v-if="envKeys.length">
         <h5>环境变量 Key（只读）</h5>
-        <table class="table table-sm mb-0">
+        <table class="data-table">
             <thead><tr><th>Key</th><th style="width:80px">来源</th></tr></thead>
             <tbody>
                 <tr v-for="(k, i) in envKeys" :key="i">
-                    <td><span class="key-text">{{ k.key }}</span></td>
-                    <td><span class="badge-env">.env</span></td>
+                    <td><span class="code-inline">{{ k.key }}</span></td>
+                    <td><span class="badge badge-info">.env</span></td>
                 </tr>
             </tbody>
         </table>
@@ -156,16 +126,16 @@
 
     <!-- 新建 Key 弹窗 -->
     <div v-if="showCreateModal">
-        <div class="modal-backdrop-custom" @click="showCreateModal = false"></div>
-        <div class="modal-custom">
+        <div class="modal-backdrop" @click="showCreateModal = false"></div>
+        <div class="modal-dialog">
             <h5 class="mb-3">新建 Key</h5>
             <div class="mb-3">
                 <label class="form-label small">Key 名称（可选）</label>
-                <input v-model="newName" class="form-control form-control-sm" placeholder="输入名称">
+                <input v-model="newName" class="input input-sm" placeholder="输入名称">
             </div>
             <div v-if="allChannels.length" class="mb-3">
                 <label class="form-label small">选择渠道（可多选）</label>
-                <div class="d-flex flex-wrap gap-2" style="max-height:200px;overflow-y:auto;">
+                <div class="flex flex-wrap gap-2" style="max-height:200px;overflow-y:auto;">
                     <label v-for="ch in allChannels" :key="ch.id" class="form-check form-check-inline mb-0" style="font-size:.85rem">
                         <input type="checkbox" :value="ch.id" v-model="newChannelIds" class="form-check-input">
                         {{ ch.name || '未命名' }} ({{ ch.key_suffix }})
@@ -173,15 +143,17 @@
                     </label>
                 </div>
             </div>
-            <div class="d-flex justify-content-end gap-2">
-                <button class="btn btn-outline-secondary btn-sm" @click="showCreateModal = false">取消</button>
-                <button class="btn btn-success btn-sm" @click="createKey">创建</button>
+            <div class="flex justify-end gap-2">
+                <button class="btn btn-ghost btn-sm" @click="showCreateModal = false">取消</button>
+                <button class="btn btn-primary btn-sm" @click="createKey">创建</button>
             </div>
         </div>
     </div>
 {% endraw %}
 </div>
+{% endblock %}
 
+{% block scripts %}
 <script>
 new Vue({
     el: '#app',
@@ -191,6 +163,19 @@ new Vue({
         authStatus: null,
         allChannels: [], newChannelIds: [],
         editingKeyId: null, selectedChannelIds: [],
+        toastMsg: '',
+        filterName: '', filterInvite: '',
+    },
+    computed: {
+        filteredKeys: function() {
+            var name = this.filterName.toLowerCase().trim();
+            var invite = this.filterInvite.toLowerCase().trim();
+            return this.dbKeys.filter(function(k) {
+                if (name && (k.name || '').toLowerCase().indexOf(name) === -1) return false;
+                if (invite && (k.invite_code || '').toLowerCase().indexOf(invite) === -1) return false;
+                return true;
+            });
+        }
     },
     mounted() { this.fetchKeys(); this.fetchAllChannels(); },
     methods: {
@@ -232,6 +217,13 @@ new Vue({
         copyKey(key) {
             navigator.clipboard.writeText(key).then(() => alert('已复制到剪贴板'));
         },
+        copyInviteLink() {
+            var url = window.location.origin + '/invite';
+            navigator.clipboard.writeText(url).then(() => {
+                this.toastMsg = '邀请链接已复制';
+                setTimeout(() => { this.toastMsg = ''; }, 2000);
+            });
+        },
         toggleAuth(enabled) {
             fetch('/api/keys/auth-toggle', {
                 method: 'POST',
@@ -262,5 +254,4 @@ new Vue({
     }
 });
 </script>
-</body>
-</html>
+{% endblock %}

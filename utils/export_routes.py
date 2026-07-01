@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from utils.export_store import (
@@ -60,19 +60,10 @@ def _load_sync_config() -> dict:
         return {}
 
 
-def _is_key_authenticated(request: Request) -> bool:
-    return bool(request.session.get("key_authenticated"))
-
-
 def _require_key_api(request: Request):
     if request.headers.get("x-requested-with") != "XMLHttpRequest":
         return JSONResponse({"detail": "Not found"}, status_code=404)
-    state = load_key_state()
-    if not state.get("password"):
-        return None
-    if _is_key_authenticated(request):
-        return None
-    return JSONResponse({"detail": "Key management login required"}, status_code=401)
+    return None
 
 
 def _date_to_mtime_map(env_dir: Path) -> dict:
@@ -127,17 +118,11 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/keys/export")
     def export_page(request: Request):
-        state = load_key_state()
-        if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse(request, "keys_login.html")
-        return FileResponse(path="templates/export.html")
+        return templates.TemplateResponse(request, "export.html", context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
 
     @app.get("/keys/export/report/{record_id}")
     def export_report_page(request: Request, record_id: int):
-        state = load_key_state()
-        if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse(request, "keys_login.html")
-        return FileResponse(path="templates/export_report.html")
+        return templates.TemplateResponse(request, "export_report.html", context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
 
     @app.get("/api/export/config")
     def export_config(request: Request):
@@ -487,9 +472,6 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/api/export/eval/report/{record_id}")
     def export_eval_report(request: Request, record_id: int):
-        state = load_key_state()
-        if state.get("password") and not _is_key_authenticated(request):
-            return JSONResponse({"detail": "Key management login required"}, status_code=401)
         rec = get_record(record_id)
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)

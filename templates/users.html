@@ -1,0 +1,255 @@
+{% extends "_layout.html" %}
+
+{% block title %}用户管理{% endblock %}
+{% block mobile_title %}用户管理{% endblock %}
+
+{% block head_extra %}
+    <script src="/static/js/vue.min.js"></script>
+{% endblock %}
+
+{% block page_styles %}
+        .create-form {
+            background: var(--muted);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .create-form .form-grid {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: end;
+        }
+        .create-form .form-grid .form-field {
+            flex: 1;
+            min-width: 120px;
+        }
+        .create-form .form-grid .form-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 100px;
+        }
+        .form-label-sm {
+            display: block;
+            font-size: .8rem;
+            color: var(--muted-foreground);
+            margin-bottom: 4px;
+        }
+        .perm-badges { display: flex; gap: 4px; flex-wrap: wrap; }
+        .perm-badge {
+            font-size: .7rem;
+            padding: 2px 8px;
+            border-radius: var(--radius-sm);
+            background: var(--accent);
+            color: var(--accent-foreground);
+        }
+        .perm-checkboxes { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+        .perm-checkboxes label {
+            display: flex; align-items: center; gap: 4px;
+            font-size: .82rem; cursor: pointer; user-select: none;
+        }
+        .edit-row { background: color-mix(in srgb, var(--primary) 5%, var(--card)); }
+{% endblock %}
+
+{% block content %}
+<div id="app">
+{% raw %}
+    <div class="card">
+        <div class="flex justify-between items-center mb-3">
+            <h5 class="mb-0">用户列表</h5>
+            <button class="btn btn-primary btn-sm" @click="showCreate = !showCreate">新建用户</button>
+        </div>
+
+        <div v-if="showCreate" class="create-form">
+            <div class="form-grid">
+                <div class="form-field">
+                    <label class="form-label-sm">用户名</label>
+                    <input v-model="newUsername" class="input input-sm" placeholder="2-32 个字符">
+                </div>
+                <div class="form-field">
+                    <label class="form-label-sm">密码</label>
+                    <input v-model="newPassword" type="password" class="input input-sm" placeholder="至少 6 个字符">
+                </div>
+                <div class="form-field">
+                    <label class="form-label-sm">角色</label>
+                    <select v-model="newRole" class="input input-sm">
+                        <option value="user">普通用户</option>
+                        <option value="admin">管理员</option>
+                    </select>
+                </div>
+                <div class="form-field" style="flex:2;min-width:200px;">
+                    <label class="form-label-sm">权限</label>
+                    <div class="perm-checkboxes" style="min-height:32px;">
+                        <label><input type="checkbox" value="keys" v-model="newPerms"> Key 管理</label>
+                        <label><input type="checkbox" value="channels" v-model="newPerms"> 渠道管理</label>
+                        <label><input type="checkbox" value="export" v-model="newPerms"> Session 导出</label>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary btn-sm" style="width:100%" @click="createUser">创建</button>
+                    <button class="btn btn-outline btn-sm" style="width:100%" @click="showCreate = false">取消</button>
+                </div>
+            </div>
+        </div>
+
+        <table class="data-table" v-if="users.length">
+            <thead><tr>
+                <th style="width:50px">ID</th>
+                <th>用户名</th>
+                <th style="width:100px">角色</th>
+                <th>权限</th>
+                <th style="width:160px">创建时间</th>
+                <th style="width:140px">操作</th>
+            </tr></thead>
+            <tbody>
+                <template v-for="u in users">
+                <tr :key="u.id" :class="{ 'edit-row': editingId === u.id }">
+                    <td>{{ u.id }}</td>
+                    <td>
+                        <span class="font-semibold">{{ u.username }}</span>
+                        <span v-if="u.username === currentUser" class="badge badge-info" style="font-size:.6rem;margin-left:4px;">当前</span>
+                    </td>
+                    <td>
+                        <span class="badge" :class="u.role === 'admin' ? 'badge-warning' : 'badge-info'">{{ u.role === 'admin' ? '管理员' : '用户' }}</span>
+                    </td>
+                    <td>
+                        <div v-if="editingId !== u.id" class="perm-badges">
+                            <span v-if="u.role === 'admin'" class="perm-badge" style="background:var(--warning);color:#fff;">全部权限</span>
+                            <template v-else-if="u.permissions">
+                                <span v-for="p in u.permissions.split(',')" :key="p" class="perm-badge">{{ permLabel(p.trim()) }}</span>
+                            </template>
+                            <span v-else class="text-muted text-sm">无</span>
+                        </div>
+                    </td>
+                    <td class="text-muted text-sm">{{ u.created_at }}</td>
+                    <td>
+                        <div class="flex gap-2">
+                            <button v-if="editingId !== u.id" class="btn btn-outline btn-sm" @click="startEdit(u)">编辑</button>
+                            <button v-if="u.username !== currentUser" class="btn btn-outline btn-sm" style="color:var(--destructive);border-color:var(--destructive);" @click="deleteUser(u)">删除</button>
+                        </div>
+                    </td>
+                </tr>
+                <tr v-if="editingId === u.id" :key="'edit-' + u.id" class="edit-row">
+                    <td colspan="6" style="padding:12px 14px;">
+                        <div class="flex gap-4 items-center" style="flex-wrap:wrap;">
+                            <div>
+                                <label class="form-label-sm">角色</label>
+                                <select v-model="editRole" class="input input-sm" :disabled="u.username === currentUser">
+                                    <option value="user">普通用户</option>
+                                    <option value="admin">管理员</option>
+                                </select>
+                            </div>
+                            <div v-if="editRole !== 'admin'">
+                                <label class="form-label-sm">权限</label>
+                                <div class="perm-checkboxes">
+                                    <label><input type="checkbox" value="keys" v-model="editPerms"> Key 管理</label>
+                                    <label><input type="checkbox" value="channels" v-model="editPerms"> 渠道管理</label>
+                                    <label><input type="checkbox" value="export" v-model="editPerms"> Session 导出</label>
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:6px;align-self:end;">
+                                <button class="btn btn-primary btn-sm" @click="saveEdit(u.id)">保存</button>
+                                <button class="btn btn-outline btn-sm" @click="editingId = null">取消</button>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                </template>
+            </tbody>
+        </table>
+        <div v-else class="text-muted text-center" style="padding:24px 0">暂无用户</div>
+    </div>
+{% endraw %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        users: [],
+        currentUser: '',
+        showCreate: false,
+        newUsername: '', newPassword: '', newRole: 'user', newPerms: [],
+        editingId: null, editRole: 'user', editPerms: [],
+    },
+    methods: {
+        _h(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
+        permLabel(p) {
+            var m = { keys: 'Key 管理', channels: '渠道管理', export: 'Session 导出' };
+            return m[p] || p;
+        },
+        fetchUsers() {
+            fetch('/api/users', { headers: this._h() }).then(function(r) { return r.json(); }).then(function(d) {
+                this.users = d.users || [];
+            }.bind(this));
+        },
+        createUser() {
+            if (!this.newUsername.trim() || !this.newPassword) {
+                alert('用户名和密码不能为空');
+                return;
+            }
+            fetch('/api/users', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({
+                    username: this.newUsername,
+                    password: this.newPassword,
+                    role: this.newRole,
+                    permissions: this.newPerms.join(',')
+                })
+            }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.ok) {
+                    this.newUsername = ''; this.newPassword = ''; this.newRole = 'user'; this.newPerms = [];
+                    this.showCreate = false;
+                    this.fetchUsers();
+                } else {
+                    alert(d.detail || '创建失败');
+                }
+            }.bind(this));
+        },
+        startEdit(u) {
+            this.editingId = u.id;
+            this.editRole = u.role;
+            this.editPerms = u.permissions ? u.permissions.split(',').map(function(s) { return s.trim(); }).filter(Boolean) : [];
+        },
+        saveEdit(id) {
+            var perms = this.editRole === 'admin' ? '' : this.editPerms.join(',');
+            fetch('/api/users/' + id, {
+                method: 'PUT',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({ role: this.editRole, permissions: perms })
+            }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.ok) {
+                    this.editingId = null;
+                    this.fetchUsers();
+                } else {
+                    alert(d.detail || '更新失败');
+                }
+            }.bind(this));
+        },
+        deleteUser(u) {
+            if (!confirm('确认删除用户「' + u.username + '」？')) return;
+            fetch('/api/users/' + u.id, {
+                method: 'DELETE',
+                headers: this._h()
+            }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.ok) {
+                    this.fetchUsers();
+                } else {
+                    alert(d.detail || '删除失败');
+                }
+            }.bind(this));
+        },
+    },
+    mounted() {
+        this.fetchUsers();
+        fetch('/api/accounts', { headers: this._h() }).then(function(r) { return r.json(); }).then(function(d) {
+            this.currentUser = d.current || '';
+        }.bind(this)).catch(function() {});
+    }
+});
+</script>
+{% endblock %}

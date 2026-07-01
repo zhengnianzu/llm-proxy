@@ -1,7 +1,7 @@
 """
 Key 管理 Web 路由。
-- /keys, /keys/login, /keys/logout — 独立登录（密码来自 key_state.yaml）
-- /api/keys/* — 仅 key session 有效时可访问
+- /keys — Key 管理页面（需 admin 登录，由 MonitorAuthMiddleware 控制）
+- /api/keys/* — AJAX API
 - /invite, /api/invite — 公开（邀请码验证）
 """
 
@@ -17,59 +17,21 @@ from utils.key_config import load_key_state
 from utils.channel_store import get_channels_for_key_display, set_key_channels, get_channel_ids_by_invite_code, get_default_channel_id, get_all_channel_invite_codes
 
 
-def _is_key_authenticated(request: Request) -> bool:
-    return bool(request.session.get("key_authenticated"))
-
-
 def _is_internal_request(request: Request) -> bool:
-    """只允许页面内 AJAX 调用，浏览器直接访问拒绝。"""
     return request.headers.get("x-requested-with") == "XMLHttpRequest"
 
 
 def _require_key_api(request: Request):
-    """API 接口鉴权：必须是内部 AJAX + key session 有效。"""
     if not _is_internal_request(request):
         return JSONResponse({"detail": "Not found"}, status_code=404)
-    state = load_key_state()
-    if not state.get("password"):
-        return None
-    if _is_key_authenticated(request):
-        return None
-    return JSONResponse({"detail": "Key management login required"}, status_code=401)
+    return None
 
 
 def register_key_routes(app: FastAPI, templates: Jinja2Templates):
 
-    @app.post("/keys")
-    async def keys_login(request: Request):
-        if not _is_internal_request(request):
-            return JSONResponse({"detail": "Not found"}, status_code=404)
-        state = load_key_state()
-        body = await request.json()
-        user = body.get("user", "")
-        password = body.get("password", "")
-        expected_user = state.get("user", "")
-        expected_pwd = state.get("password", "")
-        if not expected_pwd:
-            return JSONResponse({"detail": "No password configured"}, status_code=403)
-        user_ok = (not expected_user) or hmac.compare_digest(user, expected_user)
-        pwd_ok = hmac.compare_digest(password, expected_pwd)
-        if not (user_ok and pwd_ok):
-            return JSONResponse({"detail": "Invalid credentials"}, status_code=403)
-        request.session["key_authenticated"] = True
-        return JSONResponse({"success": True})
-
-    @app.get("/keys/logout")
-    def keys_logout(request: Request):
-        request.session.pop("key_authenticated", None)
-        return RedirectResponse(url="/keys", status_code=303)
-
     @app.get("/keys")
     def keys_page(request: Request):
-        state = load_key_state()
-        if state.get("password") and not _is_key_authenticated(request):
-            return templates.TemplateResponse(request, "keys_login.html")
-        return templates.TemplateResponse(request, "keys.html")
+        return templates.TemplateResponse(request, "keys.html", context={"active_page": "keys", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
 
     @app.get("/api/keys")
     def api_keys_list(request: Request):

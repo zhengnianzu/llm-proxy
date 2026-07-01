@@ -12,7 +12,7 @@ from urllib.parse import parse_qs
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Any, Dict, List, Optional, AsyncIterator
 from fastapi.responses import JSONResponse, StreamingResponse, Response
@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from print_stats_summary import statistic_tokens, statistic_keys
+from utils.token_stats import statistic_tokens, statistic_keys, statistic_channels, list_known_channel_keys
 from utils.auth import validate_api_key, resolve_upstream_channel
 from utils.key_store import init_db as init_key_db
 from utils.key_config import init_key_config
@@ -37,7 +37,9 @@ from utils.session_routes import register_session_routes
 from utils.key_routes import register_key_routes
 from utils.export_routes import register_export_routes
 from utils.channel_routes import register_channel_routes
+from utils.user_routes import register_user_routes
 from utils.export_store import init_db as init_export_db, mark_interrupted as mark_export_interrupted
+from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
@@ -63,24 +65,50 @@ MONITOR_AUTH_EXACT_PATHS = {
     "/history",
     "/failures",
     "/sessions",
+    "/keys",
+    "/channels",
+    "/users",
     "/docs",
     "/redoc",
     "/openapi.json",
 }
 MONITOR_AUTH_PREFIX_PATHS = (
-    "/statistic",
+    "/api/statistic",
+    "/api/switch-user",
+    "/api/accounts",
+    "/api/users",
     "/metrics",
     "/logs",
     "/sessions/",
+    "/keys/",
+    "/channels/",
+    "/api/keys/",
+    "/api/channels/",
+    "/api/export/",
 )
 MONITOR_AUTH_PUBLIC_PATHS = {
     "/hi",
     "/login",
     "/logout",
-    "/keys",
-    "/channels",
+    "/register",
     "/invite",
 }
+
+MONITOR_ADMIN_ONLY_PATHS = {"/users"}
+MONITOR_ADMIN_ONLY_PREFIXES = ("/api/users",)
+
+_PERM_PATH_MAP = {
+    "/keys": "keys",
+    "/channels": "channels",
+}
+_PERM_PREFIX_MAP = (
+    ("/keys/export", "export"),
+    ("/api/export/", "export"),
+    ("/keys/", "keys"),
+    ("/api/keys/", "keys"),
+    ("/channels/", "channels"),
+    ("/api/channels/", "channels"),
+)
 
 LOGS_DIR = get_log_dir("logs_all")
 
@@ -106,6 +134,17 @@ class MonitorAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if _is_monitor_authenticated(request):
+            path = request.url.path
+            role = request.session.get("monitor_role", "user")
+            if role == "admin":
+                return await call_next(request)
+            if _is_admin_only_path(path):
+                return JSONResponse({"detail": "Admin access required"}, status_code=403)
+            required_perm = _required_permission(path)
+            if required_perm:
+                user_perms = (request.session.get("monitor_permissions") or "").split(",")
+                if required_perm not in user_perms:
+                    return JSONResponse({"detail": "权限不足"}, status_code=403)
             return await call_next(request)
 
         if request.url.path in MONITOR_AUTH_EXACT_PATHS:
@@ -157,15 +196,47 @@ def _is_monitor_auth_enabled() -> bool:
     explicit = os.getenv("MONITOR_AUTH_ENABLED")
     if explicit is not None:
         return _env_enabled("MONITOR_AUTH_ENABLED")
-    return bool(os.getenv("MONITOR_USERNAME", "").strip() and os.getenv("MONITOR_PASSWORD", "").strip())
+    return True
 
 
-def _is_monitor_login_valid(username: str, password: str) -> bool:
+def _is_monitor_login_valid(username: str, password: str) -> tuple[bool, str, str]:
     expected_user = os.getenv("MONITOR_USERNAME", "").strip()
     expected_password = os.getenv("MONITOR_PASSWORD", "")
-    if not expected_user or not expected_password:
-        return False
-    return hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)
+    if expected_user and expected_password:
+        if hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password):
+            return True, "admin", ""
+    user = verify_user(username, password)
+    if user:
+        return True, user.get("role", "user"), user.get("permissions", "")
+    return False, "", ""
+
+
+def _is_admin_only_path(path: str) -> bool:
+    if path in MONITOR_ADMIN_ONLY_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in MONITOR_ADMIN_ONLY_PREFIXES)
+
+
+def _required_permission(path: str) -> str:
+    if path in _PERM_PATH_MAP:
+        return _PERM_PATH_MAP[path]
+    for prefix, perm in _PERM_PREFIX_MAP:
+        if path.startswith(prefix):
+            return perm
+    return ""
+
+
+def _ctx(request: Request, active_page: str, **extra) -> dict:
+    perms_raw = request.session.get("monitor_permissions") or ""
+    perms_list = [p.strip() for p in perms_raw.split(",") if p.strip()]
+    ctx = {
+        "active_page": active_page,
+        "user_role": request.session.get("monitor_role", "user"),
+        "user_name": request.session.get("monitor_user", ""),
+        "user_permissions": perms_list,
+    }
+    ctx.update(extra)
+    return ctx
 
 
 def _normalize_next_path(next_path: str) -> str:
@@ -181,7 +252,7 @@ def _is_monitor_path(path: str) -> bool:
         return False
     if path in MONITOR_AUTH_EXACT_PATHS:
         return True
-    return any(path == prefix or path.startswith(prefix + "/") for prefix in MONITOR_AUTH_PREFIX_PATHS)
+    return any(path.startswith(prefix) for prefix in MONITOR_AUTH_PREFIX_PATHS)
 
 
 def _is_monitor_authenticated(request: Request) -> bool:
@@ -348,17 +419,25 @@ async def health():
 
 
 @app.get("/login")
-async def monitor_login_page(request: Request, next: str = "/"):
+async def monitor_login_page(request: Request, next: str = "/", add: str = ""):
     if not _is_monitor_auth_enabled():
         return RedirectResponse(url="/", status_code=303)
-    if _is_monitor_authenticated(request):
+    if _is_monitor_authenticated(request) and not add:
         return RedirectResponse(url=_normalize_next_path(next), status_code=303)
+    env_user = os.getenv("MONITOR_USERNAME", "").strip()
+    env_pass = os.getenv("MONITOR_PASSWORD", "").strip()
+    if not env_user or not env_pass:
+        from utils.user_store import has_users
+        if not has_users():
+            return RedirectResponse(url="/register?next=" + _normalize_next_path(next), status_code=303)
+    registered = request.query_params.get("registered")
     return templates.TemplateResponse(
         request,
         "login.html",
         context={
             "next_path": _normalize_next_path(next),
             "error": "",
+            "success": "注册成功，请登录" if registered else "",
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -375,10 +454,16 @@ async def monitor_login_submit(request: Request):
     password = form.get("password", [""])[0]
     next_path = _normalize_next_path(form.get("next", ["/"])[0])
 
-    if _is_monitor_login_valid(username, password):
-        request.session.clear()
+    valid, role, permissions = _is_monitor_login_valid(username, password)
+    if valid:
+        accounts = request.session.get("monitor_accounts") or []
+        if not any(a.get("username") == username for a in accounts):
+            accounts.append({"username": username, "role": role})
         request.session["monitor_authenticated"] = True
         request.session["monitor_user"] = username
+        request.session["monitor_role"] = role
+        request.session["monitor_permissions"] = permissions
+        request.session["monitor_accounts"] = accounts
         return RedirectResponse(url=next_path, status_code=303)
 
     return templates.TemplateResponse(
@@ -397,6 +482,88 @@ async def monitor_login_submit(request: Request):
 async def monitor_logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/login", status_code=303)
+
+
+@app.post("/api/switch-user")
+async def switch_user(request: Request):
+    body = await request.json()
+    target = body.get("username", "").strip()
+    if not target:
+        return JSONResponse({"detail": "username required"}, status_code=400)
+    accounts = request.session.get("monitor_accounts") or []
+    acct = next((a for a in accounts if a.get("username") == target), None)
+    if not acct:
+        return JSONResponse({"detail": "account not found"}, status_code=404)
+    request.session["monitor_authenticated"] = True
+    request.session["monitor_user"] = acct["username"]
+    request.session["monitor_role"] = acct["role"]
+    perms = get_user_permissions(acct["username"])
+    request.session["monitor_permissions"] = ",".join(perms)
+    return JSONResponse({"ok": True, "username": acct["username"], "role": acct["role"]})
+
+
+@app.get("/api/accounts")
+async def list_accounts(request: Request):
+    accounts = request.session.get("monitor_accounts") or []
+    current = request.session.get("monitor_user", "")
+    return JSONResponse({"accounts": accounts, "current": current})
+
+
+@app.get("/register")
+async def register_page(request: Request):
+    from utils.user_store import has_users
+    env_has_creds = bool(os.getenv("MONITOR_USERNAME", "").strip() and os.getenv("MONITOR_PASSWORD", "").strip())
+    is_first = not has_users() and not env_has_creds
+    if not is_first and not _is_monitor_authenticated(request):
+        return RedirectResponse(url="/login", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "register.html",
+        context={"error": "", "is_first_user": is_first},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/register")
+async def register_submit(request: Request):
+    body_bytes = await request.body()
+    form = parse_qs(body_bytes.decode("utf-8"), keep_blank_values=True)
+    username = (form.get("username", [""])[0]).strip()
+    password = form.get("password", [""])[0]
+    password2 = form.get("password2", [""])[0]
+
+    from utils.user_store import has_users
+    env_has_creds = bool(os.getenv("MONITOR_USERNAME", "").strip() and os.getenv("MONITOR_PASSWORD", "").strip())
+    is_first = not has_users() and not env_has_creds
+
+    if not is_first and not _is_monitor_authenticated(request):
+        return RedirectResponse(url="/login", status_code=303)
+
+    def _render_error(msg, code=400):
+        return templates.TemplateResponse(
+            request, "register.html",
+            context={"error": msg, "is_first_user": is_first},
+            status_code=code, headers={"Cache-Control": "no-store"},
+        )
+
+    if not username or not password:
+        return _render_error("用户名和密码不能为空")
+
+    if password != password2:
+        return _render_error("两次输入的密码不一致")
+
+    if len(username) < 2 or len(username) > 32:
+        return _render_error("用户名长度应在 2-32 个字符之间")
+
+    if len(password) < 6:
+        return _render_error("密码长度至少 6 个字符")
+
+    role = "admin" if is_first else "user"
+    user = create_user(username, password, role=role)
+    if user is None:
+        return _render_error("该用户名已被注册", 409)
+
+    return RedirectResponse(url="/login?registered=1", status_code=303)
 
 
 # ---------- Anthropic Messages ----------
@@ -592,6 +759,7 @@ init_key_db(SERVICE_LOG_DIR)
 init_key_config(SERVICE_LOG_DIR)
 init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
+init_user_db(SERVICE_LOG_DIR)
 mark_export_interrupted()
 _load_index()
 start_metrics_scanner(os.path.dirname(LOGS_DIR))
@@ -1426,13 +1594,13 @@ async def openai_responses(req: Request):
 # 以下为新增的统计功能
 
 @app.get("/")
-async def index_statistic():
-    return FileResponse(path="templates/dashboard.html")
+async def index_statistic(request: Request):
+    return templates.TemplateResponse(request, "dashboard.html", context=_ctx(request, "dashboard"))
 
 
 @app.get("/query")
-async def query_page():
-    return FileResponse(path="templates/query.html")
+async def query_page(request: Request):
+    return templates.TemplateResponse(request, "query.html", context=_ctx(request, "query"))
 
 
 @app.get("/history")
@@ -1440,23 +1608,87 @@ async def chat_viewer(request: Request):
     return templates.TemplateResponse(
         request,
         "chat-viewer.html",
+        context=_ctx(request, "history"),
     )
 
 
 @app.get("/failures")
-async def failure_viewer():
-    return FileResponse(path="templates/failures.html")
+async def failure_viewer(request: Request):
+    return templates.TemplateResponse(request, "failures.html", context=_ctx(request, "failures"))
 
-@app.get("/statistic")
-def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部'):
-    res = statistic_tokens(model=model, date_start=date_start, date_end=date_end, status=status)
+
+STAT_CACHE_DIR = os.path.join(SERVICE_LOG_DIR, "stat")
+
+
+@app.get("/api/statistic")
+def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部', refresh: str = '', channel_key: str = ''):
+    cache_key = f"tokens_{model}_{date_start}_{date_end}_{status}_{channel_key}"
+    if not refresh:
+        cached = _load_stat_cache(cache_key)
+        if cached is not None:
+            return JSONResponse(cached)
+    res = statistic_tokens(model=model, date_start=date_start, date_end=date_end, status=status, channel_key=channel_key)
+    res["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _save_stat_cache(cache_key, res)
     return JSONResponse(res)
 
 
-@app.get("/statistic/keys")
-def statistic_keys_web(date_start: str = '', date_end: str = ''):
+@app.get("/api/statistic/keys")
+def statistic_keys_web(date_start: str = '', date_end: str = '', refresh: str = ''):
+    cache_key = f"keys_{date_start}_{date_end}"
+    if not refresh:
+        cached = _load_stat_cache(cache_key)
+        if cached is not None:
+            return JSONResponse(cached)
     res = statistic_keys(date_start=date_start or '2000-01-01', date_end=date_end or '9999-12-31')
+    res["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _save_stat_cache(cache_key, res)
     return JSONResponse(res)
+
+
+@app.get("/api/statistic/channels")
+def statistic_channels_web(date_start: str = '', date_end: str = '', refresh: str = ''):
+    cache_key = f"channels_{date_start}_{date_end}"
+    if not refresh:
+        cached = _load_stat_cache(cache_key)
+        if cached is not None:
+            return JSONResponse(cached)
+    res = statistic_channels(date_start=date_start or '2000-01-01', date_end=date_end or '9999-12-31')
+    res["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _save_stat_cache(cache_key, res)
+    return JSONResponse(res)
+
+
+@app.get("/api/statistic/channel-keys")
+def statistic_channel_keys_list():
+    keys = list_known_channel_keys()
+    return JSONResponse({"channel_keys": keys})
+
+
+def _stat_cache_path(cache_key: str) -> str:
+    safe = re.sub(r'[^\w\-]', '_', cache_key)
+    return os.path.join(STAT_CACHE_DIR, f"{safe}.json")
+
+
+def _load_stat_cache(cache_key: str):
+    path = _stat_cache_path(cache_key)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _save_stat_cache(cache_key: str, data: dict):
+    os.makedirs(STAT_CACHE_DIR, exist_ok=True)
+    path = _stat_cache_path(cache_key)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 @app.get("/metrics/realtime")
@@ -1578,7 +1810,8 @@ def logs_debug_list(limit: int = 200, keyword: str = "", env: str = ""):
     safe_limit = max(1, min(limit, 1000))
     keyword_lower = keyword.strip().lower()
     items = []
-    pattern = re.compile(r"(?P<ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_attempt(?P<attempt>\d+)_(?P<payload>.+)\.txt$")
+    seen_groups: dict[str, int] = {}
+    pattern = re.compile(r"(?P<ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_(?:(?P<seq>\d+)_)?attempt(?P<attempt>\d+)_(?P<payload>.+)\.txt$")
 
     for path in _iter_debug_txt_files(env):
         name = path.name
@@ -1587,9 +1820,11 @@ def logs_debug_list(limit: int = 200, keyword: str = "", env: str = ""):
         reason = ""
         attempt = 0
         created_at = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        ts_str = ""
         if match:
+            ts_str = match.group("ts")
             try:
-                created_at = datetime.strptime(match.group("ts"), "%Y-%m-%d_%H-%M-%S").strftime("%Y-%m-%d %H:%M:%S")
+                created_at = datetime.strptime(ts_str, "%Y-%m-%d_%H-%M-%S").strftime("%Y-%m-%d %H:%M:%S")
             except ValueError:
                 pass
             attempt = int(match.group("attempt"))
@@ -1603,16 +1838,28 @@ def logs_debug_list(limit: int = 200, keyword: str = "", env: str = ""):
             continue
 
         env_label = _debug_env_label(path)
+        seq_part = match.group("seq") if match and match.group("seq") else ""
+        group_key = f"{env_label}|{ts_str}|{seq_part}|{model}|{reason}" if ts_str else ""
+
+        if group_key and group_key in seen_groups:
+            idx = seen_groups[group_key]
+            items[idx]["attempt_count"] += 1
+            continue
+
         rel_name = f"{env_label}/{name}" if env_label else name
-        items.append({
+        item = {
             "filename": rel_name,
             "created_at": created_at,
             "attempt": attempt,
+            "attempt_count": 1,
             "model": model,
             "reason": reason,
             "size": path.stat().st_size,
             "env": env_label,
-        })
+        }
+        items.append(item)
+        if group_key:
+            seen_groups[group_key] = len(items) - 1
         if len(items) >= safe_limit:
             break
 
@@ -1654,6 +1901,7 @@ register_session_routes(app, LOGS_DIR)
 register_key_routes(app, templates)
 register_channel_routes(app, templates)
 register_export_routes(app, LOGS_DIR)
+register_user_routes(app, templates)
 
 
 if __name__ == "__main__":

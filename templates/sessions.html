@@ -1,124 +1,71 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>服务代理监控系统 - Session 会话统计</title>
-    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
-    <script src="/static/js/vue.min.js"></script>
-    <style>
-        body { background: #f4f6fb; color: #1f2937; }
-        .page-shell { max-width: 1400px; margin: 0 auto; padding: 24px 16px 40px; }
-        .topbar {
-            background: linear-gradient(135deg, #0f172a, #1d4ed8);
-            color: #fff; padding: 10px 20px; border-radius: 10px;
-            display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
-        }
-        .brand-title { font-size: 18px; font-weight: 700; margin: 0; }
-        .nav-pills-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
-        .nav-pill {
-            display: inline-flex; align-items: center; justify-content: center;
-            padding: 6px 12px; border-radius: 999px; text-decoration: none;
-            background: rgba(255,255,255,.14); color: #fff; font-weight: 600; font-size: 12px;
-            border: 1px solid rgba(255,255,255,.14);
-        }
-        .nav-pill.active { background: #fff; color: #0f172a; }
-        .filter-row, .panel { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 8px 24px rgba(15, 23, 42, .06); }
-        .summary-card { border-left: 4px solid; border-radius: 10px; }
-        .summary-card.total { border-left-color: #3b82f6; background: #eff6ff; }
-        .summary-card.qualified { border-left-color: #16a34a; background: #f0fdf4; }
-        .summary-card.rate { border-left-color: #f59e0b; background: #fffbeb; }
-        .stat-val { font-size: 2rem; font-weight: 700; line-height: 1.2; }
-        .stat-label { font-size: .85rem; color: #6b7280; margin-top: 4px; }
-        .table th { white-space: nowrap; font-size: .84rem; }
-        .table td { font-size: .84rem; }
-        .cell-qualified { color: #16a34a; font-weight: 600; }
-        .cell-zero { color: #d1d5db; }
-        .totals-row td { font-weight: 700; background: #f8fafc; }
-        .key-pill {
-            cursor: pointer; border-radius: 999px; padding: 4px 12px; font-size: .78rem;
-            border: 1px solid #dbe3f0; background: #fff; transition: .15s; user-select: none;
-            display: inline-block; margin: 2px;
-        }
-        .key-pill.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
-        .key-pill:hover:not(.active) { background: #eff6ff; border-color: #93c5fd; }
-    </style>
-</head>
-<body>
-<div id="app" class="page-shell">
-    <div class="topbar">
-        <h1 class="brand-title">服务代理监控系统</h1>
-        <div class="nav-pills-wrap">
-            <a class="nav-pill" href="/">监控总览</a>
-            <a class="nav-pill" href="/query">查询统计</a>
-            <a class="nav-pill active" href="/sessions">Session 统计</a>
-            <a class="nav-pill" href="/keys/export">Session 导出</a>
-            <a class="nav-pill" href="/history">对话历史记录</a>
-            <a class="nav-pill" href="/failures">失败历史记录</a>
-            <a class="nav-pill" href="/logout">退出登录</a>
-        </div>
-    </div>
+{% extends "_layout.html" %}
 
+{% block title %}Session 会话统计{% endblock %}
+{% block mobile_title %}Session 统计{% endblock %}
+
+{% block page_styles %}
+        .data-table th, .data-table td { font-size: .84rem; }
+        .totals-row td { font-weight: 700; background: var(--muted); }
+        .pill { margin: 2px; }
+        .flex-grow-1 { flex-grow: 1; }
+{% endblock %}
+
+{% block content %}
+{% raw %}
+<div id="app">
     <!-- 控制栏 -->
-    <div class="filter-row mb-3 mt-3">
-        <div class="row g-3 align-items-end">
-            <div class="col-md-3">
-                <label class="form-label small">扫描目录</label>
-                <input type="text" class="form-control form-control-sm" :value="stats && stats._dir || '加载中…'" disabled>
+    <div class="filter-bar mb-3">
+        <div class="grid grid-3 items-end">
+            <div>
+                <label class="form-label text-sm">扫描目录</label>
+                <input type="text" class="input input-sm" :value="stats && stats._dir || '加载中…'" disabled>
             </div>
-            <div class="col-md-2">
-                <label class="form-label small">达标阈值</label>
-                <input type="number" class="form-control form-control-sm" v-model.number="threshold" min="1">
+            <div>
+                <label class="form-label text-sm">达标阈值</label>
+                <input type="number" class="input input-sm" v-model.number="threshold" min="1">
             </div>
-            <div class="col-md-2 d-flex gap-2 align-items-end">
+            <div class="flex gap-2" style="align-self:end;">
                 <button class="btn btn-primary btn-sm flex-grow-1" @click="fetchStats(true)" :disabled="loading">
                     {{ loading ? '加载中…' : '刷新' }}
                 </button>
-                <a href="/keys/export" class="btn btn-outline-success btn-sm">导出</a>
             </div>
         </div>
     </div>
 
     <!-- 汇总卡片 -->
-    <div class="row g-3 mb-3" v-if="stats">
-        <div class="col-md-4">
-            <div class="card summary-card total">
-                <div class="card-body py-3 text-center">
-                    <div class="stat-val">{{ stats.total_sessions }}</div>
-                    <div class="stat-label">总 Session 数</div>
-                </div>
+    <div class="grid grid-3 mb-3" v-if="stats">
+        <div>
+            <div class="summary-card summary-card-info p-4 text-center">
+                <div class="stat-val">{{ stats.total_sessions }}</div>
+                <div class="stat-label">总 Session 数</div>
             </div>
         </div>
-        <div class="col-md-4">
-            <div class="card summary-card qualified">
-                <div class="card-body py-3 text-center">
-                    <div class="stat-val">{{ stats.qualified_sessions }}</div>
-                    <div class="stat-label">达标 Session (>= {{ stats.threshold }} 轮)</div>
-                </div>
+        <div>
+            <div class="summary-card summary-card-success p-4 text-center">
+                <div class="stat-val">{{ stats.qualified_sessions }}</div>
+                <div class="stat-label">达标 Session (>= {{ stats.threshold }} 轮)</div>
             </div>
         </div>
-        <div class="col-md-4">
-            <div class="card summary-card rate">
-                <div class="card-body py-3 text-center">
-                    <div class="stat-val">{{ qualifiedRate }}</div>
-                    <div class="stat-label">达标率</div>
-                </div>
+        <div>
+            <div class="summary-card summary-card-warning p-4 text-center">
+                <div class="stat-val">{{ qualifiedRate }}</div>
+                <div class="stat-label">达标率</div>
             </div>
         </div>
     </div>
 
     <!-- Key 选择器 -->
-    <div class="panel mb-3" v-if="allKeys.length">
-        <h6 style="font-weight:600;margin-bottom:8px;">
-            选择显示的 Key
-            <small class="text-muted">(点击切换，可多选)</small>
-            <button class="btn btn-outline-secondary btn-sm ms-2" @click="toggleAllKeys" style="font-size:.75rem;">
+    <div class="card mb-3" v-if="allKeys.length">
+        <div class="flex items-center gap-2 mb-2" style="flex-wrap:wrap;">
+            <span class="font-semibold" style="font-size:.9rem;">选择显示的 Key</span>
+            <span class="text-muted text-sm">(点击切换，可多选)</span>
+            <button class="btn btn-outline btn-xs" @click="toggleAllKeys">
                 {{ selectedKeys.length === allKeys.length ? '取消全选' : '全选' }}
             </button>
-        </h6>
-        <div>
+        </div>
+        <div class="flex flex-wrap gap-2">
             <span v-for="k in allKeys" :key="k"
-                  class="key-pill" :class="{active: selectedKeys.indexOf(k) !== -1}"
+                  class="pill" :class="{active: selectedKeys.indexOf(k) !== -1}"
                   @click="toggleKey(k)"
                   :title="k">
                 {{ shortKey(k) }}
@@ -127,14 +74,14 @@
     </div>
 
     <!-- 日期(行) x Key(列) 表格 -->
-    <div class="panel" v-if="stats && visibleRows.length && selectedKeys.length">
-        <h6 style="font-weight:600;margin-bottom:12px;">
-            日期 x Key 的 Session 统计
-            <small class="text-muted">(达标/总量)</small>
-        </h6>
-        <div class="table-responsive">
-            <table class="table table-striped table-hover table-bordered align-middle mb-0">
-                <thead class="table-light">
+    <div class="card" v-if="stats && visibleRows.length && selectedKeys.length">
+        <div class="flex items-center gap-2 mb-3" style="flex-wrap:wrap;">
+            <span class="font-semibold" style="font-size:.9rem;">日期 x Key 的 Session 统计</span>
+            <span class="text-muted text-sm">(达标/总量)</span>
+        </div>
+        <div style="overflow-x:auto;">
+            <table class="data-table">
+                <thead>
                     <tr>
                         <th>日期</th>
                         <th v-for="k in selectedKeys" :key="k" class="text-center"
@@ -168,11 +115,15 @@
             </table>
         </div>
     </div>
-    <div v-else-if="!loading && stats" class="alert alert-info py-2 small mt-3">暂无 Session 数据</div>
-    <div v-if="loading" class="text-center text-muted py-3 small">加载中…</div>
-    <div v-if="error" class="alert alert-danger py-2 small mt-3">{{ error }}</div>
+    <div v-else-if="!loading && stats" class="text-muted text-sm mt-3 p-3" style="background:var(--muted);border-radius:var(--radius);">暂无 Session 数据</div>
+    <div v-if="loading" class="text-center text-muted mt-3 text-sm">加载中…</div>
+    <div v-if="error" class="text-danger text-sm mt-3 p-3" style="background:color-mix(in srgb, var(--destructive) 10%, var(--card));border-radius:var(--radius);">{{ error }}</div>
 </div>
+{% endraw %}
+{% endblock %}
 
+{% block scripts %}
+<script src="/static/js/vue.min.js"></script>
 <script>
 new Vue({
     el: '#app',
@@ -299,5 +250,4 @@ new Vue({
     }
 });
 </script>
-</body>
-</html>
+{% endblock %}
