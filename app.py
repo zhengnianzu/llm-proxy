@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from utils.token_stats import statistic_tokens, statistic_keys, statistic_channels, list_known_channel_keys
+from utils.token_index import query_token_stats, query_key_stats, query_channel_stats, query_channel_keys
 from utils.auth import validate_api_key, resolve_upstream_channel
 from utils.key_store import init_db as init_key_db
 from utils.key_config import init_key_config
@@ -1613,78 +1613,46 @@ async def failure_viewer(request: Request):
     return templates.TemplateResponse(request, "failures.html", context=_ctx(request, "failures"))
 
 
-STAT_CACHE_DIR = os.path.join(SERVICE_LOG_DIR, "stat")
-
-
 @app.get("/api/statistic")
 def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部', refresh: str = '', channel_key: str = ''):
-    cache_key = f"tokens_{model}_{date_start}_{date_end}_{status}_{channel_key}"
-    if not refresh:
-        cached = _load_stat_cache(cache_key)
-        if cached is not None:
-            return JSONResponse(cached)
-    res = statistic_tokens(model=model, date_start=date_start, date_end=date_end, status=status, channel_key=channel_key)
+    res = query_token_stats(
+        model=model,
+        date_start=date_start or '2000-01-01',
+        date_end=date_end or '9999-12-31',
+        status=status,
+        channel_key=channel_key,
+        force=bool(refresh),
+    )
     res["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    _save_stat_cache(cache_key, res)
     return JSONResponse(res)
 
 
 @app.get("/api/statistic/keys")
 def statistic_keys_web(date_start: str = '', date_end: str = '', refresh: str = ''):
-    cache_key = f"keys_{date_start}_{date_end}"
-    if not refresh:
-        cached = _load_stat_cache(cache_key)
-        if cached is not None:
-            return JSONResponse(cached)
-    res = statistic_keys(date_start=date_start or '2000-01-01', date_end=date_end or '9999-12-31')
+    res = query_key_stats(
+        date_start=date_start or '2000-01-01',
+        date_end=date_end or '9999-12-31',
+        force=bool(refresh),
+    )
     res["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    _save_stat_cache(cache_key, res)
     return JSONResponse(res)
 
 
 @app.get("/api/statistic/channels")
 def statistic_channels_web(date_start: str = '', date_end: str = '', refresh: str = ''):
-    cache_key = f"channels_{date_start}_{date_end}"
-    if not refresh:
-        cached = _load_stat_cache(cache_key)
-        if cached is not None:
-            return JSONResponse(cached)
-    res = statistic_channels(date_start=date_start or '2000-01-01', date_end=date_end or '9999-12-31')
+    res = query_channel_stats(
+        date_start=date_start or '2000-01-01',
+        date_end=date_end or '9999-12-31',
+        force=bool(refresh),
+    )
     res["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    _save_stat_cache(cache_key, res)
     return JSONResponse(res)
 
 
 @app.get("/api/statistic/channel-keys")
 def statistic_channel_keys_list():
-    keys = list_known_channel_keys()
+    keys = query_channel_keys()
     return JSONResponse({"channel_keys": keys})
-
-
-def _stat_cache_path(cache_key: str) -> str:
-    safe = re.sub(r'[^\w\-]', '_', cache_key)
-    return os.path.join(STAT_CACHE_DIR, f"{safe}.json")
-
-
-def _load_stat_cache(cache_key: str):
-    path = _stat_cache_path(cache_key)
-    if os.path.isfile(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return None
-
-
-def _save_stat_cache(cache_key: str, data: dict):
-    os.makedirs(STAT_CACHE_DIR, exist_ok=True)
-    path = _stat_cache_path(cache_key)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-    except Exception:
-        pass
 
 
 @app.get("/metrics/realtime")
