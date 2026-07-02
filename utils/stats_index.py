@@ -2,26 +2,23 @@
 utils/stats_index.py — 增量汇总索引
 
 持久化文件: {env_dir}/.stats_index.json
+进程级内存缓存: _MEM_TTL 秒内直接返回内存数据，跳过磁盘读取和 stat。
+
 结构:
 {
-  "_version": 2,
+  "_version": 3,
   "dirs": {
     "26070100": {
-      "cache_mtime": 1719820000.0,   # .session_cache.jsonl 的 mtime
-      "cache_size": 123456,          # .session_cache.jsonl 的 size
-      "req_count": 4200,             # -req.json 文件数
-      "req_count_mtime": 1719820000.0,  # 目录 mtime 扫描时的值
-      "sessions": {                  # (api_key, date) -> {total, qualified}
-        "sk-abcd|2026-06-28": {"total": 5, "qualified": 3},
-        "sk-abcd|2026-06-29": {"total": 10, "qualified": 8}
-      }
+      "cache_mtime": 1719820000.0,
+      "cache_size": 123456,
+      "req_count": 4200,
+      "req_count_mtime": 1719820000.0,
+      "frozen": true,
+      "sessions": { "sk-abcd|2026-06-28": {"total": 5, "qualified": 3} }
     }
   },
   "updated_at": 1719820100.0
 }
-
-通过比对每个 mtime_dir 下 .session_cache.jsonl 的 mtime+size 判断是否需要重新扫描。
-只重新读发生变化的目录，其余直接复用缓存的聚合结果。
 """
 
 import json
@@ -33,10 +30,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 _INDEX_FILE = ".stats_index.json"
-_VERSION = 2
+_VERSION = 3
 _lock = threading.Lock()
 
 QUALIFIED_THRESHOLD_DEFAULT = 5
+
+# ---------------------------------------------------------------------------
+# 进程级内存缓存
+# ---------------------------------------------------------------------------
+_MEM_TTL = 10  # 秒
+_mem_index: Optional[dict] = None
+_mem_index_ts: float = 0
+_mem_env_dir: Optional[str] = None  # 绑定的 env_dir，切换时失效
 
 
 def _index_path(env_dir: Path) -> str:
@@ -50,8 +55,11 @@ def _load_index(env_dir: Path) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if data.get("_version") != _VERSION:
-            return {"_version": _VERSION, "dirs": {}, "updated_at": 0}
+        if data.get("_version", 0) < _VERSION:
+            old_dirs = data.get("dirs", {})
+            for d in old_dirs.values():
+                d.setdefault("frozen", False)
+            return {"_version": _VERSION, "dirs": old_dirs, "updated_at": 0}
         return data
     except (OSError, json.JSONDecodeError):
         return {"_version": _VERSION, "dirs": {}, "updated_at": 0}
@@ -104,16 +112,47 @@ def _count_req_files(dir_path: Path) -> int:
         return 0
 
 
+def _get_active_tag() -> str:
+    """获取当前启动目录标签（如 '26070115'），用于判断活跃目录。"""
+    try:
+        from utils.log_paths import STARTUP_DATE_TAG
+        return STARTUP_DATE_TAG
+    except ImportError:
+        return ""
+
+
 def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                   force: bool = False) -> dict:
     """增量刷新索引，返回最新的 index data。
 
-    只重新扫描 .session_cache.jsonl 的 mtime 或 size 发生变化的目录。
+    - TTL 内直接返回内存缓存（<1ms）
+    - 过期后只 stat 活跃目录，frozen 目录跳过
+    - force=True 跳过 TTL + frozen，全量检查
     """
+    global _mem_index, _mem_index_ts, _mem_env_dir
+
+    env_dir_str = str(env_dir)
+    now = time.time()
+
+    # 快速路径：内存缓存命中
+    if (not force
+            and _mem_index is not None
+            and _mem_env_dir == env_dir_str
+            and (now - _mem_index_ts) < _MEM_TTL):
+        return _mem_index
+
     with _lock:
-        index = _load_index(env_dir)
+        # double-check：另一个线程可能刚刷新过
+        if (not force
+                and _mem_index is not None
+                and _mem_env_dir == env_dir_str
+                and (time.time() - _mem_index_ts) < _MEM_TTL):
+            return _mem_index
+
+        index = _mem_index if (_mem_env_dir == env_dir_str and _mem_index) else _load_index(env_dir)
         dirs_cache = index.get("dirs", {})
         changed = False
+        active_tag = _get_active_tag()
 
         current_dirs = set()
         if env_dir.is_dir():
@@ -123,10 +162,23 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                 dir_name = sub.name
                 current_dirs.add(dir_name)
 
+                prev = dirs_cache.get(dir_name)
+
+                # frozen 目录：已扫描过的历史目录，跳过 stat
+                if (not force and prev
+                        and prev.get("frozen")
+                        and dir_name != active_tag):
+                    continue
+
                 cache_file = sub / ".session_cache.jsonl"
                 if not cache_file.is_file():
-                    # 没有 session cache，统计 req 文件数
-                    prev = dirs_cache.get(dir_name)
+                    # 没有 session cache 的目录
+                    if prev and not force and prev.get("req_count", 0) > 0 and dir_name != active_tag:
+                        # 历史目录已有 req_count，标记 frozen 并跳过
+                        if not prev.get("frozen"):
+                            prev["frozen"] = True
+                            changed = True
+                        continue
                     try:
                         dir_mt = os.path.getmtime(str(sub))
                     except OSError:
@@ -139,6 +191,7 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                         "cache_size": 0,
                         "req_count": req_count,
                         "req_count_mtime": dir_mt,
+                        "frozen": dir_name != active_tag and req_count > 0,
                         "sessions": {},
                     }
                     changed = True
@@ -151,15 +204,17 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                 except OSError:
                     continue
 
-                prev = dirs_cache.get(dir_name)
                 if (not force and prev
                         and prev.get("cache_mtime") == c_mtime
                         and prev.get("cache_size") == c_size):
+                    # 无变化，如果是历史目录，标记 frozen
+                    if dir_name != active_tag and not prev.get("frozen"):
+                        prev["frozen"] = True
+                        changed = True
                     continue
 
                 sessions = _scan_session_cache(cache_file, threshold)
 
-                # req_count: 如果目录 mtime 没变且之前有值，复用
                 try:
                     dir_mt = os.path.getmtime(str(sub))
                 except OSError:
@@ -176,6 +231,7 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                     "cache_size": c_size,
                     "req_count": req_count,
                     "req_count_mtime": req_mt,
+                    "frozen": dir_name != active_tag,
                     "sessions": sessions,
                 }
                 changed = True
@@ -191,6 +247,11 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
             index["dirs"] = dirs_cache
             index["updated_at"] = time.time()
             _save_index(env_dir, index)
+
+        # 写入内存缓存
+        _mem_index = index
+        _mem_index_ts = time.time()
+        _mem_env_dir = env_dir_str
 
         return index
 

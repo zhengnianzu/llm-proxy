@@ -1,12 +1,10 @@
 """
 utils/session_routes.py — Session 会话统计 API
 
-使用 stats_index 增量索引，避免每次全量扫描 .session_cache.jsonl。
-索引持久化在 {env_dir}/.stats_index.json，只重新读变化的目录。
+使用 stats_index 增量索引 + 进程级内存缓存。
 """
 
 import os
-import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -19,21 +17,15 @@ from utils.stats_index import (
     QUALIFIED_THRESHOLD_DEFAULT,
 )
 
-_CACHE_TTL = 30
-
-_mem_cache: dict = {}
-_mem_cache_ts: float = 0
-
 
 def _build_stats_json(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT) -> dict:
-    """兼容接口：供 export_routes 等外部调用。"""
+    """兼容接口：供外部调用。"""
     index = refresh_index(env_dir, threshold)
     return build_stats_from_index(index, threshold)
 
 
 def register_session_routes(app: FastAPI, logs_dir: str) -> None:
     env_dir = Path(logs_dir).parent
-    cache_path = os.path.join(get_service_log_dir(), ".sessions_status.json")
 
     from fastapi.templating import Jinja2Templates
     _templates = Jinja2Templates(directory="templates")
@@ -49,24 +41,13 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/sessions/stats")
     def sessions_stats(threshold: int = QUALIFIED_THRESHOLD_DEFAULT, refresh: bool = False):
-        global _mem_cache, _mem_cache_ts
-
         if not Path(env_dir).is_dir():
             return JSONResponse({"error": f"directory not found: {env_dir}"}, status_code=404)
-
-        now = time.time()
-        if not refresh and _mem_cache and (now - _mem_cache_ts) < _CACHE_TTL:
-            if _mem_cache.get("_threshold") == threshold:
-                return JSONResponse(_mem_cache)
 
         index = refresh_index(env_dir, threshold, force=refresh)
         stats = build_stats_from_index(index, threshold)
 
         stats["_dir"] = str(env_dir)
         stats["_threshold"] = threshold
-        stats["_updated_at"] = now
-
-        _mem_cache = stats
-        _mem_cache_ts = now
 
         return JSONResponse(stats)
