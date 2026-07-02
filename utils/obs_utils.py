@@ -11,7 +11,7 @@ utils/obs_utils.py — OBS 路径管理与工具函数
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OBSUTIL_BIN = str(PROJECT_ROOT / "tools" / "obsutil" / "obsutil")
@@ -56,6 +56,51 @@ def load_obs_base() -> str:
         except Exception:
             continue
     return ""
+
+
+def load_sync_config() -> dict:
+    """读取 sync_config 配置文件（obs_base, interval, workers, upload_script）。"""
+    import yaml
+
+    cli_state_path = PROJECT_ROOT / ".cli_state.yaml"
+    if not cli_state_path.is_file():
+        return {}
+    try:
+        with open(cli_state_path, "r", encoding="utf-8") as f:
+            state = yaml.safe_load(f) or {}
+        sync_cfg = state.get("sync_config", "")
+        if not sync_cfg:
+            return {}
+        p = Path(sync_cfg)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        if not p.is_file():
+            return {}
+        with open(p, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+def get_sync_config_path() -> Optional[Path]:
+    """返回 sync_config YAML 文件路径（如果配置了）。"""
+    import yaml
+
+    cli_state_path = PROJECT_ROOT / ".cli_state.yaml"
+    if not cli_state_path.is_file():
+        return None
+    try:
+        with open(cli_state_path, "r", encoding="utf-8") as f:
+            state = yaml.safe_load(f) or {}
+        sync_cfg = state.get("sync_config", "")
+        if not sync_cfg:
+            return None
+        p = Path(sync_cfg)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        return p if p.is_file() else None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

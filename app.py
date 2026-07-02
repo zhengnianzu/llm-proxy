@@ -39,6 +39,8 @@ from utils.export_routes import register_export_routes
 from utils.channel_routes import register_channel_routes
 from utils.user_routes import register_user_routes
 from utils.export_store import init_db as init_export_db, mark_interrupted as mark_export_interrupted
+from utils.backup_store import init_db as init_backup_db
+from utils.backup_routes import register_backup_routes
 from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 
@@ -68,6 +70,7 @@ MONITOR_AUTH_EXACT_PATHS = {
     "/keys",
     "/channels",
     "/users",
+    "/backup",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -85,6 +88,7 @@ MONITOR_AUTH_PREFIX_PATHS = (
     "/api/keys/",
     "/api/channels/",
     "/api/export/",
+    "/api/backup/",
 )
 MONITOR_AUTH_PUBLIC_PATHS = {
     "/hi",
@@ -100,6 +104,7 @@ MONITOR_ADMIN_ONLY_PREFIXES = ("/api/users",)
 _PERM_PATH_MAP = {
     "/keys": "keys",
     "/channels": "channels",
+    "/backup": "backup",
 }
 _PERM_PREFIX_MAP = (
     ("/keys/export", "export"),
@@ -108,6 +113,7 @@ _PERM_PREFIX_MAP = (
     ("/api/keys/", "keys"),
     ("/channels/", "channels"),
     ("/api/channels/", "channels"),
+    ("/api/backup/", "backup"),
 )
 
 LOGS_DIR = get_log_dir("logs_all")
@@ -755,6 +761,7 @@ init_key_db(SERVICE_LOG_DIR)
 init_key_config(SERVICE_LOG_DIR)
 init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
+init_backup_db(SERVICE_LOG_DIR)
 init_user_db(SERVICE_LOG_DIR)
 mark_export_interrupted()
 _load_index()
@@ -1865,6 +1872,7 @@ register_session_routes(app, LOGS_DIR)
 register_key_routes(app, templates)
 register_channel_routes(app, templates)
 register_export_routes(app, LOGS_DIR)
+register_backup_routes(app, LOGS_DIR)
 register_user_routes(app, templates)
 
 

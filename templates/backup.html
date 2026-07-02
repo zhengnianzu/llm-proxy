@@ -1,0 +1,518 @@
+{% extends "_layout.html" %}
+
+{% block title %}备份管理{% endblock %}
+{% block mobile_title %}备份管理{% endblock %}
+
+{% block head_extra %}
+<script src="/static/js/vue.min.js"></script>
+{% endblock %}
+
+{% block page_styles %}
+/* config panel */
+.config-panel { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow); margin-bottom: 20px; }
+.config-panel h6 { font-weight: 700; margin-bottom: 14px; color: var(--foreground); font-size: .95rem; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.config-panel h6 .toggle-icon { transition: transform .2s; }
+.config-panel h6 .toggle-icon.collapsed { transform: rotate(-90deg); }
+.config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 768px) { .config-grid { grid-template-columns: 1fr; } }
+.config-field label { display: block; font-size: .82rem; color: var(--muted-foreground); margin-bottom: 4px; }
+.config-field input { width: 100%; }
+.config-actions { margin-top: 14px; display: flex; gap: 8px; }
+
+/* toolbar */
+.toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.toolbar .count { font-size: .84rem; color: var(--muted-foreground); }
+
+/* table */
+.dir-table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+.dir-table th { text-align: left; padding: 10px 8px; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--muted-foreground); font-size: .82rem; white-space: nowrap; }
+.dir-table td { padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.dir-table tr:hover td { background: color-mix(in srgb, var(--primary) 4%, transparent); }
+.dir-table .mono { font-family: var(--font-mono); }
+
+/* status badge */
+.status-badge { display: inline-block; font-size: .75rem; padding: 2px 10px; border-radius: 999px; font-weight: 600; }
+.status-badge.pending { background: var(--muted); color: var(--muted-foreground); }
+.status-badge.syncing { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); animation: pulse 1.5s infinite; }
+.status-badge.done { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.status-badge.error { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+.status-badge.deleted { background: var(--muted); color: var(--muted-foreground); text-decoration: line-through; }
+.status-badge.backed_up { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.status-badge.live_syncing { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); animation: pulse 1.5s infinite; border: 1px solid color-mix(in srgb, var(--success) 40%, transparent); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
+
+/* action buttons */
+.btn-xs { font-size: .78rem; padding: 3px 10px; border-radius: var(--radius); cursor: pointer; border: 1px solid var(--border); background: var(--card); color: var(--foreground); transition: all var(--transition); }
+.btn-xs:hover { border-color: var(--primary); color: var(--primary); }
+.btn-xs.danger:hover { border-color: var(--danger); color: var(--danger); }
+.btn-xs:disabled { opacity: .4; cursor: not-allowed; }
+
+/* checkbox */
+.dir-table input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; }
+
+/* drawer */
+.drawer-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(0,0,0,.3); z-index: 1000; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 560px; background: var(--card); z-index: 1001; box-shadow: var(--shadow-lg); overflow-y: auto; padding: 20px; display: flex; flex-direction: column; }
+@media (max-width: 640px) { .drawer { width: 100%; } }
+.drawer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-shrink: 0; }
+.drawer-header h6 { font-weight: 700; font-size: .95rem; margin: 0; }
+.drawer-body { flex: 1; overflow-y: auto; min-height: 0; }
+
+/* log entries */
+.log-entry { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: .82rem; display: flex; gap: 8px; }
+.log-entry:last-child { border-bottom: none; }
+.log-entry .log-time { color: var(--muted-foreground); white-space: nowrap; font-family: var(--font-mono); font-size: .78rem; }
+.log-entry .log-msg { flex: 1; word-break: break-all; }
+.log-entry.error .log-msg { color: var(--danger); }
+.log-entry.warn .log-msg { color: var(--warning); }
+
+.no-data { text-align: center; color: var(--muted-foreground); padding: 40px 0; }
+
+/* obs path link */
+.obs-link { color: var(--primary); cursor: pointer; text-decoration: none; }
+.obs-link:hover { text-decoration: underline; }
+
+/* obs browser drawer */
+.obs-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 560px; background: var(--card); z-index: 1003; box-shadow: var(--shadow-lg); overflow-y: auto; padding: 20px; display: flex; flex-direction: column; }
+@media (max-width: 640px) { .obs-drawer { width: 100%; } }
+.obs-drawer-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(0,0,0,.3); z-index: 1002; }
+.obs-item { display: flex; align-items: center; gap: 8px; padding: 8px 4px; border-bottom: 1px solid var(--border); font-size: .85rem; }
+.obs-item:last-child { border-bottom: none; }
+.obs-item .obs-icon { flex-shrink: 0; color: var(--muted-foreground); }
+.obs-item .obs-name { flex: 1; word-break: break-all; font-family: var(--font-mono); }
+.obs-item .obs-size { color: var(--muted-foreground); font-size: .78rem; white-space: nowrap; }
+.obs-item.is-dir { cursor: pointer; }
+.obs-item.is-dir:hover { background: color-mix(in srgb, var(--primary) 6%, transparent); }
+.obs-breadcrumb { font-size: .82rem; color: var(--muted-foreground); margin-bottom: 8px; font-family: var(--font-mono); word-break: break-all; }
+{% endblock %}
+
+{% block content %}
+<div id="app">
+{% raw %}
+    <!-- Config Panel -->
+    <div class="config-panel">
+        <h6 @click="showConfig = !showConfig">
+            <svg :class="['toggle-icon', {collapsed: !showConfig}]" width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M4 2l4 4-4 4z"/></svg>
+            备份配置
+        </h6>
+        <div v-if="showConfig">
+            <div class="config-grid">
+                <div class="config-field">
+                    <label>OBS 路径</label>
+                    <input v-model="config.obs_base" class="form-input" placeholder="obs://bucket/path/">
+                </div>
+                <div class="config-field">
+                    <label>并发线程数</label>
+                    <input v-model.number="config.workers" class="form-input" type="number" min="1" max="16">
+                </div>
+                <div class="config-field">
+                    <label>同步间隔（秒）</label>
+                    <input v-model.number="config.interval" class="form-input" type="number" min="60">
+                </div>
+                <div class="config-field">
+                    <label>上传脚本</label>
+                    <input v-model="config.upload_script" class="form-input" placeholder="./tools/obs_upload.sh">
+                </div>
+            </div>
+            <div class="config-actions">
+                <button class="btn btn-primary btn-sm" @click="saveConfig" :disabled="saving">{{ saving ? '保存中...' : '保存配置' }}</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+        <button class="btn btn-primary btn-sm" @click="syncSelected" :disabled="selectedDirs.length === 0 || syncing">
+            同步选中 ({{ selectedDirs.length }})
+        </button>
+        <button class="btn btn-sm danger" @click="deleteSelected" :disabled="deletableDirs.length === 0"
+            style="background:transparent;border:1px solid var(--danger);color:var(--danger);">
+            删除选中 ({{ deletableDirs.length }})
+        </button>
+        <button class="btn btn-sm" @click="refresh" :disabled="loading" style="background:transparent;border:1px solid var(--border);">
+            刷新
+        </button>
+        <span class="count">共 {{ dirs.length }} 个目录</span>
+    </div>
+
+    <!-- Dir Table -->
+    <div style="overflow-x: auto;">
+        <table class="dir-table" v-if="dirs.length > 0">
+            <thead>
+                <tr>
+                    <th><input type="checkbox" @change="toggleAll" :checked="allChecked"></th>
+                    <th>环境</th>
+                    <th>目录</th>
+                    <th>文件数</th>
+                    <th>状态</th>
+                    <th>同步时间</th>
+                    <th>OBS 路径</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr v-for="d in dirs" :key="d.dir_path">
+                    <td><input type="checkbox" v-model="checked" :value="d.dir_path"></td>
+                    <td class="mono">{{ d.env_name }}</td>
+                    <td class="mono">
+                        {{ d.mtime_tag }}
+                        <span v-if="d.is_active" style="font-size:.7rem;background:var(--success);color:#fff;padding:1px 6px;border-radius:99px;margin-left:4px;">活跃</span>
+                    </td>
+                    <td>{{ d.file_count }}</td>
+                    <td>
+                        <span :class="['status-badge', d.status]">{{ statusLabel(d.status) }}</span>
+                    </td>
+                    <td>{{ d.sync_time || '-' }}</td>
+                    <td class="mono" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="d.obs_path">
+                        <a v-if="d.obs_path" class="obs-link" @click.prevent="openObsBrowser(d.obs_path)">{{ d.obs_path }}</a>
+                        <span v-else>-</span>
+                    </td>
+                    <td style="white-space:nowrap;">
+                        <template v-if="d.is_active">
+                            <button class="btn-xs" v-if="d.status !== 'live_syncing'" @click="startLiveSync(d)" :disabled="liveSyncing || d.status === 'syncing'" style="background:color-mix(in srgb, var(--success) 10%, transparent);border-color:var(--success);color:var(--success);">开启在线同步</button>
+                            <button class="btn-xs danger" v-if="d.status === 'live_syncing'" @click="stopLiveSync(d)" :disabled="liveSyncing">停止在线同步</button>
+                        </template>
+                        <button class="btn-xs" @click="syncOne(d)" :disabled="d.status === 'syncing' || d.status === 'live_syncing'" v-if="d.status !== 'live_syncing'">同步</button>
+                        <button class="btn-xs" @click="openLogs(d)">详情</button>
+                        <button class="btn-xs danger" @click="deleteOne(d)" :disabled="d.status !== 'done'" v-if="d.status === 'done'">删除本地文件</button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        <div v-else class="no-data">
+            {{ loading ? '加载中...' : '没有数据目录' }}
+        </div>
+    </div>
+
+    <!-- Log Drawer -->
+    <div v-if="drawerDir" class="drawer-overlay" @click="closeLogs"></div>
+    <div v-if="drawerDir" class="drawer">
+        <div class="drawer-header">
+            <div>
+                <h6>{{ drawerDir.dir_path }}</h6>
+                <span :class="['status-badge', drawerDir.status]" style="margin-top:4px;">{{ statusLabel(drawerDir.status) }}</span>
+            </div>
+            <button class="btn-xs" @click="closeLogs">关闭</button>
+        </div>
+        <div class="drawer-body">
+            <div v-if="drawerLogs.length === 0" class="no-data">暂无日志</div>
+            <div v-for="log in drawerLogs" :key="log.id" :class="['log-entry', log.level]">
+                <span class="log-time">{{ log.created_at }}</span>
+                <span class="log-msg" style="white-space:pre-wrap;">{{ log.message }}</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- OBS Browser Drawer -->
+    <div v-if="obsDrawerPath" class="obs-drawer-overlay" @click="closeObsBrowser"></div>
+    <div v-if="obsDrawerPath" class="obs-drawer">
+        <div class="drawer-header">
+            <div>
+                <h6>OBS 导览</h6>
+            </div>
+            <button class="btn-xs" @click="closeObsBrowser">关闭</button>
+        </div>
+        <div class="obs-breadcrumb">{{ obsDrawerPath }}</div>
+        <div v-if="obsParentPath" style="margin-bottom:4px;">
+            <a class="obs-link" @click.prevent="browseObs(obsParentPath)" style="font-size:.82rem;">← 返回上级</a>
+        </div>
+        <div class="drawer-body">
+            <div v-if="obsLoading" class="no-data">加载中...</div>
+            <div v-else-if="obsItems.length === 0" class="no-data">目录为空</div>
+            <div v-for="item in obsItems" :key="item.path" :class="['obs-item', {'is-dir': item.is_dir}]" @click="item.is_dir && browseObs(item.path)">
+                <span class="obs-icon">
+                    <svg v-if="item.is_dir" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                </span>
+                <span class="obs-name">{{ item.name }}</span>
+                <span class="obs-size" v-if="!item.is_dir">{{ formatSize(item.size) }}</span>
+            </div>
+        </div>
+    </div>
+{% endraw %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+{% raw %}
+new Vue({
+    el: '#app',
+    data: {
+        dirs: [],
+        checked: [],
+        loading: false,
+        syncing: false,
+        showConfig: false,
+        config: { obs_base: '', workers: 4, interval: 600, upload_script: '' },
+        saving: false,
+        drawerDir: null,
+        drawerLogs: [],
+        pollTimer: null,
+        refreshTimer: null,
+        obsDrawerPath: null,
+        obsItems: [],
+        obsLoading: false,
+        obsHistory: [],
+        activeDir: '',
+        liveSyncing: false,
+    },
+    computed: {
+        allChecked() {
+            return this.dirs.length > 0 && this.checked.length === this.dirs.length;
+        },
+        selectedDirs() {
+            return this.checked;
+        },
+        deletableDirs() {
+            return this.checked.filter(dp => {
+                var d = this.dirs.find(x => x.dir_path === dp);
+                return d && d.status === 'done';
+            });
+        },
+        hasSyncing() {
+            return this.dirs.some(d => d.status === 'syncing' || d.status === 'live_syncing');
+        },
+        obsParentPath() {
+            if (!this.obsDrawerPath) return null;
+            var p = this.obsDrawerPath.replace(/\/+$/, '');
+            var idx = p.lastIndexOf('/');
+            if (idx <= 5) return null;
+            return p.substring(0, idx + 1);
+        },
+    },
+    methods: {
+        statusLabel(s) {
+            var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', deleted: '已删除', backed_up: '已备份' };
+            return m[s] || s;
+        },
+        toggleAll(e) {
+            if (e.target.checked) {
+                this.checked = this.dirs.map(d => d.dir_path);
+            } else {
+                this.checked = [];
+            }
+        },
+        refresh() {
+            this.loading = true;
+            fetch('/api/backup/dirs', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => { this.dirs = data.dirs || []; })
+                .catch(e => console.error(e))
+                .finally(() => { this.loading = false; });
+        },
+        loadConfig() {
+            fetch('/api/backup/config', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => { this.config = data; })
+                .catch(e => console.error(e));
+        },
+        saveConfig() {
+            this.saving = true;
+            fetch('/api/backup/config', {
+                method: 'PUT',
+                headers: { 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                body: JSON.stringify(this.config),
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) alert('配置已保存');
+                    else alert(data.detail || '保存失败');
+                })
+                .catch(e => alert('保存失败: ' + e))
+                .finally(() => { this.saving = false; });
+        },
+        syncOne(d) {
+            this._doSync([d.dir_path]);
+        },
+        syncSelected() {
+            if (this.selectedDirs.length === 0) return;
+            this._doSync(this.selectedDirs);
+        },
+        _doSync(dirs) {
+            this.syncing = true;
+            fetch('/api/backup/sync', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                body: JSON.stringify({ dirs: dirs }),
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.started) {
+                        data.started.forEach(dp => {
+                            var d = this.dirs.find(x => x.dir_path === dp);
+                            if (d) d.status = 'syncing';
+                        });
+                        this._startAutoRefresh();
+                    } else if (data.detail) {
+                        alert(data.detail);
+                    }
+                })
+                .catch(e => alert('同步请求失败: ' + e))
+                .finally(() => { this.syncing = false; });
+        },
+        deleteOne(d) {
+            if (!confirm('确定删除已同步的本地目录 ' + d.dir_path + '？此操作不可恢复。')) return;
+            this._doDelete(d.dir_path);
+        },
+        deleteSelected() {
+            if (this.deletableDirs.length === 0) return;
+            if (!confirm('确定删除 ' + this.deletableDirs.length + ' 个已同步目录？此操作不可恢复。')) return;
+            this.deletableDirs.forEach(dp => this._doDelete(dp));
+        },
+        _doDelete(dirPath) {
+            fetch('/api/backup/dirs/' + dirPath, {
+                method: 'DELETE',
+                headers: { 'x-requested-with': 'XMLHttpRequest' },
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        var d = this.dirs.find(x => x.dir_path === dirPath);
+                        if (d) d.status = 'backed_up';
+                        this.checked = this.checked.filter(c => c !== dirPath);
+                    } else {
+                        alert(data.detail || '删除失败');
+                    }
+                })
+                .catch(e => alert('删除失败: ' + e));
+        },
+        openLogs(d) {
+            this.drawerDir = d;
+            this._fetchLogs(d.dir_path);
+            if (d.status === 'syncing' || d.status === 'live_syncing') this._startLogPoll(d.dir_path);
+        },
+        closeLogs() {
+            this.drawerDir = null;
+            this.drawerLogs = [];
+            this._stopLogPoll();
+        },
+        _fetchLogs(dirPath) {
+            fetch('/api/backup/logs/' + dirPath, { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => {
+                    this.drawerLogs = data.logs || [];
+                    if (this.drawerDir) {
+                        this.drawerDir.status = data.status;
+                        if (data.status !== 'syncing' && data.status !== 'live_syncing') this._stopLogPoll();
+                    }
+                })
+                .catch(e => console.error(e));
+        },
+        _startLogPoll(dirPath) {
+            this._stopLogPoll();
+            this.pollTimer = setInterval(() => {
+                if (this.drawerDir && this.drawerDir.dir_path === dirPath) {
+                    this._fetchLogs(dirPath);
+                } else {
+                    this._stopLogPoll();
+                }
+            }, 3000);
+        },
+        _stopLogPoll() {
+            if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+        },
+        _startAutoRefresh() {
+            if (this.refreshTimer) return;
+            this.refreshTimer = setInterval(() => {
+                if (!this.hasSyncing) {
+                    clearInterval(this.refreshTimer);
+                    this.refreshTimer = null;
+                    return;
+                }
+                this.refresh();
+            }, 5000);
+        },
+        openObsBrowser(obsPath) {
+            this.obsDrawerPath = obsPath;
+            this.obsHistory = [];
+            this.browseObs(obsPath);
+        },
+        browseObs(obsPath) {
+            this.obsDrawerPath = obsPath;
+            this.obsLoading = true;
+            this.obsItems = [];
+            var encodedPath = obsPath.replace('obs://', '');
+            fetch('/api/backup/obs-browse/' + encodedPath, { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.items) {
+                        this.obsItems = data.items;
+                    } else {
+                        alert(data.detail || '加载失败');
+                    }
+                })
+                .catch(e => alert('加载失败: ' + e))
+                .finally(() => { this.obsLoading = false; });
+        },
+        closeObsBrowser() {
+            this.obsDrawerPath = null;
+            this.obsItems = [];
+            this.obsHistory = [];
+        },
+        formatSize(bytes) {
+            if (!bytes && bytes !== 0) return '';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+            return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+        },
+        loadActiveDir() {
+            fetch('/api/backup/active-dir', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => { this.activeDir = data.active_dir || ''; })
+                .catch(e => console.error(e));
+        },
+        startLiveSync(d) {
+            if (!confirm('确定为活跃目录 ' + d.dir_path + ' 开启在线同步？')) return;
+            this.liveSyncing = true;
+            fetch('/api/backup/live-sync/start', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                body: JSON.stringify({ dir_path: d.dir_path }),
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        d.status = 'live_syncing';
+                        this._startAutoRefresh();
+                    } else {
+                        alert(data.detail || '启动失败');
+                    }
+                })
+                .catch(e => alert('启动失败: ' + e))
+                .finally(() => { this.liveSyncing = false; });
+        },
+        stopLiveSync(d) {
+            if (!confirm('确定停止在线同步？')) return;
+            this.liveSyncing = true;
+            fetch('/api/backup/live-sync/stop', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                body: JSON.stringify({ dir_path: d.dir_path }),
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        d.status = 'done';
+                    } else {
+                        alert(data.detail || '停止失败');
+                    }
+                })
+                .catch(e => alert('停止失败: ' + e))
+                .finally(() => { this.liveSyncing = false; });
+        },
+    },
+    mounted() {
+        this.refresh();
+        this.loadConfig();
+        this.loadActiveDir();
+    },
+    beforeDestroy() {
+        this._stopLogPoll();
+        if (this.refreshTimer) clearInterval(this.refreshTimer);
+    },
+});
+{% endraw %}
+</script>
+{% endblock %}

@@ -173,8 +173,7 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                 cache_file = sub / ".session_cache.jsonl"
                 if not cache_file.is_file():
                     # 没有 session cache 的目录
-                    if prev and not force and prev.get("req_count", 0) > 0 and dir_name != active_tag:
-                        # 历史目录已有 req_count，标记 frozen 并跳过
+                    if prev and not force and dir_name != active_tag:
                         if not prev.get("frozen"):
                             prev["frozen"] = True
                             changed = True
@@ -191,7 +190,7 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                         "cache_size": 0,
                         "req_count": req_count,
                         "req_count_mtime": dir_mt,
-                        "frozen": dir_name != active_tag and req_count > 0,
+                        "frozen": dir_name != active_tag,
                         "sessions": {},
                     }
                     changed = True

@@ -295,6 +295,21 @@ def cmd_start(args: argparse.Namespace) -> int:
                 if not legacy_meta.exists():
                     eprint("[app] --sync: meta file not ready after 60s, skipping sync")
                     return 0
+            # 更新 backup DB：标记活跃目录为 live_syncing
+            try:
+                from utils.backup_store import init_db as init_backup_db, upsert_dir, update_sync_status, update_sync_pid, append_log
+                init_backup_db(str(svc_dir))
+                meta = _read_app_meta(port, service_slug, api_key_suffix)
+                logs_dir_val = meta.get("logs_dir", "")
+                if logs_dir_val.startswith("logs_all/"):
+                    dir_path = logs_dir_val[len("logs_all/"):]
+                    parts = dir_path.split("/", 1)
+                    if len(parts) == 2:
+                        upsert_dir(dir_path, parts[0], parts[1])
+                        update_sync_status(dir_path, "live_syncing")
+                        append_log(dir_path, "sync daemon started (--sync)")
+            except Exception as e:
+                eprint(f"[app] --sync: backup db update failed: {e}")
             args.interval = None
             cmd_sync_stop(args)
             return cmd_sync(args)
@@ -700,6 +715,22 @@ def cmd_sync(args: argparse.Namespace) -> int:
     print(f"[sync] started: pid={proc.pid} env={service_key}")
     print(f"[sync] {logs_dir} -> {obs_dst}")
     print(f"[sync] log -> {log_file}")
+
+    # 更新 backup DB：记录 PID 和 live_syncing 状态
+    try:
+        from utils.backup_store import init_db as init_backup_db, upsert_dir, update_sync_status, update_sync_pid, append_log
+        init_backup_db(str(svc_dir))
+        if logs_dir.startswith("logs_all/"):
+            dir_path = logs_dir[len("logs_all/"):]
+            parts = dir_path.split("/", 1)
+            if len(parts) == 2:
+                upsert_dir(dir_path, parts[0], parts[1])
+                update_sync_status(dir_path, "live_syncing", obs_path=obs_dst)
+                update_sync_pid(dir_path, proc.pid)
+                append_log(dir_path, f"在线同步已启动 (CLI): pid={proc.pid}")
+    except Exception as e:
+        eprint(f"[sync] backup db update failed: {e}")
+
     return 0
 
 
@@ -732,6 +763,7 @@ def cmd_sync_stop(args: argparse.Namespace) -> int:
 
     print(f"[sync] stopping pid={pid} env={service_key} (waiting for final sync...)")
     os.kill(pid, signal.SIGTERM)
+    force_killed = False
     for _ in range(1200):
         time.sleep(0.5)
         if not is_pid_running(pid):
@@ -741,6 +773,7 @@ def cmd_sync_stop(args: argparse.Namespace) -> int:
         print(f"[sync] force kill pid={pid}")
         os.kill(pid, signal.SIGKILL)
         time.sleep(0.2)
+        force_killed = True
 
     if pid_file_rel:
         (BASE_DIR / pid_file_rel).unlink(missing_ok=True)
@@ -748,6 +781,32 @@ def cmd_sync_stop(args: argparse.Namespace) -> int:
     sync_svc["stopped_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_state(state)
     print("[sync] stopped")
+
+    # 更新 backup DB：标记同步完成
+    logs_dir_val = sync_svc.get("logs_dir", "")
+    if logs_dir_val and logs_dir_val.startswith("logs_all/"):
+        dir_path = logs_dir_val[len("logs_all/"):]
+        try:
+            # 从 pid_file 路径反推 svc_dir: logs/port{N}/{slug}/sync.pid
+            svc_dir_str = ""
+            if pid_file_rel:
+                svc_dir_str = str((BASE_DIR / pid_file_rel).parent)
+            elif sync_svc.get("log_file"):
+                svc_dir_str = str((BASE_DIR / sync_svc["log_file"]).parent)
+            if svc_dir_str:
+                from utils.backup_store import init_db as init_backup_db, update_sync_status, update_sync_pid, append_log
+                init_backup_db(svc_dir_str)
+                if force_killed:
+                    update_sync_status(dir_path, "error", error_msg="sync daemon force killed")
+                    update_sync_pid(dir_path, None)
+                    append_log(dir_path, "sync daemon force killed", level="error")
+                else:
+                    update_sync_status(dir_path, "done")
+                    update_sync_pid(dir_path, None)
+                    append_log(dir_path, "sync daemon stopped, final sync completed")
+        except Exception as e:
+            eprint(f"[sync] backup db update failed: {e}")
+
     return 0
 
 

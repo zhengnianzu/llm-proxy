@@ -29,35 +29,14 @@ from utils.export_sync import export_session_index, sync_session_index, _load_se
 from utils.key_config import load_key_state
 from utils.key_store import list_keys, mask_key
 from utils.log_paths import get_service_log_dir
-from utils.obs_utils import load_obs_base, obsutil_ls
+from utils.obs_utils import load_obs_base, load_sync_config, obsutil_ls
 from utils.stats_index import refresh_index, build_stats_from_index, get_date_to_mtime_map
 
 logger = logging.getLogger(__name__)
 
 
 def _load_sync_config() -> dict:
-    """读取 sync_config 配置文件，获取 workers/interval 等参数。"""
-    import yaml
-    from utils.obs_utils import PROJECT_ROOT
-
-    cli_state_path = PROJECT_ROOT / ".cli_state.yaml"
-    if not cli_state_path.is_file():
-        return {}
-    try:
-        with open(cli_state_path, "r", encoding="utf-8") as f:
-            state = yaml.safe_load(f) or {}
-        sync_cfg = state.get("sync_config", "")
-        if not sync_cfg:
-            return {}
-        p = Path(sync_cfg)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if not p.is_file():
-            return {}
-        with open(p, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except Exception:
-        return {}
+    return load_sync_config()
 
 
 def _require_key_api(request: Request):

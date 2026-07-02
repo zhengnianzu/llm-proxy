@@ -1,14 +1,4 @@
-# OBS 同步配置
-# 用法: sync config settings/obs_base.yaml
-
-# OBS base 路径（必填）
-obs_base: obs://rl-agentdata/zhengnianzu/test/
-
-# 同步间隔（秒），默认 600（10分钟）
 interval: 600
-
-# 并发上传线程数，默认 4
-workers: 4
-
-# 自定义上传脚本路径（可选），默认使用 ./tools/obs_upload.sh
+obs_base: obs://rl-agentdata/zhengnianzu/test/
 upload_script: ./tools/obs_upload.sh
+workers: 4

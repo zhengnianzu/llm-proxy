@@ -61,7 +61,8 @@
             {% set show_keys = user_role == 'admin' or 'keys' in user_permissions %}
             {% set show_channels = user_role == 'admin' or 'channels' in user_permissions %}
             {% set show_export = user_role == 'admin' or 'export' in user_permissions %}
-            {% if show_keys or show_channels or show_export or user_role == 'admin' %}
+            {% set show_backup = user_role == 'admin' or 'backup' in user_permissions %}
+            {% if show_keys or show_channels or show_export or show_backup or user_role == 'admin' %}
             <div class="sidebar-section">
                 <div class="sidebar-section-label">管理</div>
                 {% if show_keys %}
@@ -80,6 +81,12 @@
                 <a href="/keys/export" class="sidebar-item {% if active_page == 'export' %}active{% endif %}" title="Session 导出">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                     <span>Session 导出</span>
+                </a>
+                {% endif %}
+                {% if show_backup %}
+                <a href="/backup" class="sidebar-item {% if active_page == 'backup' %}active{% endif %}" title="备份管理">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+                    <span>备份管理</span>
                 </a>
                 {% endif %}
                 {% if user_role == 'admin' %}
