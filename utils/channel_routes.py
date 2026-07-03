@@ -5,6 +5,7 @@
 - /api/keys/{key_id}/channels — Key-Channel 绑定
 """
 
+import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -12,8 +13,9 @@ from fastapi.templating import Jinja2Templates
 from utils.channel_store import (
     add_channel, list_channels, toggle_channel_alive, delete_channel,
     set_key_channels, get_key_channels, set_default_channel,
-    update_channel_invite_code,
+    update_channel_invite_code, get_channel_raw,
 )
+from utils.connection_test import run_test
 
 
 def _is_internal_request(request: Request) -> bool:
@@ -52,6 +54,32 @@ def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
         if not upstream_url or not upstream_key:
             return JSONResponse({"detail": "upstream_url and upstream_key are required"}, status_code=400)
         result = add_channel(name, upstream_url, upstream_key, invite_code=invite_code)
+        return JSONResponse(result)
+
+    @app.post("/api/channels/test")
+    async def api_channel_test(request: Request):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        channel_id = body.get("channel_id")
+        api_key = body.get("api_key", "")
+        model = body.get("model", "claude-sonnet-4-6")
+        method = body.get("method", "anthropic")
+        message = body.get("message", "")
+
+        if channel_id:
+            ch = get_channel_raw(channel_id)
+            if not ch:
+                return JSONResponse({"ok": False, "error": "渠道不存在"}, status_code=404)
+            base_url = ch["upstream_url"].rstrip("/").removesuffix("/v1")
+            result = run_test(base_url, method, model, ch["upstream_key"], message=message)
+        elif api_key:
+            port = os.getenv("PROXY_PORT", "4000")
+            result = run_test(f"http://127.0.0.1:{port}", method, model, api_key, message=message)
+        else:
+            return JSONResponse({"ok": False, "error": "需要 channel_id 或 api_key"}, status_code=400)
+
         return JSONResponse(result)
 
     @app.post("/api/channels/{channel_id}/toggle")

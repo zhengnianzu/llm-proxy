@@ -24,6 +24,12 @@
 .auth-badge-off .dot { background: var(--destructive); }
 .auth-badge-warn .dot { background: var(--warning); }
 .copy-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--foreground); color: var(--background); padding: 8px 20px; border-radius: var(--radius); font-size: 13px; z-index: 9999; }
+.test-result { margin-top: 12px; padding: 12px; border-radius: var(--radius); font-size: .85rem; word-break: break-all; }
+.test-result.ok { background: color-mix(in srgb, var(--success) 10%, var(--card)); border: 1px solid var(--success); }
+.test-result.fail { background: color-mix(in srgb, var(--destructive) 10%, var(--card)); border: 1px solid var(--destructive); }
+.test-result .label { font-weight: 600; min-width: 80px; display: inline-block; color: var(--muted-foreground); }
+.test-form-grid { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+.test-form-grid .form-field { flex: 1; min-width: 120px; }
 {% endblock %}
 
 {% block content %}
@@ -91,6 +97,7 @@
                     <td class="text-muted small">{{ k.invite_code || '-' }}</td>
                     <td class="text-muted small">{{ k.created_at }}</td>
                     <td>
+                        <button class="btn btn-outline btn-sm" @click="openTest(k)">测试</button>
                         <button v-if="k.status === 'active'" class="btn btn-ghost btn-sm" @click="toggleKey(k.id, 'disable')">停用</button>
                         <button v-else class="btn btn-ghost btn-sm" @click="toggleKey(k.id, 'enable')">启用</button>
                         <button class="btn btn-destructive btn-sm ms-1" @click="removeKey(k.id, k.key)">删除</button>
@@ -155,6 +162,46 @@
             </div>
         </div>
     </div>
+
+    <!-- 测试 Key 弹窗 -->
+    <div v-if="testModal">
+        <div class="modal-backdrop" @click="testModal = false"></div>
+        <div class="modal-dialog">
+            <h5 class="modal-title">测试 Key — {{ testKeyName }}</h5>
+            <div class="test-form-grid mb-3">
+                <div class="form-field">
+                    <label class="form-label-sm" style="display:block;font-size:.8rem;color:var(--muted-foreground);margin-bottom:4px">模型</label>
+                    <input v-model="testModel" class="input input-sm" placeholder="claude-sonnet-4-6">
+                </div>
+                <div class="form-field" style="min-width:100px;flex:0 0 auto">
+                    <label class="form-label-sm" style="display:block;font-size:.8rem;color:var(--muted-foreground);margin-bottom:4px">调用方式</label>
+                    <select v-model="testMethod" class="input input-sm">
+                        <option value="anthropic">Anthropic</option>
+                        <option value="openai">OpenAI</option>
+                    </select>
+                </div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label-sm" style="display:block;font-size:.8rem;color:var(--muted-foreground);margin-bottom:4px">消息（留空使用默认）</label>
+                <input v-model="testMessage" class="input input-sm" placeholder="Say hi in one sentence.">
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="btn btn-ghost btn-sm" @click="testModal = false">关闭</button>
+                <button class="btn btn-primary btn-sm" @click="runTest" :disabled="testLoading">
+                    {{ testLoading ? '测试中…' : '测试' }}
+                </button>
+            </div>
+            <div v-if="testResult" class="test-result" :class="testResult.ok ? 'ok' : 'fail'">
+                <div><span class="label">状态：</span>{{ testResult.ok ? '成功' : '失败' }}</div>
+                <div v-if="testResult.status_code"><span class="label">HTTP：</span>{{ testResult.status_code }}</div>
+                <div v-if="testResult.elapsed_ms != null"><span class="label">耗时：</span>{{ testResult.elapsed_ms }}ms</div>
+                <div v-if="testResult.model_used"><span class="label">模型：</span>{{ testResult.model_used }}</div>
+                <div v-if="testResult.tokens"><span class="label">Token：</span>{{ testResult.tokens }}</div>
+                <div v-if="testResult.reply"><span class="label">回复：</span>{{ testResult.reply }}</div>
+                <div v-if="testResult.error"><span class="label">错误：</span><span style="color:var(--destructive)">{{ testResult.error }}</span></div>
+            </div>
+        </div>
+    </div>
 {% endraw %}
 </div>
 {% endblock %}
@@ -171,6 +218,9 @@ new Vue({
         editingKeyId: null, selectedChannelIds: [],
         toastMsg: '',
         filterName: '', filterInvite: '',
+        testModal: false, testKeyId: null, testKeyName: '', testKeyValue: '',
+        testModel: 'claude-sonnet-4-6', testMethod: 'anthropic', testMessage: '',
+        testLoading: false, testResult: null,
     },
     computed: {
         filteredKeys: function() {
@@ -265,6 +315,37 @@ new Vue({
             fetch('/api/keys/' + k.id + '/reveal', {headers: this._h()})
                 .then(r => r.json())
                 .then(d => { if (d.key) this.$set(k, '_revealedKey', d.key); });
+        },
+        openTest(k) {
+            this.testKeyId = k.id;
+            this.testKeyName = k.name || '#' + k.id;
+            this.testKeyValue = '';
+            this.testResult = null;
+            this.testLoading = false;
+            this.testModal = true;
+            var self = this;
+            fetch('/api/keys/' + k.id + '/reveal', {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) { if (d.key) self.testKeyValue = d.key; });
+        },
+        runTest() {
+            if (!this.testKeyValue) { alert('无法获取 Key 值'); return; }
+            this.testLoading = true;
+            this.testResult = null;
+            var self = this;
+            fetch('/api/channels/test', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({
+                    api_key: this.testKeyValue,
+                    model: this.testModel,
+                    method: this.testMethod,
+                    message: this.testMessage || undefined,
+                })
+            }).then(function(r) { return r.json(); }).then(function(d) {
+                self.testResult = d;
+                self.testLoading = false;
+            }).catch(function() { self.testLoading = false; });
         }
     }
 });

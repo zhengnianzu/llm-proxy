@@ -176,6 +176,16 @@ def get_default_channel() -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_channel_raw(channel_id: int) -> Optional[dict]:
+    """获取含完整 upstream_key 的渠道（测试用）。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, name, upstream_url, upstream_key, alive FROM channels WHERE id = ?",
+        (channel_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def set_default_channel(channel_id: int) -> bool:
     """设置某个渠道为默认（清除旧默认）。"""
     conn = _get_conn()
