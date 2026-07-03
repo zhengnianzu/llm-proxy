@@ -250,6 +250,16 @@ def resolve_channel_for_key(key_id: int) -> Optional[dict]:
     return dict(chosen)
 
 
+def has_channel_bindings(key_id: int) -> bool:
+    """检查 key 是否有渠道绑定（不管 alive 状态）。"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM key_channel_bindings WHERE key_id = ? LIMIT 1",
+        (key_id,),
+    ).fetchone()
+    return row is not None
+
+
 def get_channels_for_key_display(key_id: int) -> list[str]:
     """返回某个 key 绑定的渠道 key 后4位列表。"""
     conn = _get_conn()

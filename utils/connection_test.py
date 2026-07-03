@@ -113,6 +113,12 @@ def run_test(
                 usage = data.get("usage", {})
                 result["tokens"] = f"in={usage.get('prompt_tokens', '?')} out={usage.get('completion_tokens', '?')}"
             result["ok"] = True
+            ch_key = resp.headers.get("x-channel-key", "")
+            if ch_key:
+                result["channel_key"] = ch_key
+            ch_fallback = resp.headers.get("x-channel-fallback", "")
+            if ch_fallback:
+                result["channel_fallback"] = ch_fallback
         else:
             try:
                 result["error"] = resp.text[:300]
@@ -138,6 +144,10 @@ def print_result(r: dict) -> None:
     if r.get("ok"):
         print(f"  Model used: {r.get('model_used', '?')}")
         print(f"  Tokens: {r.get('tokens', '?')}")
+        if r.get("channel_key"):
+            print(f"  Channel: {r['channel_key']}")
+        if r.get("channel_fallback"):
+            print(f"  ⚠ 回退: 绑定渠道全部离线，已回退到默认渠道/.env")
         print(f"  Reply: {(r.get('reply') or '')[:200]}")
     else:
         print(f"  Error: {r.get('error', 'unknown')}")

@@ -366,6 +366,15 @@ def build_upstream_headers(x_auth_token: str, model_id: str, upstream_key_overri
     return headers
 
 
+def _channel_response_headers(channel_key: str, fallback: str) -> dict:
+    h = {}
+    if channel_key:
+        h["X-Channel-Key"] = channel_key
+    if fallback:
+        h["X-Channel-Fallback"] = fallback
+    return h
+
+
 def _ssl_verify() -> bool:
     return os.getenv("SSL_VERIFY", "true").lower() != "false"
 
@@ -826,7 +835,8 @@ async def anthropic_messages(req: Request):
     """anthropic透传"""
     _api_key = await validate_api_key(req)
     _channel = resolve_upstream_channel(_api_key)
-    _channel_key = _channel["upstream_key"][-4:] if _channel else ""
+    _channel_key = _channel.get("upstream_key", "")[-4:] if _channel else ""
+    _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -859,12 +869,12 @@ async def anthropic_messages(req: Request):
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
-    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel else os.environ['UPSTREAM_URL'].rstrip('/')
+    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel and _channel.get("upstream_url") else os.environ['UPSTREAM_URL'].rstrip('/')
     upstream_url = f"{_upstream_base}/messages"
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
-    _key_override = _channel["upstream_key"] if _channel else ""
+    _key_override = _channel.get("upstream_key", "") if _channel else ""
     upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
     body["model"] = upstream_headers['Model-Id']
 
@@ -968,6 +978,7 @@ async def anthropic_messages(req: Request):
             content=r.content,
             status_code=r.status_code,
             media_type=r.headers.get("content-type", "application/json"),
+            headers=_channel_response_headers(_channel_key, _channel_fallback),
         )
 
     # ---- stream SSE (pure pass-through) ----
@@ -1129,7 +1140,8 @@ async def openai_chat_completions(req: Request):
     """
     _api_key = await validate_api_key(req)
     _channel = resolve_upstream_channel(_api_key)
-    _channel_key = _channel["upstream_key"][-4:] if _channel else ""
+    _channel_key = _channel.get("upstream_key", "")[-4:] if _channel else ""
+    _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -1163,12 +1175,12 @@ async def openai_chat_completions(req: Request):
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
-    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel else os.environ['UPSTREAM_URL'].rstrip('/')
+    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel and _channel.get("upstream_url") else os.environ['UPSTREAM_URL'].rstrip('/')
     upstream_url = f"{_upstream_base}/chat/completions"
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
-    _key_override = _channel["upstream_key"] if _channel else ""
+    _key_override = _channel.get("upstream_key", "") if _channel else ""
     upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
     body["model"] = upstream_headers['Model-Id']
     # 根据当前请求是否开启 ban_explore 来处理 Task 工具描述
@@ -1255,6 +1267,7 @@ async def openai_chat_completions(req: Request):
             content=r.content,
             status_code=r.status_code,
             media_type=r.headers.get("content-type", "application/json"),
+            headers=_channel_response_headers(_channel_key, _channel_fallback),
         )
 
     # ---- stream SSE (OpenAI SSE pass-through) ----
@@ -1368,7 +1381,8 @@ async def openai_responses(req: Request):
     """
     _api_key = await validate_api_key(req)
     _channel = resolve_upstream_channel(_api_key)
-    _channel_key = _channel["upstream_key"][-4:] if _channel else ""
+    _channel_key = _channel.get("upstream_key", "")[-4:] if _channel else ""
+    _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
     body_model = body.get("model")
@@ -1401,12 +1415,12 @@ async def openai_responses(req: Request):
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
-    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel else os.environ['UPSTREAM_URL'].rstrip('/')
+    _upstream_base = _channel["upstream_url"].rstrip("/") if _channel and _channel.get("upstream_url") else os.environ['UPSTREAM_URL'].rstrip('/')
     upstream_url = f"{_upstream_base}/responses"
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
-    _key_override = _channel["upstream_key"] if _channel else ""
+    _key_override = _channel.get("upstream_key", "") if _channel else ""
     upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
     body["model"] = upstream_headers['Model-Id']
 
@@ -1493,6 +1507,7 @@ async def openai_responses(req: Request):
             content=r.content,
             status_code=r.status_code,
             media_type=r.headers.get("content-type", "application/json"),
+            headers=_channel_response_headers(_channel_key, _channel_fallback),
         )
 
     # ---- stream SSE (Responses API pass-through) ----

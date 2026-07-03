@@ -197,6 +197,8 @@
                 <div v-if="testResult.elapsed_ms != null"><span class="label">耗时：</span>{{ testResult.elapsed_ms }}ms</div>
                 <div v-if="testResult.model_used"><span class="label">模型：</span>{{ testResult.model_used }}</div>
                 <div v-if="testResult.tokens"><span class="label">Token：</span>{{ testResult.tokens }}</div>
+                <div v-if="testResult.channel_key"><span class="label">渠道：</span><span class="badge badge-info">{{ testResult.channel_key }}</span></div>
+                <div v-if="testResult.channel_fallback" style="color:var(--warning)"><span class="label">⚠ 回退：</span>绑定渠道全部离线，已回退到默认渠道</div>
                 <div v-if="testResult.reply"><span class="label">回复：</span>{{ testResult.reply }}</div>
                 <div v-if="testResult.error"><span class="label">错误：</span><span style="color:var(--destructive)">{{ testResult.error }}</span></div>
             </div>
