@@ -407,6 +407,7 @@
         </select>
         <span class="min-msg-label">最少消息数</span>
         <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
+        {% if not shared_mode %}
         <span class="min-msg-label">API Key</span>
         <div class="searchable-select" id="filterKeyWrap">
             <div class="ss-display" onclick="toggleSSDropdown('filterKeyWrap')"><span id="filterKeyLabel">全部</span></div>
@@ -418,6 +419,9 @@
             </div>
         </div>
         <input type="hidden" id="filterKey" value="" />
+        {% else %}
+        <input type="hidden" id="filterKey" value="{{ shared_api_key|default('') }}" />
+        {% endif %}
         <span class="min-msg-label">模型</span>
         <select class="folder-select" id="filterModel" onchange="reloadWithModel()">
             <option value="">全部</option>
@@ -476,6 +480,17 @@ if (typeof marked !== 'undefined') {
     marked.setOptions({ breaks: true, gfm: true });
 }
 // ----------------------------------------------------------------
+// Shared mode (public key+code access)
+// ----------------------------------------------------------------
+const _sharedMode = {{ 'true' if shared_mode is defined and shared_mode else 'false' }};
+const _sharedKey = '{{ shared_api_key|default("") }}';
+const _sharedCode = '{{ shared_code|default("") }}';
+function _apiPrefix() { return _sharedMode ? '/api/shared/logs' : '/logs'; }
+function _sharedParams() {
+    if (!_sharedMode) return '';
+    return '&key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode);
+}
+// ----------------------------------------------------------------
 // State
 // ----------------------------------------------------------------
 const PAGE_SIZE = 50;
@@ -502,18 +517,18 @@ function currentLogDir() {
 async function loadLogDirs() {
     if (_logDirsLoaded) return;
     try {
-        const res = await fetch('/logs/dirs');
+        const res = await fetch(_apiPrefix() + '/dirs?' + (_sharedMode ? 'key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode) : ''));
         const data = await res.json();
         const sel = document.getElementById('logDirSelect');
         sel.innerHTML = '';
         (data.dirs || []).forEach(d => {
             const opt = document.createElement('option');
             opt.value = d.name;
-            var label = d.name;
+            var label = d.label || d.name;
             if (d.count !== undefined) label += ' (' + d.count + ')';
             if (d.current) label += ' (当前)';
             opt.textContent = label;
-            if (d.current) opt.selected = true;
+            if (_sharedMode ? d.name === '__ALL__' : d.current) opt.selected = true;
             sel.appendChild(opt);
         });
         _logDirsLoaded = true;
@@ -535,6 +550,7 @@ function maskKey(key) {
 
 function updateKeyDropdown() {
     const wrap = document.getElementById('filterKeyWrap');
+    if (!wrap) return;  // hidden in shared mode
     const hidden = document.getElementById('filterKey');
     const current = hidden.value;
     const optionsContainer = wrap.querySelector('.ss-options');
@@ -624,8 +640,11 @@ function resetAndLoad() {
     _searchQuery = '';
     _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
-    document.getElementById('filterKey').value = '';
-    document.getElementById('filterKeyLabel').textContent = '全部';
+    if (!_sharedMode) {
+        document.getElementById('filterKey').value = '';
+        var keyLabel = document.getElementById('filterKeyLabel');
+        if (keyLabel) keyLabel.textContent = '全部';
+    }
     fileListEl.innerHTML = '<div class="cv-sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
     loadFileList(true);
@@ -660,21 +679,22 @@ function reloadWithModel() {
 async function loadFileList(refresh = false) {
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
-    const filterKey = document.getElementById('filterKey').value;
+    const filterKey = _sharedMode ? _sharedKey : document.getElementById('filterKey').value;
     const filterModel = document.getElementById('filterModel').value;
     const resolvedKey = filterKey === '__default__' ? '' : filterKey;
     let params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
     const logDir = currentLogDir();
     if (logDir) params += `&log_dir=${encodeURIComponent(logDir)}`;
-    if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
+    if (!_sharedMode && filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
     if (filterModel) params += `&model=${encodeURIComponent(filterModel)}`;
     if (refresh) params += '&refresh=true';
     if (_deepSearchQuery) params += `&search=${encodeURIComponent(_deepSearchQuery)}`;
+    params += _sharedParams();
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg' || folder === 'agg') {
         sidebarTitle.textContent = `对话聚合 (≥${min} 条)`;
         try {
-            const res = await fetch(`/logs/aggregate${params}`);
+            const res = await fetch(`${_apiPrefix()}/aggregate${params}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             const items = data.items || [];
@@ -739,7 +759,7 @@ async function loadFileList(refresh = false) {
     } else {
         sidebarTitle.textContent = `单文件列表 (≥${min} 条)`;
         try {
-            const res = await fetch(`/logs/list${params}`);
+            const res = await fetch(`${_apiPrefix()}/list${params}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             const items = data.items || [];
@@ -821,7 +841,7 @@ async function selectAggChain(idx, el) {
         try {
             const logDir = currentLogDir();
             const fileParams = `filename=${encodeURIComponent(chain.latest_file)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`;
-            const res = await fetch(`/logs/file?${fileParams}`);
+            const res = await fetch(`${_apiPrefix()}/file?${fileParams}${_sharedParams()}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             data._req_file = chain.latest_file;
@@ -843,7 +863,7 @@ async function selectFile(item, el) {
     try {
         const logDir = currentLogDir();
         const fileParams = `filename=${encodeURIComponent(item.filename)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`;
-        const res = await fetch(`/logs/file?${fileParams}`);
+        const res = await fetch(`${_apiPrefix()}/file?${fileParams}${_sharedParams()}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         data._req_file = item.filename;
@@ -867,7 +887,7 @@ async function loadTraceFile(el, filename) {
     try {
         const logDir = currentLogDir();
         const fileParams = `filename=${encodeURIComponent(filename)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`;
-        const res = await fetch(`/logs/file?${fileParams}`);
+        const res = await fetch(`${_apiPrefix()}/file?${fileParams}${_sharedParams()}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         data._req_file = filename;
@@ -942,7 +962,7 @@ function renderJson(data, filename) {
     header.className = 'metadata';
     header.innerHTML = `
         <div class="metadata-title">请求文件</div>
-        <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="/logs/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
+        <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
     `;
     chatPanel.appendChild(header);
     const pre = document.createElement('pre');
@@ -976,7 +996,7 @@ function renderMessages(data, filename) {
             ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${data.temperature}</span></div>` : ''}
             ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${data.max_tokens}</span></div>` : ''}
             <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
-            <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="/logs/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
+            <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
         `;
         chatPanel.appendChild(meta);
     }
@@ -1688,7 +1708,7 @@ loadLogDirs().then(() => {
             try {
                 let fp = `filename=${encodeURIComponent(_urlFile)}`;
                 if (_urlLogDir) fp += `&log_dir=${encodeURIComponent(_urlLogDir)}`;
-                const res = await fetch(`/logs/file?${fp}`);
+                const res = await fetch(`${_apiPrefix()}/file?${fp}${_sharedParams()}`);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 data._req_file = _urlFile;

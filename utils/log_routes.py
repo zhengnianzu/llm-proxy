@@ -513,6 +513,81 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
 
     return {"items": items, "total": total, "known_keys": saved_known_keys, "known_models": sorted(known_models)}
 
+
+def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
+    env_path = Path(env_dir)
+    if not env_path.is_dir():
+        return {"items": [], "total": 0, "known_keys": [], "known_models": []}
+
+    sub_dirs = sorted(
+        [d for d in env_path.iterdir() if d.is_dir()],
+        key=lambda d: d.name, reverse=True,
+    )
+
+    all_sessions = []
+    all_known_keys: set = set()
+    all_known_models: set = set()
+
+    with _CACHE_LOCK:
+        for sub in sub_dirs:
+            root_dir = str(sub)
+            current_state = _state(kind, root_dir)
+            if refresh or not current_state["initialized"]:
+                _refresh_state(kind, root_dir)
+            for session in current_state["sessions"].values():
+                if api_key and (session.get("api_key", "") or "") != api_key:
+                    continue
+                for m in session.get("models", []):
+                    if m:
+                        all_known_models.add(m)
+                if session.get("msg_count", 0) < min_messages:
+                    continue
+                if model and model not in session.get("models", []):
+                    continue
+                all_sessions.append((session, root_dir))
+            all_known_keys.update(current_state["known_keys"])
+
+    if search and search.strip():
+        search = search.strip()
+        all_sessions = [(s, rd) for s, rd in all_sessions if _match_messages_content(rd, s.get("latest_file", ""), search)]
+
+    all_sessions.sort(key=lambda t: t[0].get("last_ts", ""), reverse=True)
+    total = len(all_sessions)
+    paged = all_sessions[offset:offset + limit] if limit > 0 else all_sessions[offset:]
+
+    items = []
+    for session, _ in paged:
+        models = session.get("models", [])
+        if not models and session.get("model"):
+            models = [session["model"]]
+        payload = {
+            "first_time": _format_time(session["first_ts"]),
+            "last_time": _format_time(session["last_ts"]),
+            "file_count": len(session.get("trace_list", [])),
+            "message_count": session.get("msg_count", 0),
+            "models": models,
+            "latest_file": session.get("latest_file", ""),
+            "api_key": session.get("api_key", ""),
+            "q1_preview": session.get("q1", ""),
+            "trace_list": session.get("trace_list", []),
+        }
+        items.append(payload)
+
+    return {"items": items, "total": total, "known_keys": sorted(all_known_keys), "known_models": sorted(all_known_models)}
+
+
+def _find_file_in_all_dirs(env_dir: str, filename: str) -> Optional[str]:
+    env_path = Path(env_dir)
+    if not env_path.is_dir():
+        return None
+    for sub in sorted(env_path.iterdir(), key=lambda d: d.name, reverse=True):
+        if sub.is_dir():
+            candidate = sub / filename
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def register_log_routes(app: FastAPI) -> None:
     _current_log_dir = get_log_dir("logs_all")
     _env_dir = str(Path(_current_log_dir).parent)
@@ -541,6 +616,7 @@ def register_log_routes(app: FastAPI) -> None:
         from utils.stats_index import refresh_index, get_dir_counts
         current_tag = Path(_current_log_dir).name
         dirs = []
+        total_count = 0
         env_path = Path(_env_dir)
         if env_path.is_dir():
             index = refresh_index(env_path)
@@ -548,11 +624,13 @@ def register_log_routes(app: FastAPI) -> None:
             for sub in sorted(env_path.iterdir(), reverse=True):
                 if sub.is_dir():
                     count = counts.get(sub.name, 0)
+                    total_count += count
                     dirs.append({
                         "name": sub.name,
                         "current": sub.name == current_tag,
                         "count": count,
                     })
+        dirs.insert(0, {"name": "__ALL__", "current": False, "count": total_count, "label": "全部目录"})
         return JSONResponse({"dirs": dirs, "current": current_tag})
 
     # --- 统一路由（新） ---
@@ -565,17 +643,23 @@ def register_log_routes(app: FastAPI) -> None:
     def logs_file(filename: str, log_dir: str = ""):
         if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
-        target_dir = resolve_log_dir(log_dir)
-        path = os.path.join(target_dir, filename)
-        if not os.path.isfile(path):
-            # fallback: 在当前目录和 legacy 目录中搜索
-            for search_dir in [unified_log_dir(), anthropic_log_dir(), openai_log_dir()]:
-                alt = os.path.join(search_dir, filename)
-                if os.path.isfile(alt):
-                    path = alt
-                    break
-            else:
+        if log_dir == "__ALL__":
+            found = _find_file_in_all_dirs(_env_dir, filename)
+            if not found:
                 return JSONResponse({"error": "file not found"}, status_code=404)
+            path = found
+        else:
+            target_dir = resolve_log_dir(log_dir)
+            path = os.path.join(target_dir, filename)
+            if not os.path.isfile(path):
+                # fallback: 在当前目录和 legacy 目录中搜索
+                for search_dir in [unified_log_dir(), anthropic_log_dir(), openai_log_dir()]:
+                    alt = os.path.join(search_dir, filename)
+                    if os.path.isfile(alt):
+                        path = alt
+                        break
+                else:
+                    return JSONResponse({"error": "file not found"}, status_code=404)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         res_path = Path(path).with_name(filename.replace("-req.json", "-res.json"))
@@ -592,20 +676,28 @@ def register_log_routes(app: FastAPI) -> None:
     def logs_file_download(filename: str, log_dir: str = ""):
         if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
-        target_dir = resolve_log_dir(log_dir)
-        path = os.path.join(target_dir, filename)
-        if not os.path.isfile(path):
-            for search_dir in [unified_log_dir(), anthropic_log_dir(), openai_log_dir()]:
-                alt = os.path.join(search_dir, filename)
-                if os.path.isfile(alt):
-                    path = alt
-                    break
-            else:
+        if log_dir == "__ALL__":
+            found = _find_file_in_all_dirs(_env_dir, filename)
+            if not found:
                 return JSONResponse({"error": "file not found"}, status_code=404)
+            path = found
+        else:
+            target_dir = resolve_log_dir(log_dir)
+            path = os.path.join(target_dir, filename)
+            if not os.path.isfile(path):
+                for search_dir in [unified_log_dir(), anthropic_log_dir(), openai_log_dir()]:
+                    alt = os.path.join(search_dir, filename)
+                    if os.path.isfile(alt):
+                        path = alt
+                        break
+                else:
+                    return JSONResponse({"error": "file not found"}, status_code=404)
         return FileResponse(path, filename=filename, media_type="application/json")
 
     @app.get("/logs/aggregate")
     def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = "", search: str = ""):
+        if log_dir == "__ALL__":
+            return JSONResponse(_aggregate_all_payload("anthropic", _env_dir, min_messages, offset, limit, api_key, refresh, model, search))
         return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model, search))
 
     # --- 旧路由（别名，向后兼容） ---
@@ -633,3 +725,46 @@ def register_log_routes(app: FastAPI) -> None:
     @app.get("/logs/openai/aggregate")
     def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = ""):
         return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search))
+
+    # --- shared 公开路由（key+code 验证） ---
+
+    def _check_shared(key: str, code: str) -> Optional[JSONResponse]:
+        import hmac as _hmac
+        from utils.key_store import find_key
+        expected = os.getenv("SHARED_CODE", "shared")
+        if not _hmac.compare_digest(code, expected):
+            return JSONResponse({"detail": "Invalid code"}, status_code=403)
+        if not key or not find_key(key):
+            return JSONResponse({"detail": "Key not found"}, status_code=404)
+        return None
+
+    @app.get("/api/shared/logs/dirs")
+    def shared_logs_dirs(key: str = "", code: str = ""):
+        err = _check_shared(key, code)
+        if err:
+            return err
+        return logs_dirs()
+
+    @app.get("/api/shared/logs/aggregate")
+    def shared_logs_aggregate(key: str = "", code: str = "", min_messages: int = 1, offset: int = 0, limit: int = 50, refresh: bool = False, model: str = "", log_dir: str = "", search: str = ""):
+        err = _check_shared(key, code)
+        if err:
+            return err
+        target_dir = log_dir or "__ALL__"
+        if target_dir == "__ALL__":
+            return JSONResponse(_aggregate_all_payload("anthropic", _env_dir, min_messages, offset, limit, key, refresh, model, search))
+        return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(target_dir), min_messages, offset, limit, key, refresh, model, search))
+
+    @app.get("/api/shared/logs/file")
+    def shared_logs_file(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
+        err = _check_shared(key, code)
+        if err:
+            return err
+        return logs_file(filename, log_dir=log_dir or "__ALL__")
+
+    @app.get("/api/shared/logs/file/download")
+    def shared_logs_file_download(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
+        err = _check_shared(key, code)
+        if err:
+            return err
+        return logs_file_download(filename, log_dir=log_dir or "__ALL__")

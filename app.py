@@ -22,7 +22,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from utils.token_index import query_token_stats, query_key_stats, query_channel_stats, query_channel_keys
 from utils.auth import validate_api_key, resolve_upstream_channel
-from utils.key_store import init_db as init_key_db
+from utils.key_store import init_db as init_key_db, find_key as _find_key
 from utils.key_config import init_key_config
 from utils.channel_store import init_db as init_channel_db
 from utils.metrics import (
@@ -96,6 +96,7 @@ MONITOR_AUTH_PUBLIC_PATHS = {
     "/logout",
     "/register",
     "/invite",
+    "/history/shared",
 }
 
 MONITOR_ADMIN_ONLY_PATHS = {"/users"}
@@ -243,6 +244,11 @@ def _ctx(request: Request, active_page: str, **extra) -> dict:
     }
     ctx.update(extra)
     return ctx
+
+
+def _verify_shared_code(code: str) -> bool:
+    expected = os.getenv("SHARED_CODE", "shared")
+    return hmac.compare_digest(code, expected)
 
 
 def _normalize_next_path(next_path: str) -> str:
@@ -1622,6 +1628,28 @@ async def chat_viewer(request: Request):
         request,
         "chat-viewer.html",
         context=_ctx(request, "history"),
+    )
+
+
+@app.get("/history/shared")
+async def chat_viewer_shared(request: Request, key: str = "", code: str = ""):
+    if not _verify_shared_code(code):
+        return JSONResponse({"detail": "Invalid code"}, status_code=403)
+    record = _find_key(key) if key else None
+    if not record:
+        return JSONResponse({"detail": "Key not found"}, status_code=404)
+    return templates.TemplateResponse(
+        request,
+        "chat-viewer.html",
+        context={
+            "active_page": "history",
+            "user_role": "shared",
+            "user_name": record.get("name", ""),
+            "user_permissions": [],
+            "shared_mode": True,
+            "shared_api_key": key,
+            "shared_code": code,
+        },
     )
 
 

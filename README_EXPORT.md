@@ -257,3 +257,67 @@ running          → 显示 "导出中" 或 "质检中"（根据 mode）
 | `utils/obs_sync.py` | OBS 上传工具函数 |
 | `tools/obs_upload.sh` | obsutil cp 包装脚本 |
 | `templates/export.html` | 前端页面（Vue 2 单文件） |
+
+## 公开访问（无需登录）
+
+通过 `key + code` 参数可无需登录访问对话历史和导出功能。`code` 由 `.env` 中的 `SHARED_CODE` 配置，默认值为 `shared`。
+
+### 查看对话历史
+
+浏览器直接访问：
+
+```
+http://<host>:<port>/history/shared?key=<完整API Key>&code=<验证码>
+```
+
+示例：
+
+```
+http://127.0.0.1:4000/history/shared?key=sk-abc123def456&code=shared
+```
+
+页面默认展示该 key 在所有时间目录下的对话记录，支持切换目录、搜索、分页滚动加载。
+
+### 导出带质检的轨迹
+
+**发起导出**（POST）：
+
+```bash
+curl -X POST http://<host>:<port>/api/shared/export \
+  -H "Content-Type: application/json" \
+  -d '{"key": "sk-abc123def456", "code": "shared"}'
+```
+
+可选指定 OBS 前缀：
+
+```bash
+curl -X POST http://<host>:<port>/api/shared/export \
+  -H "Content-Type: application/json" \
+  -d '{"key": "sk-abc123def456", "code": "shared", "obs_prefix": "obs://bucket/path"}'
+```
+
+返回：
+
+```json
+{"record_id": 1, "session_path": "obs://bucket/path/session_analysis/...", "status": "running"}
+```
+
+**查询导出状态**（GET）：
+
+```bash
+curl "http://<host>:<port>/api/shared/export/status/<record_id>?key=sk-abc123def456&code=shared"
+```
+
+返回：
+
+```json
+{"record_id": 1, "status": "success", "session_path": "obs://...", "total_sessions": 42, "error_message": ""}
+```
+
+### 配置验证码
+
+在 `.env` 文件中设置 `SHARED_CODE`（不设置则默认 `shared`）：
+
+```env
+SHARED_CODE=my_secret_code
+```

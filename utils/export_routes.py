@@ -448,3 +448,83 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             return JSONResponse({"report_md": content, "record_id": record_id})
 
         return JSONResponse({"detail": "报告未生成"}, status_code=404)
+
+    # --- shared 公开导出路由（key+code 验证） ---
+
+    def _check_shared_export(key: str, code: str):
+        import hmac as _hmac
+        from utils.key_store import find_key
+        expected = os.getenv("SHARED_CODE", "shared")
+        if not _hmac.compare_digest(code, expected):
+            return JSONResponse({"detail": "Invalid code"}, status_code=403)
+        if not key or not find_key(key):
+            return JSONResponse({"detail": "Key not found"}, status_code=404)
+        return None
+
+    @app.post("/api/shared/export")
+    async def shared_export(request: Request):
+        body = await request.json()
+        key_value = body.get("key", "")
+        code = body.get("code", "")
+
+        err = _check_shared_export(key_value, code)
+        if err:
+            return err
+
+        index = refresh_index(env_dir)
+        stats = build_stats_from_index(index)
+        mtime_dirs = []
+        for row in stats.get("rows", []):
+            if row["api_key"] == key_value:
+                mtime_dirs = sorted(row.get("mtime_cells", {}).keys(), reverse=True)
+                break
+        if not mtime_dirs:
+            return JSONResponse({"detail": "No session data found for this key"}, status_code=404)
+
+        api_key = key_value
+        slot = _key_slot(api_key)
+        obs_prefix = body.get("obs_prefix", "").strip().rstrip("/") or load_obs_base()
+        mode = "eval"
+        now_tag = datetime.now().strftime("%y%m%d%H%M%S")
+
+        record_id = create_record(
+            api_key=api_key, key_slot=slot,
+            mtime_dirs=json.dumps(mtime_dirs),
+            mode=mode,
+        )
+
+        obs_dst = f"{obs_prefix}/session_analysis/{env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
+
+        t = threading.Thread(
+            target=_run_task,
+            args=(record_id, env_dir, env_key_name, obs_prefix, now_tag, mode),
+            daemon=True,
+        )
+        t.start()
+
+        return JSONResponse({
+            "record_id": record_id,
+            "session_path": obs_dst,
+            "status": "running",
+        })
+
+    @app.get("/api/shared/export/status/{record_id}")
+    def shared_export_status(record_id: int, key: str = "", code: str = ""):
+        err = _check_shared_export(key, code)
+        if err:
+            return err
+
+        rec = get_record(record_id)
+        if not rec:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+
+        if rec.get("api_key") and rec["api_key"] != key:
+            return JSONResponse({"detail": "Access denied"}, status_code=403)
+
+        return JSONResponse({
+            "record_id": rec["id"],
+            "status": rec["status"],
+            "session_path": rec.get("obs_dst", ""),
+            "total_sessions": rec.get("total_sessions", 0),
+            "error_message": rec.get("error_message", ""),
+        })
