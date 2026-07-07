@@ -524,12 +524,10 @@ async def register_page(request: Request):
         return RedirectResponse(url="/", status_code=303)
     from utils.user_store import has_users
     no_db_users = not has_users()
-    if not no_db_users and not _is_monitor_authenticated(request):
-        return RedirectResponse(url="/login", status_code=303)
     return templates.TemplateResponse(
         request,
         "register.html",
-        context={"error": "", "is_first_user": False},
+        context={"error": "", "is_first_user": no_db_users},
         headers={"Cache-Control": "no-store"},
     )
 
@@ -546,9 +544,6 @@ async def register_submit(request: Request):
 
     from utils.user_store import has_users
     no_db_users = not has_users()
-
-    if not no_db_users and not _is_monitor_authenticated(request):
-        return RedirectResponse(url="/login", status_code=303)
 
     def _render_error(msg, code=400):
         return templates.TemplateResponse(
