@@ -12,7 +12,6 @@ import subprocess as _subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List
 
@@ -205,108 +204,36 @@ def _scan_data_dirs(logs_all: Path) -> List[dict]:
 
 
 def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int, upload_script: str):
-    """在后台线程中同步单个目录到 OBS，记录命令和执行过程。"""
-    from utils.obs_sync import _read_new_entries, _collect_files
-    from utils.obs_utils import run_upload_cmd, DEFAULT_UPLOAD_SCRIPT
+    """在后台线程中同步单个目录到 OBS，直接上传整个文件夹，流式输出日志。"""
+    import subprocess as sp
+    from utils.obs_utils import DEFAULT_UPLOAD_SCRIPT
 
     logs_dir = str(logs_all / dir_path)
     env_name, mtime_tag = dir_path.split("/", 1)
     obs_dst = f"{obs_base.rstrip('/')}/raw/{env_name}/{mtime_tag}/"
     script = upload_script or DEFAULT_UPLOAD_SCRIPT
+    if not Path(script).is_absolute():
+        script = str((Path(__file__).resolve().parent.parent / script).resolve())
 
     try:
         update_sync_status(dir_path, "syncing", obs_path=obs_dst)
         append_log(dir_path, f"开始同步: {dir_path} -> {obs_dst}")
 
-        state_file = Path(logs_dir) / ".sync_state.json"
-        import json
-        line_offset = 0
-        if state_file.is_file():
-            try:
-                with open(state_file, "r") as f:
-                    line_offset = json.load(f).get("line_offset", 0)
-            except Exception:
-                pass
+        cmd = [script, logs_dir, obs_dst]
+        append_log(dir_path, f"执行: {' '.join(cmd)}")
+        proc = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.STDOUT, text=True)
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                append_log(dir_path, line)
+        proc.wait(timeout=600)
 
-        entries, total_lines = _read_new_entries(logs_dir, line_offset)
-        append_log(dir_path, f"读取 index.jsonl: offset={line_offset}, 新条目={len(entries)}, 总行数={total_lines}")
-
-        if not entries:
-            append_log(dir_path, "没有新条目需要同步")
-            # 同步 meta 文件
-            for meta_name in ("index.jsonl", ".session_cache.jsonl"):
-                meta_file = Path(logs_dir) / meta_name
-                if meta_file.is_file():
-                    dst = obs_dst.rstrip("/") + "/" + meta_name
-                    cmd_str = f"{script} {meta_file} {dst}"
-                    append_log(dir_path, f"执行: {cmd_str}")
-                    ok, msg = run_upload_cmd(str(meta_file), dst, upload_script or None)
-                    if ok:
-                        append_log(dir_path, f"{meta_name} 上传成功")
-                    else:
-                        append_log(dir_path, f"{meta_name} 上传失败: {msg}", level="error")
+        if proc.returncode == 0:
             update_sync_status(dir_path, "done", obs_path=obs_dst)
             append_log(dir_path, "同步完成")
-            return
-
-        files_by_ts = _collect_files(logs_dir, entries)
-        all_files = []
-        for ts_files in files_by_ts.values():
-            all_files.extend(ts_files)
-
-        append_log(dir_path, f"收集到 {len(all_files)} 个文件待上传")
-
-        if not all_files:
-            append_log(dir_path, "没有文件需要上传")
         else:
-            ok_count = 0
-            fail_count = 0
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {}
-                for fp in all_files:
-                    dst = obs_dst.rstrip("/") + "/" + fp.name
-                    futures[executor.submit(run_upload_cmd, str(fp), dst, upload_script or None)] = fp
-                for future in as_completed(futures):
-                    fp = futures[future]
-                    dst = obs_dst.rstrip("/") + "/" + fp.name
-                    cmd_str = f"{script} {fp} {dst}"
-                    try:
-                        ok, msg = future.result()
-                        if ok:
-                            ok_count += 1
-                        else:
-                            fail_count += 1
-                            append_log(dir_path, f"上传失败 [{fp.name}]: {cmd_str}\n{msg}", level="error")
-                    except Exception as e:
-                        fail_count += 1
-                        append_log(dir_path, f"上传异常 [{fp.name}]: {cmd_str}\n{e}", level="error")
-
-            append_log(dir_path, f"文件上传完成: 成功={ok_count}, 失败={fail_count}")
-
-        # 上传 meta 文件
-        for meta_name in ("index.jsonl", ".session_cache.jsonl"):
-            meta_file = Path(logs_dir) / meta_name
-            if meta_file.is_file():
-                dst = obs_dst.rstrip("/") + "/" + meta_name
-                cmd_str = f"{script} {meta_file} {dst}"
-                append_log(dir_path, f"执行: {cmd_str}")
-                ok, msg = run_upload_cmd(str(meta_file), dst, upload_script or None)
-                if ok:
-                    append_log(dir_path, f"{meta_name} 上传成功")
-                else:
-                    append_log(dir_path, f"{meta_name} 上传失败: {msg}", level="error")
-
-        # 更新 sync state
-        import json as _json
-        try:
-            state_data = {"line_offset": total_lines, "last_sync_at": __import__("datetime").datetime.now().isoformat(timespec="seconds")}
-            with open(str(state_file), "w") as f:
-                _json.dump(state_data, f, indent=2)
-        except Exception:
-            pass
-
-        update_sync_status(dir_path, "done", obs_path=obs_dst)
-        append_log(dir_path, "同步完成")
+            append_log(dir_path, f"上传失败: exit_code={proc.returncode}", level="error")
+            update_sync_status(dir_path, "error", error_msg=f"exit_code={proc.returncode}", obs_path=obs_dst)
     except Exception as e:
         update_sync_status(dir_path, "error", error_msg=str(e))
         append_log(dir_path, f"同步失败: {e}", level="error")
