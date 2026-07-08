@@ -26,20 +26,20 @@
 {% raw %}
 <div id="app">
     <div class="filter-bar mb-3">
-        <div class="grid grid-6 items-center">
-            <div>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:end;">
+            <div style="min-width:140px; flex:1;">
                 <label class="form-label text-sm">开始日期</label>
                 <input type="date" class="input input-sm" v-model="startDate">
             </div>
-            <div>
+            <div style="min-width:140px; flex:1;">
                 <label class="form-label text-sm">结束日期</label>
                 <input type="date" class="input input-sm" v-model="endDate">
             </div>
-            <div>
+            <div style="min-width:140px; flex:1;">
                 <label class="form-label text-sm">模型</label>
                 <input type="text" class="input input-sm" v-model="histModel" placeholder="多个用 , 分隔">
             </div>
-            <div>
+            <div style="min-width:100px; flex:1;">
                 <label class="form-label text-sm">状态</label>
                 <select class="input input-sm" v-model="statusFilter">
                     <option value="">全部</option>
@@ -47,11 +47,18 @@
                     <option value="error">失败</option>
                 </select>
             </div>
-            <div>
+            <div style="min-width:130px; flex:1;">
                 <label class="form-label text-sm">渠道</label>
                 <select class="input input-sm" v-model="channelKeyFilter">
                     <option value="">全部渠道</option>
                     <option v-for="ck in channelKeyList" :key="ck" :value="ck">{{ maskKey(ck) }}</option>
+                </select>
+            </div>
+            <div style="min-width:130px; flex:1;">
+                <label class="form-label text-sm">API Key</label>
+                <select class="input input-sm" v-model="apiKeyFilter">
+                    <option value="">全部 Key</option>
+                    <option v-for="ak in apiKeyList" :key="ak" :value="ak">{{ maskKey(ak) }}</option>
                 </select>
             </div>
             <div class="flex gap-2" style="align-self:end;">
@@ -192,6 +199,7 @@ new Vue({
     data: {
         histModel: '', startDate: '', endDate: '', statusFilter: '',
         channelKeyFilter: '', channelKeyList: [],
+        apiKeyFilter: '', apiKeyList: [],
         items: [], summaryList: [], keyStats: [], channelStats: [],
         sortField: 'date_start', sortAsc: true, loading: false,
         syncedAt: '',
@@ -210,6 +218,7 @@ new Vue({
             if (this.endDate) p.append('date_end', this.endDate);
             if (this.statusFilter) p.append('status', this.statusFilter);
             if (this.channelKeyFilter) p.append('channel_key', this.channelKeyFilter);
+            if (this.apiKeyFilter) p.append('api_key', this.apiKeyFilter);
             if (refresh) p.append('refresh', '1');
 
             const pKeys = new URLSearchParams();
@@ -239,6 +248,7 @@ new Vue({
             this.histModel = '';
             this.statusFilter = '';
             this.channelKeyFilter = '';
+            this.apiKeyFilter = '';
             this.fetchData(false);
         },
         applySort() {
@@ -268,6 +278,11 @@ new Vue({
                 this.channelKeyList = d.channel_keys || [];
             }).catch(() => {});
         },
+        fetchApiKeys() {
+            fetch('/api/statistic/api-keys').then(r => r.json()).then(d => {
+                this.apiKeyList = d.api_keys || [];
+            }).catch(() => {});
+        },
     },
     mounted() {
         // 默认时间范围：过去一个月到今天
@@ -276,6 +291,7 @@ new Vue({
         this.startDate = oneMonthAgo.toISOString().slice(0, 10);
         this.endDate = now.toISOString().slice(0, 10);
         this.fetchChannelKeys();
+        this.fetchApiKeys();
         this.fetchData(false);
     }
 });

@@ -414,6 +414,96 @@ date_end: 过滤日期-结束，格式YYYY-MM-DD
 status: 过滤状态: 全部、成功、失败
 ```
 
+### Token 统计计算规则
+
+代理层记录每次请求时，从上游 API 返回的原始 `usage` 中提取 token 数据，写入 `index.jsonl`。
+
+#### index.jsonl 记录字段
+
+| 字段 | 含义 | 来源 |
+|------|------|------|
+| `tok_in` | 输入 token（不含缓存） | Anthropic: `input_tokens`；OpenAI: `prompt_tokens` |
+| `tok_out` | 输出 token | Anthropic: `output_tokens`；OpenAI: `completion_tokens` |
+| `cache_in` | 缓存 token（读取 + 写入） | Anthropic: `cache_read_input_tokens` + `cache_creation_input_tokens`；OpenAI: 0 |
+| `usage` | 上游返回的原始 usage 字典 | 完整保留，用于精确计费和审计 |
+
+#### Anthropic（Claude）usage 字段
+
+| 字段 | 示例 | 含义 | 计费归类 |
+|------|------|------|----------|
+| `input_tokens` | 3 | 非缓存输入 token | 输入 · 标准价 |
+| `cache_read_input_tokens` | 71800 | 缓存命中读取 | 输入 · 0.1× 价 |
+| `cache_creation_input_tokens` | 529 | 缓存写入 | 输入 · 1.25× 价 |
+| `output_tokens` | 251 | 输出 token（含 thinking） | 输出 · 标准价 |
+| `output_tokens_details.thinking_tokens` | 114 | 其中思考 token | 已含在 output_tokens |
+| `cache_creation.ephemeral_5m_input_tokens` | 529 | 5 分钟 TTL 缓存写入明细 | 已含在 cache_creation_input_tokens |
+| `cache_creation.ephemeral_1h_input_tokens` | 0 | 1 小时 TTL 缓存写入明细 | 已含在 cache_creation_input_tokens |
+| `iterations[]` | — | 多轮 tool_use 每轮明细 | 已含在顶层汇总 |
+| `server_tool_use.web_search_requests` | 1 | 服务端 web_search 调用次数 | 按次独立计费 |
+| `server_tool_use.web_fetch_requests` | 1 | 服务端 web_fetch 调用次数 | 按次独立计费 |
+| `inference_geo` | "global" | 推理地区 | 不计费 |
+| `service_tier` | "standard" | 服务层级 | 不计费 |
+
+**Anthropic 实际输入 token 总量** = `input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens`
+
+**Anthropic 输出 token 总量** = `output_tokens`
+
+#### OpenAI / DeepSeek usage 字段
+
+| 字段 | 示例 | 含义 | 计费归类 |
+|------|------|------|----------|
+| `prompt_tokens` | 14 | 输入 token 总量（含缓存） | 输入 · 标准价 |
+| `prompt_tokens_details.cached_tokens` | 0 | 其中缓存命中 | 已含在 prompt_tokens · 0.5× 价 |
+| `prompt_cache_hit_tokens` | 0 | DeepSeek 缓存命中 | 同上（DeepSeek 专用字段） |
+| `prompt_cache_miss_tokens` | 14 | DeepSeek 缓存未命中 | 已含在 prompt_tokens · 标准价 |
+| `completion_tokens` | 26 | 输出 token 总量（含推理） | 输出 · 标准价 |
+| `completion_tokens_details.reasoning_tokens` | 24 | 其中推理/思考 token | 已含在 completion_tokens |
+| `prompt_tokens_details.cached_creation_tokens` | — | 缓存写入（如有） | 已含在 prompt_tokens |
+| `prompt_tokens_details.image_tokens` | — | 图片输入 token | 已含在 prompt_tokens |
+| `prompt_tokens_details.audio_tokens` | — | 音频输入 token | 已含在 prompt_tokens |
+| `completion_tokens_details.image_tokens` | — | 图片输出 token | 已含在 completion_tokens |
+| `completion_tokens_details.audio_tokens` | — | 音频输出 token | 已含在 completion_tokens |
+| `total_tokens` | 41 | prompt + completion 总和 | 汇总，不单独计费 |
+
+**OpenAI 输入 token 总量** = `prompt_tokens`（已包含缓存部分）
+
+**OpenAI 输出 token 总量** = `completion_tokens`
+
+#### 上游平台注入字段
+
+上游代理平台（如 One API / New API）可能在 usage 中注入额外字段：
+
+| 字段 | 含义 |
+|------|------|
+| `claude_cache_creation_5_m_tokens` | 平台转换的 5 分钟缓存写入数 |
+| `claude_cache_creation_1_h_tokens` | 平台转换的 1 小时缓存写入数 |
+| `cache_read_tokens` | 平台转换的缓存读取数 |
+| `usage_semantic` / `usage_source` | 平台元数据标识 |
+| `speed` | 生成速度 |
+
+这些字段仅供参考，不参与本代理的 token 统计计算。
+
+#### 差异说明
+
+Anthropic 和 OpenAI 在 token 统计上的主要差异：
+
+```text
+                    Anthropic                    OpenAI / DeepSeek
+输入 token 字段     input_tokens                 prompt_tokens
+                   （不含缓存 token）              （已含缓存 token）
+
+缓存 token         cache_read_input_tokens       prompt_tokens_details.cached_tokens
+                   cache_creation_input_tokens    prompt_cache_hit_tokens (DeepSeek)
+
+输出 token 字段     output_tokens                completion_tokens
+
+思考 token         output_tokens_details         completion_tokens_details
+                   .thinking_tokens              .reasoning_tokens
+                  （已含在 output_tokens 中）     （已含在 completion_tokens 中）
+```
+
+关键区别：Anthropic 的 `input_tokens` **不含**缓存 token，需要额外加上 `cache_read` 和 `cache_creation` 才是完整输入量；OpenAI 的 `prompt_tokens` **已包含**缓存 token。
+
 ## 多轮对话可视化
 
 ```text

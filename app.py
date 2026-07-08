@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from utils.token_index import query_token_stats, query_key_stats, query_channel_stats, query_channel_keys
+from utils.token_index import query_token_stats, query_key_stats, query_channel_stats, query_channel_keys, query_api_keys
 from utils.auth import validate_api_key, resolve_upstream_channel
 from utils.key_store import init_db as init_key_db, find_key as _find_key
 from utils.key_config import init_key_config
@@ -118,6 +118,7 @@ _PERM_PREFIX_MAP = (
 )
 
 LOGS_DIR = get_log_dir("logs_all")
+ENV_DIR = os.path.dirname(LOGS_DIR)
 
 SERVICE_LOG_DIR = get_service_log_dir()
 
@@ -657,10 +658,11 @@ def _extract_q1_preview(messages, kind="anthropic"):
 
 
 def _append_index(ts: str, req_file: str, provider: str, model: str = "",
-                  tok_in: int = 0, tok_out: int = 0, success: bool = True,
+                  tok_in: int = 0, tok_out: int = 0, cache_in: int = 0,
+                  success: bool = True,
                   api_key: str = "", chain_key: str = "", q1_preview: str = "",
                   total_attempts: int = 1, start_turn: int = 0,
-                  channel_key: str = ""):
+                  channel_key: str = "", usage: dict = None):
     """统一追加请求记录到 index.jsonl，并更新内存计数。"""
     global _first_count, _total_count, _valid_count
     entry = {
@@ -670,6 +672,7 @@ def _append_index(ts: str, req_file: str, provider: str, model: str = "",
         "model": model,
         "tok_in": tok_in,
         "tok_out": tok_out,
+        "cache_in": cache_in,
         "success": success,
         "api_key": api_key,
         "chain_key": chain_key,
@@ -678,6 +681,7 @@ def _append_index(ts: str, req_file: str, provider: str, model: str = "",
         "retried": total_attempts > 1,
         "start_turn": start_turn,
         "channel_key": channel_key,
+        "usage": usage or {},
     }
     index_file = _index_path_for_req_file(req_file)
     os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
@@ -729,21 +733,22 @@ def _extract_q1_preview_responses(input_data) -> str:
     return ""
 
 
-def _append_index_anthropic(ts, req_path, total_attempts, valid, model="", tok_in=0, tok_out=0, api_key="", messages=None, channel_key=""):
+def _append_index_anthropic(ts, req_path, total_attempts, valid, model="", tok_in=0, tok_out=0, cache_in=0, api_key="", messages=None, channel_key="", usage=None):
     msgs = messages or []
     _append_index(
         ts, req_path, provider="anthropic", model=model,
-        tok_in=tok_in, tok_out=tok_out, success=valid,
+        tok_in=tok_in, tok_out=tok_out, cache_in=cache_in, success=valid,
         api_key=api_key,
         chain_key=build_chain_key(msgs),
         q1_preview=_extract_q1_preview(msgs),
         total_attempts=total_attempts,
         start_turn=get_first_user_text(msgs, return_index=True)[1],
         channel_key=channel_key,
+        usage=usage,
     )
 
 
-def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", messages=None, channel_key=""):
+def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", messages=None, channel_key="", usage=None):
     msgs = messages or []
     _append_index(
         ts, req_path, provider="openai", model=model,
@@ -752,10 +757,11 @@ def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=Tr
         chain_key=build_chain_key(msgs),
         q1_preview=_extract_q1_preview(msgs),
         channel_key=channel_key,
+        usage=usage,
     )
 
 
-def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", input_data=None, channel_key=""):
+def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", input_data=None, channel_key="", usage=None):
     _append_index(
         ts, req_path, provider="responses", model=model,
         tok_in=tok_in, tok_out=tok_out, success=success,
@@ -763,6 +769,7 @@ def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success
         chain_key=_extract_chain_key_responses(input_data),
         q1_preview=_extract_q1_preview_responses(input_data),
         channel_key=channel_key,
+        usage=usage,
     )
 
 
@@ -966,15 +973,17 @@ async def anthropic_messages(req: Request):
                 )
 
         _dump_json(res_path, _resp_to_obj(r))
-        tok_in, tok_out = 0, 0
+        tok_in, tok_out, cache_in = 0, 0, 0
+        usage = {}
         try:
             resp_json = r.json()
             usage = resp_json.get("usage", {})
             tok_in = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+            cache_in = (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
         except Exception:
             pass
-        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, cache_in=cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1113,14 +1122,17 @@ async def anthropic_messages(req: Request):
             yield f"event: error\ndata: {json.dumps(err_event, ensure_ascii=False)}\n\n".encode("utf-8")
         finally:
             _dump_json(res_path, {"type": "anthropic_passthrough_sse_capture", "chunks": up_chunks})
-            _tok_in, _tok_out = 0, 0
+            _tok_in, _tok_out, _cache_in = 0, 0, 0
+            _usage_raw = {}
             for _c in up_chunks:
                 if isinstance(_c, dict):
                     _u = _c.get("message", {}).get("usage") or _c.get("usage") or {}
                     if _u:
-                        _tok_in = (_u.get("input_tokens") or 0) + (_u.get("cache_creation_input_tokens") or 0) + (_u.get("cache_read_input_tokens") or 0)
+                        _usage_raw.update(_u)
+                        _tok_in = _u.get("input_tokens") or 0
                         _tok_out = _u.get("output_tokens") or 0
-            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+                        _cache_in = (_u.get("cache_read_input_tokens") or 0) + (_u.get("cache_creation_input_tokens") or 0)
+            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, cache_in=_cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw)
 
 
     return StreamingResponse(
@@ -1256,6 +1268,7 @@ async def openai_chat_completions(req: Request):
 
         _dump_json(res_path, _resp_to_obj(r))
         tok_in, tok_out = 0, 0
+        usage = {}
         try:
             resp_json = r.json()
             usage = resp_json.get("usage", {})
@@ -1263,7 +1276,7 @@ async def openai_chat_completions(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1358,12 +1371,15 @@ async def openai_chat_completions(req: Request):
             _dump_json(res_path, {"type": "openai_passthrough_sse_capture", "chunks": up_chunks})
             # 统计 token（从 usage chunk 提取）
             _tok_in, _tok_out = 0, 0
+            _usage_raw = {}
             for _c in up_chunks:
                 if isinstance(_c, dict):
                     _u = _c.get("usage") or {}
+                    if _u:
+                        _usage_raw.update(_u)
                     _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
-            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw)
 
     return StreamingResponse(
         sse_passthrough(),
@@ -1496,6 +1512,7 @@ async def openai_responses(req: Request):
 
         _dump_json(res_path, _resp_to_obj(r))
         tok_in, tok_out = 0, 0
+        usage = {}
         try:
             resp_json = r.json()
             usage = resp_json.get("usage", {})
@@ -1503,7 +1520,7 @@ async def openai_responses(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        _append_index_responses(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
+        _append_index_responses(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=usage)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1595,12 +1612,15 @@ async def openai_responses(req: Request):
         finally:
             _dump_json(res_path, {"type": "responses_passthrough_sse_capture", "chunks": up_chunks})
             _tok_in, _tok_out = 0, 0
+            _usage_raw = {}
             for _c in up_chunks:
                 if isinstance(_c, dict):
                     _u = _c.get("usage") or {}
+                    if _u:
+                        _usage_raw.update(_u)
                     _tok_in = _tok_in or (_u.get("input_tokens") or _u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("output_tokens") or _u.get("completion_tokens") or 0)
-            _append_index_responses(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
+            _append_index_responses(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=_usage_raw)
 
     return StreamingResponse(
         responses_sse_passthrough(),
@@ -1659,13 +1679,15 @@ async def failure_viewer(request: Request):
 
 
 @app.get("/api/statistic")
-def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部', refresh: str = '', channel_key: str = ''):
+def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部', refresh: str = '', channel_key: str = '', api_key: str = ''):
     res = query_token_stats(
+        ENV_DIR,
         model=model,
         date_start=date_start or '2000-01-01',
         date_end=date_end or '9999-12-31',
         status=status,
         channel_key=channel_key,
+        api_key=api_key,
         force=bool(refresh),
     )
     res["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1675,6 +1697,7 @@ def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = 
 @app.get("/api/statistic/keys")
 def statistic_keys_web(date_start: str = '', date_end: str = '', refresh: str = ''):
     res = query_key_stats(
+        ENV_DIR,
         date_start=date_start or '2000-01-01',
         date_end=date_end or '9999-12-31',
         force=bool(refresh),
@@ -1686,6 +1709,7 @@ def statistic_keys_web(date_start: str = '', date_end: str = '', refresh: str = 
 @app.get("/api/statistic/channels")
 def statistic_channels_web(date_start: str = '', date_end: str = '', refresh: str = ''):
     res = query_channel_stats(
+        ENV_DIR,
         date_start=date_start or '2000-01-01',
         date_end=date_end or '9999-12-31',
         force=bool(refresh),
@@ -1696,8 +1720,14 @@ def statistic_channels_web(date_start: str = '', date_end: str = '', refresh: st
 
 @app.get("/api/statistic/channel-keys")
 def statistic_channel_keys_list():
-    keys = query_channel_keys()
+    keys = query_channel_keys(ENV_DIR)
     return JSONResponse({"channel_keys": keys})
+
+
+@app.get("/api/statistic/api-keys")
+def statistic_api_keys_list():
+    keys = query_api_keys(ENV_DIR)
+    return JSONResponse({"api_keys": keys})
 
 
 @app.get("/metrics/realtime")

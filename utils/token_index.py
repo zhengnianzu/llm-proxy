@@ -1,11 +1,11 @@
 """
 utils/token_index.py — Token 用量增量索引
 
-持久化文件: logs_all/.token_index.jsonl (JSONL, 第一行 meta)
+持久化文件: {env_dir}/.token_index.jsonl (JSONL, 第一行 meta)
 进程级内存缓存: 10s TTL
-frozen 机制: 历史目录一旦扫描过就不再 stat
+frozen 机制: index.jsonl 文件 mtime/size 不变时标记 frozen，下次跳过
 
-扫描 logs_all/{env}/{mtime}/index.jsonl，按 (model|date, status) / (api_key|date) /
+扫描 {env_dir}/{mtime}/index.jsonl，按 (model|date, status) / (api_key|date) /
 (channel_key|date) 三个维度预聚合。查询时从内存中按日期范围过滤汇总。
 """
 
@@ -13,36 +13,25 @@ import json
 import os
 import time
 import threading
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _INDEX_FILE = ".token_index.jsonl"
-_VERSION = 1
+_VERSION = 3
 _lock = threading.Lock()
 
-# 进程级内存缓存
 _MEM_TTL = 10
 _mem_index: Optional[dict] = None
 _mem_index_ts: float = 0
-
-LOGS_ALL = Path("logs_all")
-
-
-def _get_active_tag() -> str:
-    try:
-        from utils.log_paths import STARTUP_DATE_TAG
-        return STARTUP_DATE_TAG
-    except ImportError:
-        return ""
+_mem_env_dir: Optional[str] = None
 
 
-def _index_path() -> str:
-    return str(LOGS_ALL / _INDEX_FILE)
+def _index_path(env_dir: Path) -> str:
+    return str(env_dir / _INDEX_FILE)
 
 
-def _load_index() -> dict:
-    path = _index_path()
+def _load_index(env_dir: Path) -> dict:
+    path = _index_path(env_dir)
     if not os.path.isfile(path):
         return {"version": _VERSION, "dirs": {}, "updated_at": 0}
     try:
@@ -75,10 +64,10 @@ def _load_index() -> dict:
         return {"version": _VERSION, "dirs": {}, "updated_at": 0}
 
 
-def _save_index(data: dict) -> None:
-    path = _index_path()
+def _save_index(env_dir: Path, data: dict) -> None:
+    path = _index_path(env_dir)
     try:
-        os.makedirs(str(LOGS_ALL), exist_ok=True)
+        os.makedirs(str(env_dir), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             meta = {"_meta": True, "version": _VERSION, "updated_at": data.get("updated_at", 0)}
@@ -94,24 +83,21 @@ def _save_index(data: dict) -> None:
 
 def _scan_index_file(index_file: Path, offset: int = 0,
                      prev: Optional[dict] = None) -> dict:
-    """读一个 index.jsonl，预聚合为 models/keys/channels 三个维度（按日期分桶）。
-
-    支持增量读取：传入 offset（上次读到的字节位置）和 prev（上次的聚合结果），
-    只读新追加的行并合并到已有数据中。
-    """
+    """读一个 index.jsonl，预聚合为 models/keys/channels 三个维度（按日期分桶）。"""
     if prev and offset > 0:
         models = {k: dict(v) for k, v in prev.get("models", {}).items()}
         keys = {k: dict(v) for k, v in prev.get("keys", {}).items()}
         channels = {k: dict(v) for k, v in prev.get("channels", {}).items()}
         channel_keys_set = set(prev.get("channel_keys_set", []))
+        api_keys_set = set(prev.get("api_keys_set", []))
         dates_set = set(prev.get("dates", []))
         entry_count = prev.get("entry_count", 0)
-        # sessions 字段：持久化时存的是 count(int)，需要保留为 int 继续累加
     else:
         models = {}
         keys = {}
         channels = {}
         channel_keys_set = set()
+        api_keys_set = set()
         dates_set = set()
         entry_count = 0
 
@@ -164,6 +150,8 @@ def _scan_index_file(index_file: Path, offset: int = 0,
 
                 # keys dimension
                 raw_key = entry.get("api_key", "") or ""
+                if raw_key:
+                    api_keys_set.add(raw_key)
                 kk = f"{raw_key}|{date_str}"
                 if kk not in keys:
                     keys[kk] = {"count": 0, "tok_in": 0, "tok_out": 0, "sessions": 0}
@@ -200,93 +188,95 @@ def _scan_index_file(index_file: Path, offset: int = 0,
         "keys": keys,
         "channels": channels,
         "channel_keys_set": sorted(channel_keys_set),
+        "api_keys_set": sorted(api_keys_set),
         "dates": sorted(dates_set),
     }
 
 
-def refresh_token_index(force: bool = False) -> dict:
-    """增量刷新 token 索引。"""
-    global _mem_index, _mem_index_ts
+def refresh_token_index(env_dir: str, force: bool = False) -> dict:
+    """增量刷新 token 索引，只扫描指定 env_dir 下的 mtime 目录。"""
+    global _mem_index, _mem_index_ts, _mem_env_dir
 
+    env_path = Path(env_dir)
+    env_dir_str = str(env_path)
     now = time.time()
-    if not force and _mem_index is not None and (now - _mem_index_ts) < _MEM_TTL:
+
+    if (not force
+            and _mem_index is not None
+            and _mem_env_dir == env_dir_str
+            and (now - _mem_index_ts) < _MEM_TTL):
         return _mem_index
 
     with _lock:
-        if not force and _mem_index is not None and (time.time() - _mem_index_ts) < _MEM_TTL:
+        if (not force
+                and _mem_index is not None
+                and _mem_env_dir == env_dir_str
+                and (time.time() - _mem_index_ts) < _MEM_TTL):
             return _mem_index
 
-        index = _mem_index if _mem_index is not None else _load_index()
+        index = (_mem_index if (_mem_env_dir == env_dir_str and _mem_index) else
+                 _load_index(env_path))
         dirs_cache = index.get("dirs", {})
         changed = False
-        active_tag = _get_active_tag()
 
         current_dirs = set()
-        if LOGS_ALL.is_dir():
-            for env_dir in LOGS_ALL.iterdir():
-                if not env_dir.is_dir() or env_dir.name.startswith("logs_") or env_dir.name.startswith("."):
+        if env_path.is_dir():
+            for mtime_dir in env_path.iterdir():
+                if not mtime_dir.is_dir():
                     continue
-                for mtime_dir in env_dir.iterdir():
-                    if not mtime_dir.is_dir():
-                        continue
 
-                    dir_key = f"{env_dir.name}/{mtime_dir.name}"
-                    current_dirs.add(dir_key)
+                dir_key = mtime_dir.name
+                current_dirs.add(dir_key)
 
-                    prev = dirs_cache.get(dir_key)
+                prev = dirs_cache.get(dir_key)
 
-                    # frozen: 已扫描过的历史目录跳过
-                    if (not force and prev
-                            and prev.get("frozen")
-                            and mtime_dir.name != active_tag):
-                        continue
+                if not force and prev and prev.get("frozen"):
+                    continue
 
-                    index_file = mtime_dir / "index.jsonl"
-                    if not index_file.is_file():
-                        if not prev:
-                            dirs_cache[dir_key] = {
-                                "index_mtime": 0, "index_size": 0,
-                                "frozen": mtime_dir.name != active_tag,
-                                "entry_count": 0,
-                                "models": {}, "keys": {}, "channels": {},
-                                "channel_keys_set": [], "dates": [],
-                            }
-                            changed = True
-                        continue
+                index_file = mtime_dir / "index.jsonl"
+                if not index_file.is_file():
+                    if not prev:
+                        dirs_cache[dir_key] = {
+                            "index_mtime": 0, "index_size": 0,
+                            "frozen": False,
+                            "entry_count": 0,
+                            "models": {}, "keys": {}, "channels": {},
+                            "channel_keys_set": [], "dates": [],
+                        }
+                        changed = True
+                    continue
 
-                    try:
-                        st = index_file.stat()
-                        f_mtime = st.st_mtime
-                        f_size = st.st_size
-                    except OSError:
-                        continue
+                try:
+                    st = index_file.stat()
+                    f_mtime = st.st_mtime
+                    f_size = st.st_size
+                except OSError:
+                    continue
 
-                    if (not force and prev
-                            and prev.get("index_mtime") == f_mtime
-                            and prev.get("index_size") == f_size):
-                        if mtime_dir.name != active_tag and not prev.get("frozen"):
-                            prev["frozen"] = True
-                            changed = True
-                        continue
+                if (not force and prev
+                        and prev.get("index_mtime") == f_mtime
+                        and prev.get("index_size") == f_size):
+                    if not prev.get("frozen"):
+                        prev["frozen"] = True
+                        changed = True
+                    continue
 
-                    # 增量读取：文件变大但未被截断，只读新追加的部分
-                    prev_offset = prev.get("scan_offset", 0) if prev else 0
-                    if (not force and prev
-                            and prev_offset > 0
-                            and f_size > prev.get("index_size", 0)):
-                        scan_result = _scan_index_file(index_file, offset=prev_offset, prev=prev)
-                    else:
-                        scan_result = _scan_index_file(index_file)
-                    dirs_cache[dir_key] = {
-                        "index_mtime": f_mtime,
-                        "index_size": f_size,
-                        "scan_offset": scan_result.get("scan_offset", f_size),
-                        "frozen": mtime_dir.name != active_tag,
-                        **{k: v for k, v in scan_result.items() if k not in ("new_entries", "scan_offset")},
-                    }
-                    changed = True
+                prev_offset = prev.get("scan_offset", 0) if prev else 0
+                if (not force and prev
+                        and prev_offset > 0
+                        and f_size > prev.get("index_size", 0)):
+                    scan_result = _scan_index_file(index_file, offset=prev_offset, prev=prev)
+                else:
+                    scan_result = _scan_index_file(index_file)
+                dirs_cache[dir_key] = {
+                    "index_mtime": f_mtime,
+                    "index_size": f_size,
+                    "scan_offset": scan_result.get("scan_offset", f_size),
+                    "frozen": False,
+                    **{k: v for k, v in scan_result.items() if k not in ("new_entries", "scan_offset")},
+                }
+                changed = True
 
-        # 清理已删除的目录
         removed = set(dirs_cache.keys()) - current_dirs
         if removed:
             for r in removed:
@@ -296,10 +286,11 @@ def refresh_token_index(force: bool = False) -> dict:
         if changed:
             index["dirs"] = dirs_cache
             index["updated_at"] = time.time()
-            _save_index(index)
+            _save_index(env_path, index)
 
         _mem_index = index
         _mem_index_ts = time.time()
+        _mem_env_dir = env_dir_str
 
         return index
 
@@ -314,11 +305,12 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:4]}...{key[-4:]}"
 
 
-def query_token_stats(model: str = '', date_start: str = '2000-01-01',
+def query_token_stats(env_dir: str, model: str = '', date_start: str = '2000-01-01',
                       date_end: str = '9999-12-31', status: str = '',
-                      channel_key: str = '', force: bool = False) -> dict:
-    """替代 statistic_tokens()，从索引中聚合。"""
-    index = refresh_token_index(force=force)
+                      channel_key: str = '', api_key: str = '',
+                      force: bool = False) -> dict:
+    """从索引中聚合 token 统计。"""
+    index = refresh_token_index(env_dir, force=force)
 
     model_filter = model.lower() if model else ""
     model_agg: Dict[str, Dict[str, Dict[str, int]]] = {}
@@ -330,8 +322,10 @@ def query_token_stats(model: str = '', date_start: str = '2000-01-01',
         if dir_dates and dir_dates[0] > date_end:
             continue
 
-        # channel_key 过滤: 如果指定了 channel_key 但该目录没有这个 key，可以跳过
         if channel_key and channel_key not in (dir_info.get("channel_keys_set") or []):
+            continue
+
+        if api_key and api_key not in (dir_info.get("api_keys_set") or []):
             continue
 
         for mk, counts in dir_info.get("models", {}).items():
@@ -356,7 +350,6 @@ def query_token_stats(model: str = '', date_start: str = '2000-01-01',
             model_agg[m_name]["error"]["count"] += counts.get("e_count", 0)
             model_agg[m_name]["error"]["tok_in"] += counts.get("e_tok_in", 0)
 
-    # 构建兼容 statistic_tokens 的返回格式
     res_data = []
     for m_name, agg in model_agg.items():
         if status in ("", "全部", "success", "成功"):
@@ -390,10 +383,10 @@ def query_token_stats(model: str = '', date_start: str = '2000-01-01',
     return {"data": res_data, "summary": summary}
 
 
-def query_key_stats(date_start: str = '2000-01-01', date_end: str = '9999-12-31',
+def query_key_stats(env_dir: str, date_start: str = '2000-01-01', date_end: str = '9999-12-31',
                     force: bool = False) -> dict:
-    """替代 statistic_keys()，从索引中聚合。"""
-    index = refresh_token_index(force=force)
+    """从索引中聚合 key 统计。"""
+    index = refresh_token_index(env_dir, force=force)
 
     key_agg: Dict[str, Dict[str, Any]] = {}
 
@@ -435,10 +428,10 @@ def query_key_stats(date_start: str = '2000-01-01', date_end: str = '9999-12-31'
     return {"keys": keys_list}
 
 
-def query_channel_stats(date_start: str = '2000-01-01', date_end: str = '9999-12-31',
+def query_channel_stats(env_dir: str, date_start: str = '2000-01-01', date_end: str = '9999-12-31',
                         force: bool = False) -> dict:
-    """替代 statistic_channels()，从索引中聚合。"""
-    index = refresh_token_index(force=force)
+    """从索引中聚合 channel 统计。"""
+    index = refresh_token_index(env_dir, force=force)
 
     ch_agg: Dict[str, Dict[str, Any]] = {}
 
@@ -478,11 +471,21 @@ def query_channel_stats(date_start: str = '2000-01-01', date_end: str = '9999-12
     return {"channels": ch_list}
 
 
-def query_channel_keys(force: bool = False) -> List[str]:
-    """替代 list_known_channel_keys()，从索引中提取。"""
-    index = refresh_token_index(force=force)
+def query_channel_keys(env_dir: str, force: bool = False) -> List[str]:
+    """从索引中提取所有 channel key。"""
+    index = refresh_token_index(env_dir, force=force)
     keys: set = set()
     for dir_info in index.get("dirs", {}).values():
         for ck in dir_info.get("channel_keys_set", []):
             keys.add(ck)
+    return sorted(keys)
+
+
+def query_api_keys(env_dir: str, force: bool = False) -> List[str]:
+    """从索引中提取所有 api key。"""
+    index = refresh_token_index(env_dir, force=force)
+    keys: set = set()
+    for dir_info in index.get("dirs", {}).values():
+        for ak in dir_info.get("api_keys_set", []):
+            keys.add(ak)
     return sorted(keys)
