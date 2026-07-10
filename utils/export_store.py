@@ -8,11 +8,48 @@ SQLite 后端，记录每次导出操作的状态和结果。
 import os
 import sqlite3
 import threading
+from pathlib import Path
 from typing import Optional
 
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
 _db_path: str = ""
+
+
+def _get_export_log_dir() -> Path:
+    """返回外部日志目录路径"""
+    service_log_dir = os.environ.get("SERVICE_LOG_DIR", "logs")
+    return Path(service_log_dir) / "export_log"
+
+
+def _write_external_log(record_id: int, field_name: str, content: str) -> str:
+    """将字段内容写入外部文件，返回文件路径标记 file://{相对路径}"""
+    log_dir = _get_export_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{record_id}.{field_name}.log"
+    log_path.write_text(content, encoding="utf-8")
+    # 返回相对路径，便于迁移
+    return f"file://export_log/{record_id}.{field_name}.log"
+
+
+def _read_field_content(value: str) -> str:
+    """读取字段内容：如果是 file:// 路径则从文件读取，否则直接返回（兼容旧数据）"""
+    if not value:
+        return ""
+    if value.startswith("file://"):
+        rel_path = value[7:]  # 去掉 file:// 前缀
+        service_log_dir = os.environ.get("SERVICE_LOG_DIR", "logs")
+        abs_path = Path(service_log_dir) / rel_path
+        if abs_path.is_file():
+            return abs_path.read_text(encoding="utf-8")
+        return ""  # 文件不存在返回空
+    # 旧数据：直接存储的内容
+    return value
+
+
+def _externalize_field(record_id: int, field_name: str, content: str) -> str:
+    """默认写入外部文件并返回路径标记"""
+    return _write_external_log(record_id, field_name, content)
 
 
 def init_db(db_dir: str):
@@ -109,6 +146,18 @@ def get_record(record_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_record_resolved(record_id: int) -> Optional[dict]:
+    """获取记录并自动解析外部文件内容"""
+    rec = get_record(record_id)
+    if not rec:
+        return None
+    # 自动解析可能的外部字段
+    for field in ["progress_log", "analysis_json"]:
+        if field in rec and rec[field]:
+            rec[field] = _read_field_content(rec[field])
+    return rec
+
+
 def list_records(limit: int = 100) -> list:
     conn = _get_conn()
     rows = conn.execute(
@@ -127,6 +176,30 @@ def list_records_by_key(key_slot: str, limit: int = 50) -> list:
 
 
 _SLIM_COLS = "id, key_slot, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message"
+
+
+def get_records_summary() -> tuple:
+    """返回 (max_id, count)，用于快速判断 export_records 是否有变化。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT MAX(id), COUNT(*) FROM export_records").fetchone()
+    return (row[0] or 0, row[1] or 0)
+
+
+def list_records_all_slim(limit_per_key: int = 10) -> dict:
+    """一次查询所有 records（排除 progress_log 等大字段），按 key_slot 分组返回。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        f"SELECT {_SLIM_COLS} FROM export_records ORDER BY created_at DESC"
+    ).fetchall()
+    grouped: dict = {}
+    for r in rows:
+        d = dict(r)
+        slot = d.pop("key_slot", "all")
+        if slot not in grouped:
+            grouped[slot] = []
+        if len(grouped[slot]) < limit_per_key:
+            grouped[slot].append(d)
+    return grouped
 
 
 def get_records_summary() -> tuple:
@@ -174,11 +247,15 @@ def append_log(record_id: int, message: str):
     with _lock:
         row = conn.execute("SELECT progress_log FROM export_records WHERE id = ?", (record_id,)).fetchone()
         if row:
+            current_log = _read_field_content(row[0] or "[]")  # 支持外部文件和旧数据
             try:
-                logs = json.loads(row[0] or "[]")
+                logs = json.loads(current_log)
             except (json.JSONDecodeError, TypeError):
                 logs = []
             logs.append(entry)
+            new_content = json.dumps(logs, ensure_ascii=False)
+            # 默认写入外部文件
+            stored_value = _externalize_field(record_id, "progress_log", new_content)
             conn.execute("UPDATE export_records SET progress_log = ? WHERE id = ?",
-                         (json.dumps(logs, ensure_ascii=False), record_id))
+                         (stored_value, record_id))
             conn.commit()

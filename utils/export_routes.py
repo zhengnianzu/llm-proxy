@@ -259,7 +259,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 logger.exception("task failed for %s (mode=%s)", mt, mode)
 
         eval_report_path = ""
-        analysis_json_content = ""
+        analysis_json_stored = ""
         if mode == "eval":
             if all_results:
                 idx_path = local_base / "session_index.jsonl"
@@ -274,7 +274,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 eval_report_path = eval_result.get("report_path", "")
                 analysis_json_path = eval_result.get("analysis_json_path", "")
                 if analysis_json_path and Path(analysis_json_path).is_file():
+                    # 读取内容并写入外部文件
+                    from utils.export_store import _externalize_field
                     analysis_json_content = Path(analysis_json_path).read_text(encoding="utf-8")
+                    analysis_json_stored = _externalize_field(record_id, "analysis_json", analysis_json_content)
 
                 from utils.eval.reformat import write_eval_to_cache
                 for mt in mtime_dirs:
@@ -303,7 +306,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                           files_uploaded=total_uploaded,
                           files_skipped=total_skipped,
                           eval_report_path=eval_report_path,
-                          analysis_json=analysis_json_content)
+                          analysis_json=analysis_json_stored)
         else:
             _log(f"{'质检' if mode == 'eval' else '导出'}完成: {total_sessions} sessions")
             update_status(record_id, "success",
@@ -311,7 +314,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                           files_uploaded=total_uploaded,
                           files_skipped=total_skipped,
                           eval_report_path=eval_report_path,
-                          analysis_json=analysis_json_content)
+                          analysis_json=analysis_json_stored)
 
     # -----------------------------------------------------------------
     # API 端点
@@ -396,7 +399,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         denied = _require_key_api(request)
         if denied:
             return denied
-        rec = get_record(record_id)
+        from utils.export_store import get_record_resolved
+        rec = get_record_resolved(record_id)  # 自动解析外部文件
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)
         return JSONResponse(rec)
@@ -426,7 +430,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/api/export/eval/report/{record_id}")
     def export_eval_report(request: Request, record_id: int):
-        rec = get_record(record_id)
+        from utils.export_store import get_record_resolved
+        rec = get_record_resolved(record_id)  # 自动解析外部文件
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
@@ -527,7 +532,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if err:
             return err
 
-        rec = get_record(record_id)
+        from utils.export_store import get_record_resolved
+        rec = get_record_resolved(record_id)  # 自动解析外部文件
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
