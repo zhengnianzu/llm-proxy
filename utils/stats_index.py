@@ -1,24 +1,16 @@
 """
 utils/stats_index.py — 增量汇总索引
 
-持久化文件: {env_dir}/.stats_index.json
+持久化文件:
+  {env_dir}/.stats_index.json       — 目录级扫描索引
+  {env_dir}/.session_key_cache.json  — key×date / key×mtime 预聚合缓存
+
 进程级内存缓存: _MEM_TTL 秒内直接返回内存数据，跳过磁盘读取和 stat。
 
-结构:
-{
-  "_version": 3,
-  "dirs": {
-    "26070100": {
-      "cache_mtime": 1719820000.0,
-      "cache_size": 123456,
-      "req_count": 4200,
-      "req_count_mtime": 1719820000.0,
-      "frozen": true,
-      "sessions": { "sk-abcd|2026-06-28": {"total": 5, "qualified": 3} }
-    }
-  },
-  "updated_at": 1719820100.0
-}
+增量机制:
+  refresh_index 扫描时对比 old/new sessions 生成 _changed_buckets；
+  build_stats_from_index 根据 _changed_buckets 做 bucket 级定向更新，
+  结果持久化到 .session_key_cache.json，进程重启后直接加载。
 """
 
 import json
@@ -36,12 +28,20 @@ _lock = threading.Lock()
 QUALIFIED_THRESHOLD_DEFAULT = 5
 
 # ---------------------------------------------------------------------------
-# 进程级内存缓存
+# 进程级内存缓存 — 目录扫描索引
 # ---------------------------------------------------------------------------
 _MEM_TTL = 10  # 秒
 _mem_index: Optional[dict] = None
 _mem_index_ts: float = 0
 _mem_env_dir: Optional[str] = None  # 绑定的 env_dir，切换时失效
+
+# ---------------------------------------------------------------------------
+# 进程级内存缓存 — key 聚合表
+# ---------------------------------------------------------------------------
+_KEY_CACHE_FILE = ".session_key_cache.json"
+_KEY_CACHE_VERSION = 1
+_mem_key_cache: Optional[dict] = None
+_mem_key_cache_env: Optional[str] = None
 
 
 def _index_path(env_dir: Path) -> str:
@@ -113,12 +113,23 @@ def _count_req_files(dir_path: Path) -> int:
 
 
 def _get_active_tag() -> str:
-    """获取当前启动目录标签（如 '26070115'），用于判断活跃目录。"""
     try:
         from utils.log_paths import STARTUP_DATE_TAG
         return STARTUP_DATE_TAG
     except ImportError:
         return ""
+
+
+def _diff_sessions(old_sessions: dict, new_sessions: dict, dir_name: str) -> list:
+    """对比两个 sessions dict，返回 [(dir_name, bucket_key, old_counts, new_counts), ...]"""
+    diffs = []
+    all_keys = set(old_sessions) | set(new_sessions)
+    for bk in all_keys:
+        old_c = old_sessions.get(bk)
+        new_c = new_sessions.get(bk)
+        if old_c != new_c:
+            diffs.append((dir_name, bk, old_c, new_c))
+    return diffs
 
 
 def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
@@ -128,31 +139,35 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
     - TTL 内直接返回内存缓存（<1ms）
     - 过期后只 stat 活跃目录，frozen 目录跳过
     - force=True 跳过 TTL + frozen，全量检查
+
+    index["_changed_buckets"] 记录本次刷新中变化的 bucket 列表，
+    供 build_stats_from_index 做定向增量更新。
     """
     global _mem_index, _mem_index_ts, _mem_env_dir
 
     env_dir_str = str(env_dir)
     now = time.time()
 
-    # 快速路径：内存缓存命中
     if (not force
             and _mem_index is not None
             and _mem_env_dir == env_dir_str
             and (now - _mem_index_ts) < _MEM_TTL):
+        _mem_index["_changed_buckets"] = []
         return _mem_index
 
     with _lock:
-        # double-check：另一个线程可能刚刷新过
         if (not force
                 and _mem_index is not None
                 and _mem_env_dir == env_dir_str
                 and (time.time() - _mem_index_ts) < _MEM_TTL):
+            _mem_index["_changed_buckets"] = []
             return _mem_index
 
         index = _mem_index if (_mem_env_dir == env_dir_str and _mem_index) else _load_index(env_dir)
         dirs_cache = index.get("dirs", {})
         changed = False
         active_tag = _get_active_tag()
+        changed_buckets: list = []
 
         current_dirs = set()
         if env_dir.is_dir():
@@ -164,7 +179,6 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
 
                 prev = dirs_cache.get(dir_name)
 
-                # frozen 目录：已扫描过的历史目录，跳过 stat
                 if (not force and prev
                         and prev.get("frozen")
                         and dir_name != active_tag):
@@ -172,7 +186,6 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
 
                 cache_file = sub / ".session_cache.jsonl"
                 if not cache_file.is_file():
-                    # 没有 session cache 的目录
                     if prev and not force and dir_name != active_tag:
                         if not prev.get("frozen"):
                             prev["frozen"] = True
@@ -184,6 +197,9 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                         dir_mt = 0
                     if prev and not force and prev.get("req_count_mtime") == dir_mt:
                         continue
+                    old_sessions = prev.get("sessions", {}) if prev else {}
+                    new_sessions: dict = {}
+                    changed_buckets.extend(_diff_sessions(old_sessions, new_sessions, dir_name))
                     req_count = _count_req_files(sub)
                     dirs_cache[dir_name] = {
                         "cache_mtime": 0,
@@ -206,13 +222,15 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                 if (not force and prev
                         and prev.get("cache_mtime") == c_mtime
                         and prev.get("cache_size") == c_size):
-                    # 无变化，如果是历史目录，标记 frozen
                     if dir_name != active_tag and not prev.get("frozen"):
                         prev["frozen"] = True
                         changed = True
                     continue
 
                 sessions = _scan_session_cache(cache_file, threshold)
+
+                old_sessions = prev.get("sessions", {}) if prev else {}
+                changed_buckets.extend(_diff_sessions(old_sessions, sessions, dir_name))
 
                 try:
                     dir_mt = os.path.getmtime(str(sub))
@@ -235,10 +253,12 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                 }
                 changed = True
 
-        # 清理已删除的目录
         removed = set(dirs_cache.keys()) - current_dirs
         if removed:
             for r in removed:
+                old_sessions = dirs_cache[r].get("sessions", {})
+                for bk, counts in old_sessions.items():
+                    changed_buckets.append((r, bk, counts, None))
                 del dirs_cache[r]
             changed = True
 
@@ -247,7 +267,8 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
             index["updated_at"] = time.time()
             _save_index(env_dir, index)
 
-        # 写入内存缓存
+        index["_changed_buckets"] = changed_buckets
+
         _mem_index = index
         _mem_index_ts = time.time()
         _mem_env_dir = env_dir_str
@@ -255,17 +276,103 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
         return index
 
 
-def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEFAULT) -> dict:
-    """从索引数据构建与原 _build_stats_json 兼容的统计结果。"""
-    table: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(
-        lambda: defaultdict(lambda: {"total": 0, "qualified": 0})
-    )
-    mtime_table: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(
-        lambda: defaultdict(lambda: {"total": 0, "qualified": 0})
-    )
-    all_dates: set = set()
-    all_mtimes: set = set()
+# ---------------------------------------------------------------------------
+# key 聚合缓存 — 持久化 + 增量更新
+# ---------------------------------------------------------------------------
 
+def _key_cache_path(env_dir: Path) -> str:
+    return str(env_dir / _KEY_CACHE_FILE)
+
+
+def _load_key_cache(env_dir: Path) -> Optional[dict]:
+    path = _key_cache_path(env_dir)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("_version") != _KEY_CACHE_VERSION:
+            return None
+        return data
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _save_key_cache(env_dir: Path, cache: dict) -> None:
+    path = _key_cache_path(env_dir)
+    try:
+        os.makedirs(str(env_dir), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _ensure_cell(table: dict, api_key: str, sub_key: str) -> dict:
+    if api_key not in table:
+        table[api_key] = {}
+    if sub_key not in table[api_key]:
+        table[api_key][sub_key] = {"total": 0, "qualified": 0}
+    return table[api_key][sub_key]
+
+
+def _apply_delta(cache: dict, dir_name: str, bucket_key: str,
+                 old_c: Optional[dict], new_c: Optional[dict]) -> None:
+    """对 cache 的 table/mtime_table/totals 做一次 bucket 级增量。"""
+    parts = bucket_key.split("|", 1)
+    if len(parts) != 2:
+        return
+    api_key, date_str = parts
+
+    table = cache["table"]
+    mtime_table = cache["mtime_table"]
+    totals = cache["totals"]
+
+    if old_c:
+        cell = _ensure_cell(table, api_key, date_str)
+        cell["total"] -= old_c.get("total", 0)
+        cell["qualified"] -= old_c.get("qualified", 0)
+
+        mt_cell = _ensure_cell(mtime_table, api_key, dir_name)
+        mt_cell["total"] -= old_c.get("total", 0)
+        mt_cell["qualified"] -= old_c.get("qualified", 0)
+
+        totals["total"] -= old_c.get("total", 0)
+        totals["qualified"] -= old_c.get("qualified", 0)
+
+    if new_c:
+        cell = _ensure_cell(table, api_key, date_str)
+        cell["total"] += new_c.get("total", 0)
+        cell["qualified"] += new_c.get("qualified", 0)
+
+        mt_cell = _ensure_cell(mtime_table, api_key, dir_name)
+        mt_cell["total"] += new_c.get("total", 0)
+        mt_cell["qualified"] += new_c.get("qualified", 0)
+
+        totals["total"] += new_c.get("total", 0)
+        totals["qualified"] += new_c.get("qualified", 0)
+
+
+def _cleanup_zeros(cache: dict) -> None:
+    """清理 total=0 的空条目。"""
+    for tbl in (cache["table"], cache["mtime_table"]):
+        empty_keys = []
+        for api_key, sub in tbl.items():
+            empty_subs = [k for k, v in sub.items() if v.get("total", 0) <= 0]
+            for es in empty_subs:
+                del sub[es]
+            if not sub:
+                empty_keys.append(api_key)
+        for ek in empty_keys:
+            del tbl[ek]
+
+
+def _full_build_key_cache(index: dict) -> dict:
+    """从 index 全量构建 key cache。"""
+    table: Dict[str, Dict[str, Dict[str, int]]] = {}
+    mtime_table: Dict[str, Dict[str, Dict[str, int]]] = {}
     total = 0
     qualified = 0
 
@@ -273,7 +380,6 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
         sessions = dir_info.get("sessions", {})
         if not sessions:
             continue
-        all_mtimes.add(dir_name)
         for bucket_key, counts in sessions.items():
             parts = bucket_key.split("|", 1)
             if len(parts) != 2:
@@ -283,11 +389,36 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
             q = counts["qualified"]
             total += t
             qualified += q
-            all_dates.add(date_str)
-            table[api_key][date_str]["total"] += t
-            table[api_key][date_str]["qualified"] += q
-            mtime_table[api_key][dir_name]["total"] += t
-            mtime_table[api_key][dir_name]["qualified"] += q
+
+            cell = _ensure_cell(table, api_key, date_str)
+            cell["total"] += t
+            cell["qualified"] += q
+
+            mt_cell = _ensure_cell(mtime_table, api_key, dir_name)
+            mt_cell["total"] += t
+            mt_cell["qualified"] += q
+
+    return {
+        "_version": _KEY_CACHE_VERSION,
+        "updated_at": time.time(),
+        "table": table,
+        "mtime_table": mtime_table,
+        "totals": {"total": total, "qualified": qualified},
+    }
+
+
+def _build_rows(cache: dict, threshold: int) -> dict:
+    """从 key cache 构建 build_stats_from_index 的输出格式。"""
+    table = cache.get("table", {})
+    mtime_table = cache.get("mtime_table", {})
+    totals = cache.get("totals", {})
+
+    all_dates: set = set()
+    for sub in table.values():
+        all_dates.update(sub.keys())
+    all_mtimes: set = set()
+    for sub in mtime_table.values():
+        all_mtimes.update(sub.keys())
 
     dates = sorted(all_dates)
     keys = sorted(table.keys())
@@ -298,31 +429,89 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
         row_qualified = 0
         cells = {}
         for d in dates:
-            cell = table[key][d]
-            cells[d] = {"total": cell["total"], "qualified": cell["qualified"]}
-            row_total += cell["total"]
-            row_qualified += cell["qualified"]
+            c = table[key].get(d, {"total": 0, "qualified": 0})
+            if c["total"] > 0:
+                cells[d] = {"total": c["total"], "qualified": c["qualified"]}
+                row_total += c["total"]
+                row_qualified += c["qualified"]
         mtime_cells = {}
         for mt in sorted(all_mtimes):
-            mc = mtime_table[key][mt]
+            mc = mtime_table.get(key, {}).get(mt, {"total": 0, "qualified": 0})
             if mc["total"] > 0:
                 mtime_cells[mt] = {"total": mc["total"], "qualified": mc["qualified"]}
-        rows.append({
-            "api_key": key,
-            "cells": cells,
-            "mtime_cells": mtime_cells,
-            "row_total": row_total,
-            "row_qualified": row_qualified,
-        })
+        if row_total > 0:
+            rows.append({
+                "api_key": key,
+                "cells": cells,
+                "mtime_cells": mtime_cells,
+                "row_total": row_total,
+                "row_qualified": row_qualified,
+            })
 
     return {
-        "total_sessions": total,
-        "qualified_sessions": qualified,
+        "total_sessions": totals.get("total", 0),
+        "qualified_sessions": totals.get("qualified", 0),
         "threshold": threshold,
         "dates": dates,
         "rows": rows,
     }
 
+
+def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
+                           env_dir: Optional[Path] = None) -> dict:
+    """从索引数据构建统计结果，支持 bucket 级增量更新 + 磁盘持久化。
+
+    三条路径:
+      A) _changed_buckets 为空 → 直接从内存 key cache 构建 rows
+      B) _changed_buckets 非空 → 定向增量更新 key cache，持久化后构建 rows
+      C) 首次 / env 切换 → 全量构建，持久化后构建 rows
+    """
+    global _mem_key_cache, _mem_key_cache_env
+
+    changed_buckets = index.get("_changed_buckets")
+    _env_dir = env_dir
+    if _env_dir is None:
+        _env_dir = Path(_mem_env_dir) if _mem_env_dir else None
+    env_dir_str = str(_env_dir) if _env_dir else ""
+
+    is_same_env = (_mem_key_cache is not None and _mem_key_cache_env == env_dir_str)
+
+    if is_same_env and changed_buckets is not None and len(changed_buckets) == 0:
+        return _build_rows(_mem_key_cache, threshold)
+
+    if is_same_env and changed_buckets:
+        for dir_name, bk, old_c, new_c in changed_buckets:
+            _apply_delta(_mem_key_cache, dir_name, bk, old_c, new_c)
+        _cleanup_zeros(_mem_key_cache)
+        _mem_key_cache["updated_at"] = time.time()
+        if _env_dir:
+            _save_key_cache(_env_dir, _mem_key_cache)
+        return _build_rows(_mem_key_cache, threshold)
+
+    if _env_dir and not is_same_env:
+        disk_cache = _load_key_cache(_env_dir)
+        if disk_cache:
+            _mem_key_cache = disk_cache
+            _mem_key_cache_env = env_dir_str
+            if changed_buckets:
+                for dir_name, bk, old_c, new_c in changed_buckets:
+                    _apply_delta(_mem_key_cache, dir_name, bk, old_c, new_c)
+                _cleanup_zeros(_mem_key_cache)
+                _mem_key_cache["updated_at"] = time.time()
+                _save_key_cache(_env_dir, _mem_key_cache)
+            return _build_rows(_mem_key_cache, threshold)
+
+    cache = _full_build_key_cache(index)
+    _mem_key_cache = cache
+    _mem_key_cache_env = env_dir_str
+    if _env_dir:
+        _save_key_cache(_env_dir, cache)
+    return _build_rows(cache, threshold)
+
+
+# ---------------------------------------------------------------------------
+# 查询接口
+# ---------------------------------------------------------------------------
 
 def get_dir_counts(index: dict) -> Dict[str, int]:
     """从索引中提取每个 mtime_dir 的 req_count，供 /logs/dirs 使用。"""
@@ -333,7 +522,7 @@ def get_dir_counts(index: dict) -> Dict[str, int]:
 
 
 def get_date_to_mtime_map(index: dict) -> Dict[str, List[str]]:
-    """从索引中构建 date -> [mtime_dir, ...] 映射，替代 export_routes._date_to_mtime_map。"""
+    """从索引中构建 date -> [mtime_dir, ...] 映射。"""
     mapping: Dict[str, List[str]] = {}
     for dir_name, dir_info in index.get("dirs", {}).items():
         dates_in_dir: set = set()

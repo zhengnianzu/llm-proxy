@@ -177,14 +177,58 @@ logs_all/env-{KEY}/{mtime}/*-req.json              ← 请求文件（用于 req
 
 ```python
 refresh_index(env_dir, threshold, force=False)
-    # 1. 内存缓存命中 (TTL 10s, 绑定 env_dir) → 直接返回
+    # 1. 内存缓存命中 (TTL 10s, 绑定 env_dir) → 直接返回，_changed_buckets=[]
     # 2. 遍历 env_dir/{mtime}/
     #    - frozen 且非活跃目录 → 跳过
     #    - .session_cache.jsonl 的 mtime+size 无变化 → 跳过，标记 frozen
-    #    - 有变化 → 全量扫描该 .session_cache.jsonl
+    #    - 有变化 → 全量扫描该 .session_cache.jsonl，diff old/new sessions → _changed_buckets
     #    - 无 cache 文件 → 计数 *-req.json 文件数
     # 3. 更新内存缓存 + 持久化到 .stats_index.json
+    # 4. 返回 index（含 _changed_buckets 供 build_stats_from_index 增量使用）
 ```
+
+### 增量聚合机制
+
+`build_stats_from_index` 维护 key × date / key × mtime 两个维度的预聚合表，
+持久化到 `{env_dir}/.session_key_cache.json`，支持 bucket 级定向更新。
+
+#### 变更追踪
+
+`refresh_index` 在扫描活跃目录时，对比旧/新 `sessions` dict：
+
+```python
+_changed_buckets = [(dir_name, bucket_key, old_counts, new_counts), ...]
+```
+
+- `old_counts=None` → 新增 bucket
+- `new_counts=None` → 删除 bucket
+- 两者都有 → 数值变化
+
+典型场景：50 个 frozen 目录 + 1 个活跃目录，只有活跃目录中变化的 key bucket 产生 diff。
+
+#### 持久化文件
+
+`{env_dir}/.session_key_cache.json`：
+
+```json
+{
+  "_version": 1,
+  "updated_at": 1720000000.0,
+  "table": {"sk-abcd": {"2026-07-08": {"total": 5, "qualified": 3}}},
+  "mtime_table": {"sk-abcd": {"26070809": {"total": 5, "qualified": 3}}},
+  "totals": {"total": 100, "qualified": 60}
+}
+```
+
+#### 三条执行路径
+
+| 路径 | 条件 | 操作 | 耗时 |
+|------|------|------|------|
+| **A 无变更命中** | `_changed_buckets` 为空，内存缓存有效 | 从内存 key cache 构建 rows | ~0.01ms |
+| **B 定向增量** | `_changed_buckets` 非空 | 逐 bucket 做加减法更新 table/mtime_table，持久化，构建 rows | ~0.1ms |
+| **C 全量** | 首次 / 进程重启 / env 切换 | 先尝试加载磁盘缓存；否则全量计算并持久化 | ~2ms（磁盘）/ ~50ms（全量） |
+
+启动恢复：进程重启后从 `.session_key_cache.json` 直接加载，跳过全量遍历。
 
 ---
 
@@ -195,6 +239,7 @@ logs_all/
 ├── .token_index.jsonl              ← Token 索引（全局，跨 env）
 ├── env-5Nc1/
 │   ├── .stats_index.json           ← Session 索引（每个 env 一个）
+│   ├── .session_key_cache.json     ← Key 聚合缓存（增量更新）
 │   ├── 26061009/
 │   │   ├── index.jsonl             ← Token 索引数据源
 │   │   ├── .session_cache.jsonl    ← Session 索引数据源

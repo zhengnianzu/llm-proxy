@@ -96,7 +96,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             return JSONResponse({"keys": [], "mtimes": []})
 
         index = refresh_index(env_dir, threshold)
-        stats = build_stats_from_index(index, threshold)
+        stats = build_stats_from_index(index, threshold, env_dir=env_dir)
 
         db_keys = {}
         db_key_created = {}
@@ -472,7 +472,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             return err
 
         index = refresh_index(env_dir)
-        stats = build_stats_from_index(index)
+        stats = build_stats_from_index(index, env_dir=env_dir)
         mtime_dirs = []
         for row in stats.get("rows", []):
             if row["api_key"] == key_value:

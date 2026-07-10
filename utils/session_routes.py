@@ -21,7 +21,7 @@ from utils.stats_index import (
 def _build_stats_json(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT) -> dict:
     """兼容接口：供外部调用。"""
     index = refresh_index(env_dir, threshold)
-    return build_stats_from_index(index, threshold)
+    return build_stats_from_index(index, threshold, env_dir=env_dir)
 
 
 def register_session_routes(app: FastAPI, logs_dir: str) -> None:
@@ -45,7 +45,7 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
             return JSONResponse({"error": f"directory not found: {env_dir}"}, status_code=404)
 
         index = refresh_index(env_dir, threshold, force=refresh)
-        stats = build_stats_from_index(index, threshold)
+        stats = build_stats_from_index(index, threshold, env_dir=env_dir)
 
         stats["_dir"] = str(env_dir)
         stats["_threshold"] = threshold
