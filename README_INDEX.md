@@ -230,6 +230,82 @@ _changed_buckets = [(dir_name, bucket_key, old_counts, new_counts), ...]
 
 启动恢复：进程重启后从 `.session_key_cache.json` 直接加载，跳过全量遍历。
 
+### `/api/export/keys` 性能优化 — key 元数据 + records 缓存
+
+`/api/export/keys` 端点原本每次请求都做 **N+1 次 SQLite 查询**：
+- 1 次 `list_keys()` 查全表获取 key 名称/创建时间
+- N 次 `list_records_by_key(slot)` 每个 key 查一次导出记录
+
+从 version 2 开始，这些低频变更数据也缓存到 `.session_key_cache.json`，通过轻量检测按需刷新。
+
+#### 扩展的缓存结构（version 2）
+
+```json
+{
+  "_version": 2,
+  "table": {...},
+  "mtime_table": {...},
+  "totals": {...},
+  "key_meta": {
+    "db_keys_hash": "a1b2c3...",
+    "mapping": {
+      "sk-abcd": {
+        "key_name": "测试Key",
+        "key_slot": "key-abcd",
+        "created_at": "2026-07-01 10:00:00"
+      }
+    }
+  },
+  "key_records": {
+    "db_max_id": 42,
+    "db_count": 100,
+    "records": {
+      "key-abcd": [
+        {
+          "id": 42,
+          "status": "success",
+          "mode": "export",
+          "created_at": "...",
+          "total_sessions": 10,
+          "files_uploaded": 5,
+          "obs_dst": "obs://...",
+          "error_message": ""
+        }
+      ]
+    }
+  }
+}
+```
+
+#### 变更检测机制
+
+| 字段 | 检测方式 | 刷新条件 |
+|------|----------|----------|
+| `key_meta` | 对 `list_keys()` 结果计算 MD5 hash（拼接 key + name + created_at） | hash 变化 → 重做后缀匹配，更新 mapping |
+| `key_records` | `SELECT MAX(id), COUNT(*) FROM export_records` | max_id 或 count 变化 → 一次性查所有 records（排除 progress_log），按 key_slot 分组 |
+
+**records 字段精简**：前端卡片只用 `id, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message` 8 个字段，缓存时排除 `progress_log`（按需通过 `/api/export/status/{id}` 单独加载）。
+
+#### 执行路径对比
+
+| 场景 | 之前 | 之后 |
+|------|------|------|
+| 无变化（常态） | 1 × list_keys + N × list_records_by_key | 1 × list_keys（hash比较）+ 1 × SELECT MAX/COUNT |
+| 新增 record | 同上 | 同 + 1 × list_records_all_slim（一次查全部分组） |
+| key 配置变更 | 同上 | 同 + 重做后缀匹配 |
+
+SQLite 查询从 **N+1 次** 降到 **2 次**（常态）或 **3 次**（有变化时）。
+
+#### 相关函数
+
+| 函数 | 位置 | 说明 |
+|------|------|------|
+| `get_records_summary()` | `export_store.py` | 返回 `(max_id, count)`，快速判断 export_records 是否有变化 |
+| `list_records_all_slim()` | `export_store.py` | 一次性查所有 records（排除大字段），按 key_slot 分组 |
+| `update_key_meta(cache, db_keys_list)` | `stats_index.py` | 检查 hash，按需更新 key 元数据映射 |
+| `update_key_records(cache, env_dir)` | `stats_index.py` | 检查 max_id/count，按需刷新 records 缓存并持久化 |
+| `get_current_key_cache()` | `stats_index.py` | 返回内存中的 key cache 引用 |
+
 ---
 
 ## 目录结构总览

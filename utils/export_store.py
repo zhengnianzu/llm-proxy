@@ -126,6 +126,33 @@ def list_records_by_key(key_slot: str, limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
+_SLIM_COLS = "id, key_slot, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message"
+
+
+def get_records_summary() -> tuple:
+    """返回 (max_id, count)，用于快速判断 export_records 是否有变化。"""
+    conn = _get_conn()
+    row = conn.execute("SELECT MAX(id), COUNT(*) FROM export_records").fetchone()
+    return (row[0] or 0, row[1] or 0)
+
+
+def list_records_all_slim(limit_per_key: int = 10) -> dict:
+    """一次查询所有 records（排除 progress_log 等大字段），按 key_slot 分组返回。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        f"SELECT {_SLIM_COLS} FROM export_records ORDER BY created_at DESC"
+    ).fetchall()
+    grouped: dict = {}
+    for r in rows:
+        d = dict(r)
+        slot = d.pop("key_slot", "all")
+        if slot not in grouped:
+            grouped[slot] = []
+        if len(grouped[slot]) < limit_per_key:
+            grouped[slot].append(d)
+    return grouped
+
+
 def mark_interrupted():
     """启动时将遗留的 running 记录标记为 failed。"""
     conn = _get_conn()

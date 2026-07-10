@@ -13,6 +13,7 @@ utils/stats_index.py — 增量汇总索引
   结果持久化到 .session_key_cache.json，进程重启后直接加载。
 """
 
+import hashlib
 import json
 import os
 import time
@@ -39,7 +40,7 @@ _mem_env_dir: Optional[str] = None  # 绑定的 env_dir，切换时失效
 # 进程级内存缓存 — key 聚合表
 # ---------------------------------------------------------------------------
 _KEY_CACHE_FILE = ".session_key_cache.json"
-_KEY_CACHE_VERSION = 1
+_KEY_CACHE_VERSION = 2
 _mem_key_cache: Optional[dict] = None
 _mem_key_cache_env: Optional[str] = None
 
@@ -291,8 +292,13 @@ def _load_key_cache(env_dir: Path) -> Optional[dict]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if data.get("_version") != _KEY_CACHE_VERSION:
+        v = data.get("_version", 0)
+        if v < 1:
             return None
+        if v < _KEY_CACHE_VERSION:
+            data["_version"] = _KEY_CACHE_VERSION
+            data.setdefault("key_meta", {})
+            data.setdefault("key_records", {})
         return data
     except (OSError, json.JSONDecodeError):
         return None
@@ -404,6 +410,8 @@ def _full_build_key_cache(index: dict) -> dict:
         "table": table,
         "mtime_table": mtime_table,
         "totals": {"total": total, "qualified": qualified},
+        "key_meta": {},
+        "key_records": {},
     }
 
 
@@ -507,6 +515,92 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
     if _env_dir:
         _save_key_cache(_env_dir, cache)
     return _build_rows(cache, threshold)
+
+
+# ---------------------------------------------------------------------------
+# key 元数据 + records 缓存（供 /api/export/keys 使用）
+# ---------------------------------------------------------------------------
+
+def get_current_key_cache() -> Optional[dict]:
+    """返回当前内存中的 key cache（引用，非拷贝），供外部读取 key_meta / key_records。"""
+    return _mem_key_cache
+
+
+def _key_slot(api_key: str) -> str:
+    if not api_key or api_key == "(empty)":
+        return "all"
+    return "key-" + api_key[-4:]
+
+
+def _compute_keys_hash(db_keys_list: list) -> str:
+    raw = "|".join(
+        f"{k.get('key', '')}:{k.get('name', '')}:{k.get('created_at', '')}"
+        for k in db_keys_list
+    )
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def update_key_meta(cache: dict, db_keys_list: list) -> bool:
+    """用 list_keys() 的结果更新 cache 中的 key_meta。返回是否有变更。
+
+    db_keys_list: list_keys() 返回的 [{key, name, created_at, ...}, ...]
+    """
+    if cache is None:
+        return False
+
+    meta = cache.get("key_meta") or {}
+    new_hash = _compute_keys_hash(db_keys_list)
+
+    if meta.get("db_keys_hash") == new_hash and meta.get("mapping"):
+        return False
+
+    mapping: dict = {}
+    for row_key in cache.get("table", {}):
+        matched_name = ""
+        created_at = ""
+        for k in db_keys_list:
+            masked = k.get("key", "")
+            if row_key != "(empty)" and len(row_key) >= 4 and masked.endswith(row_key[-4:]):
+                matched_name = k.get("name", "")
+                created_at = k.get("created_at", "")
+                break
+        mapping[row_key] = {
+            "key_name": matched_name,
+            "key_slot": _key_slot(row_key),
+            "created_at": created_at,
+        }
+
+    cache["key_meta"] = {"db_keys_hash": new_hash, "mapping": mapping}
+    return True
+
+
+def update_key_records(cache: dict, env_dir: Optional[Path] = None) -> bool:
+    """检查 export_records 是否有变化，有变化则一次性刷新 records 缓存。返回是否有变更。"""
+    if cache is None:
+        return False
+
+    try:
+        from utils.export_store import get_records_summary, list_records_all_slim
+    except ImportError:
+        return False
+
+    max_id, count = get_records_summary()
+    rec_cache = cache.get("key_records") or {}
+
+    if rec_cache.get("db_max_id") == max_id and rec_cache.get("db_count") == count and rec_cache.get("records"):
+        return False
+
+    grouped = list_records_all_slim(limit_per_key=10)
+    cache["key_records"] = {
+        "db_max_id": max_id,
+        "db_count": count,
+        "records": grouped,
+    }
+
+    if env_dir:
+        _save_key_cache(env_dir, cache)
+
+    return True
 
 
 # ---------------------------------------------------------------------------

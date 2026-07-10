@@ -30,7 +30,10 @@ from utils.key_config import load_key_state
 from utils.key_store import list_keys, mask_key
 from utils.log_paths import get_service_log_dir
 from utils.obs_utils import load_obs_base, load_sync_config, obsutil_ls
-from utils.stats_index import refresh_index, build_stats_from_index, get_date_to_mtime_map
+from utils.stats_index import (
+    refresh_index, build_stats_from_index, get_date_to_mtime_map,
+    get_current_key_cache, update_key_meta, update_key_records,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,28 +100,38 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         index = refresh_index(env_dir, threshold)
         stats = build_stats_from_index(index, threshold, env_dir=env_dir)
+        cache = get_current_key_cache()
 
-        db_keys = {}
-        db_key_created = {}
-        for k in list_keys():
-            db_keys[k["key"]] = k["name"]
-            db_key_created[k["key"]] = k.get("created_at", "")
+        db_keys_list = list_keys()
+        if cache:
+            update_key_meta(cache, db_keys_list)
+            update_key_records(cache, env_dir)
 
         keys_result = []
         for row in stats.get("rows", []):
             api_key = row["api_key"]
-            slot = _key_slot(api_key if api_key != "(empty)" else "")
             mtime_dist = row.get("mtime_cells", {})
 
-            matched_name = ""
-            created_at = ""
-            for masked, name in db_keys.items():
-                if api_key != "(empty)" and masked.endswith(api_key[-4:]):
-                    matched_name = name
-                    created_at = db_key_created.get(masked, "")
-                    break
+            if cache and cache.get("key_meta"):
+                meta = cache["key_meta"].get("mapping", {}).get(api_key, {})
+                matched_name = meta.get("key_name", "")
+                slot = meta.get("key_slot", _key_slot(api_key))
+                created_at = meta.get("created_at", "")
+            else:
+                matched_name = ""
+                created_at = ""
+                slot = _key_slot(api_key if api_key != "(empty)" else "")
+                for k in db_keys_list:
+                    masked = k.get("key", "")
+                    if api_key != "(empty)" and masked.endswith(api_key[-4:]):
+                        matched_name = k.get("name", "")
+                        created_at = k.get("created_at", "")
+                        break
 
-            records = list_records_by_key(slot, limit=10)
+            if cache and cache.get("key_records"):
+                records = cache["key_records"].get("records", {}).get(slot, [])
+            else:
+                records = list_records_by_key(slot, limit=10)
 
             keys_result.append({
                 "api_key": api_key,
