@@ -168,7 +168,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                             reformat_and_analyze, evaluate_sessions, _run_upload_cmd, _log)
         except Exception as exc:
             logger.exception("_run_task crashed (record=%s)", record_id)
-            _log(f"任务异常终止: {exc}")
+            try:
+                _log(f"任务异常终止: {exc}")
+            except Exception:
+                logger.warning("append_log also failed for record=%s", record_id)
             update_status(record_id, "failed", error_message=str(exc))
 
     def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,

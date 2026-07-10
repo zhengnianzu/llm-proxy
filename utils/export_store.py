@@ -17,19 +17,19 @@ _db_path: str = ""
 
 
 def _get_export_log_dir() -> Path:
-    """返回外部日志目录路径"""
-    service_log_dir = os.environ.get("SERVICE_LOG_DIR", "logs")
-    return Path(service_log_dir) / "export_log"
+    """返回外部日志目录路径，与数据库同目录"""
+    if _db_path:
+        return Path(_db_path).parent / "export_log"
+    return Path("logs") / "export_log"
 
 
 def _write_external_log(record_id: int, field_name: str, content: str) -> str:
-    """将字段内容写入外部文件，返回文件路径标记 file://{相对路径}"""
+    """将字段内容写入外部文件，返回 file:// 路径标记"""
     log_dir = _get_export_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{record_id}.{field_name}.log"
     log_path.write_text(content, encoding="utf-8")
-    # 返回相对路径，便于迁移
-    return f"file://export_log/{record_id}.{field_name}.log"
+    return f"file://{log_path}"
 
 
 def _read_field_content(value: str) -> str:
@@ -37,12 +37,15 @@ def _read_field_content(value: str) -> str:
     if not value:
         return ""
     if value.startswith("file://"):
-        rel_path = value[7:]  # 去掉 file:// 前缀
-        service_log_dir = os.environ.get("SERVICE_LOG_DIR", "logs")
-        abs_path = Path(service_log_dir) / rel_path
-        if abs_path.is_file():
-            return abs_path.read_text(encoding="utf-8")
-        return ""  # 文件不存在返回空
+        file_path = Path(value[7:])  # 去掉 file:// 前缀
+        if file_path.is_file():
+            return file_path.read_text(encoding="utf-8")
+        # 相对路径：尝试从数据库所在目录解析
+        if _db_path and not file_path.is_absolute():
+            abs_path = Path(_db_path).parent / file_path
+            if abs_path.is_file():
+                return abs_path.read_text(encoding="utf-8")
+        return ""
     # 旧数据：直接存储的内容
     return value
 
@@ -179,34 +182,13 @@ _SLIM_COLS = "id, key_slot, status, mode, created_at, total_sessions, files_uplo
 
 
 def get_records_summary() -> tuple:
-    """返回 (max_id, count)，用于快速判断 export_records 是否有变化。"""
+    """返回 (max_id, count, running_count)，用于快速判断 export_records 是否有变化。
+    running_count 用于检测 status 从 running → success/failed 的变化。"""
     conn = _get_conn()
-    row = conn.execute("SELECT MAX(id), COUNT(*) FROM export_records").fetchone()
-    return (row[0] or 0, row[1] or 0)
-
-
-def list_records_all_slim(limit_per_key: int = 10) -> dict:
-    """一次查询所有 records（排除 progress_log 等大字段），按 key_slot 分组返回。"""
-    conn = _get_conn()
-    rows = conn.execute(
-        f"SELECT {_SLIM_COLS} FROM export_records ORDER BY created_at DESC"
-    ).fetchall()
-    grouped: dict = {}
-    for r in rows:
-        d = dict(r)
-        slot = d.pop("key_slot", "all")
-        if slot not in grouped:
-            grouped[slot] = []
-        if len(grouped[slot]) < limit_per_key:
-            grouped[slot].append(d)
-    return grouped
-
-
-def get_records_summary() -> tuple:
-    """返回 (max_id, count)，用于快速判断 export_records 是否有变化。"""
-    conn = _get_conn()
-    row = conn.execute("SELECT MAX(id), COUNT(*) FROM export_records").fetchone()
-    return (row[0] or 0, row[1] or 0)
+    row = conn.execute(
+        "SELECT MAX(id), COUNT(*), SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) FROM export_records"
+    ).fetchone()
+    return (row[0] or 0, row[1] or 0, row[2] or 0)
 
 
 def list_records_all_slim(limit_per_key: int = 10) -> dict:

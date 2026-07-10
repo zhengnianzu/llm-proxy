@@ -584,16 +584,20 @@ def update_key_records(cache: dict, env_dir: Optional[Path] = None) -> bool:
     except ImportError:
         return False
 
-    max_id, count = get_records_summary()
+    max_id, count, running = get_records_summary()
     rec_cache = cache.get("key_records") or {}
 
-    if rec_cache.get("db_max_id") == max_id and rec_cache.get("db_count") == count and rec_cache.get("records"):
+    if (rec_cache.get("db_max_id") == max_id
+            and rec_cache.get("db_count") == count
+            and rec_cache.get("db_running") == running
+            and rec_cache.get("records")):
         return False
 
     grouped = list_records_all_slim(limit_per_key=10)
     cache["key_records"] = {
         "db_max_id": max_id,
         "db_count": count,
+        "db_running": running,
         "records": grouped,
     }
 
