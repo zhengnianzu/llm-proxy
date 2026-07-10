@@ -6,8 +6,53 @@
 {% block page_styles %}
         .data-table th, .data-table td { font-size: .84rem; }
         .totals-row td { font-weight: 700; background: var(--muted); }
-        .pill { margin: 2px; }
         .flex-grow-1 { flex-grow: 1; }
+        .key-select { position: relative; }
+        .key-select-trigger {
+            display: flex; align-items: center; justify-content: space-between;
+            min-height: 34px; padding: 4px 8px; cursor: pointer;
+            border: 1px solid var(--input-border); border-radius: var(--radius-sm);
+            background: var(--card); color: var(--foreground); flex-wrap: wrap; gap: 4px;
+        }
+        .key-select-trigger:hover { border-color: var(--primary); }
+        .key-select-tag {
+            display: inline-flex; align-items: center; gap: 2px;
+            padding: 1px 6px; font-size: .78rem; border-radius: 3px;
+            background: var(--primary); color: var(--primary-foreground);
+        }
+        .key-select-tag-remove {
+            cursor: pointer; margin-left: 2px; font-size: .7rem; opacity: .8;
+        }
+        .key-select-tag-remove:hover { opacity: 1; }
+        .key-select-placeholder { color: var(--muted-foreground); font-size: .84rem; }
+        .key-select-arrow { margin-left: auto; padding-left: 6px; color: var(--muted-foreground); font-size: .7rem; }
+        .key-select-dropdown {
+            position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+            margin-top: 2px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+            background: var(--card); box-shadow: 0 4px 12px rgba(0,0,0,.12);
+            max-height: 280px; display: flex; flex-direction: column;
+        }
+        .key-select-search {
+            padding: 6px 8px; border: none; border-bottom: 1px solid var(--border);
+            background: transparent; color: var(--foreground); outline: none;
+            font-size: .84rem; width: 100%;
+        }
+        .key-select-list { overflow-y: auto; padding: 4px 0; }
+        .key-select-item {
+            display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+            cursor: pointer; font-size: .84rem; color: var(--foreground);
+        }
+        .key-select-item:hover { background: var(--muted); }
+        .key-select-item input[type=checkbox] { margin: 0; }
+        .key-select-item-count { margin-left: auto; color: var(--muted-foreground); font-size: .78rem; }
+        .key-select-actions {
+            display: flex; gap: 8px; padding: 6px 10px;
+            border-bottom: 1px solid var(--border); font-size: .78rem;
+        }
+        .key-select-actions a {
+            cursor: pointer; color: var(--primary); text-decoration: none;
+        }
+        .key-select-actions a:hover { text-decoration: underline; }
 {% endblock %}
 
 {% block content %}
@@ -54,22 +99,46 @@
         </div>
     </div>
 
-    <!-- Key 选择器 -->
+    <!-- Key 选择器 (下拉多选) -->
     <div class="card mb-3" v-if="allKeys.length">
         <div class="flex items-center gap-2 mb-2" style="flex-wrap:wrap;">
             <span class="font-semibold" style="font-size:.9rem;">选择显示的 Key</span>
-            <span class="text-muted text-sm">(点击切换，可多选)</span>
-            <button class="btn btn-outline btn-xs" @click="toggleAllKeys">
-                {{ selectedKeys.length === allKeys.length ? '取消全选' : '全选' }}
-            </button>
+            <span class="text-muted text-sm">(最多显示 {{ maxColumns }} 列)</span>
         </div>
-        <div class="flex flex-wrap gap-2">
-            <span v-for="k in allKeys" :key="k"
-                  class="pill" :class="{active: selectedKeys.indexOf(k) !== -1}"
-                  @click="toggleKey(k)"
-                  :title="k">
-                {{ shortKey(k) }}
-            </span>
+        <div class="key-select" v-click-outside="closeDropdown">
+            <div class="key-select-trigger" @click="dropdownOpen = !dropdownOpen">
+                <template v-if="selectedKeys.length">
+                    <span class="key-select-tag" v-for="k in selectedKeys" :key="k" :title="k">
+                        {{ shortKey(k) }}
+                        <span class="key-select-tag-remove" @click.stop="toggleKey(k)">&times;</span>
+                    </span>
+                </template>
+                <span v-else class="key-select-placeholder">请选择 Key…</span>
+                <span class="key-select-arrow">&#9662;</span>
+            </div>
+            <div class="key-select-dropdown" v-show="dropdownOpen">
+                <input class="key-select-search" v-model="keySearch"
+                       placeholder="搜索 Key…" ref="keySearchInput"
+                       @click.stop>
+                <div class="key-select-actions">
+                    <a @click.stop="selectTop5">默认 Top5</a>
+                    <a @click.stop="toggleAllKeys">{{ selectedKeys.length === allKeys.length ? '取消全选' : '全选' }}</a>
+                    <a @click.stop="selectedKeys = []">清空</a>
+                </div>
+                <div class="key-select-list">
+                    <label class="key-select-item" v-for="k in filteredKeys" :key="k"
+                           @click.stop>
+                        <input type="checkbox" :checked="selectedKeys.indexOf(k) !== -1"
+                               @change="toggleKey(k)"
+                               :disabled="selectedKeys.indexOf(k) === -1 && selectedKeys.length >= maxColumns">
+                        <span :title="k">{{ k }}</span>
+                        <span class="key-select-item-count">{{ keyTotal(k) }} sessions</span>
+                    </label>
+                    <div v-if="filteredKeys.length === 0" class="key-select-item" style="color:var(--muted-foreground);cursor:default;">
+                        无匹配结果
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -125,6 +194,18 @@
 {% block scripts %}
 <script src="/static/js/vue.min.js"></script>
 <script>
+Vue.directive('click-outside', {
+    bind: function(el, binding) {
+        el._clickOutside = function(e) {
+            if (!el.contains(e.target)) binding.value();
+        };
+        document.addEventListener('click', el._clickOutside);
+    },
+    unbind: function(el) {
+        document.removeEventListener('click', el._clickOutside);
+    }
+});
+
 new Vue({
     el: '#app',
     data: {
@@ -133,6 +214,19 @@ new Vue({
         loading: false,
         error: '',
         selectedKeys: [],
+        maxColumns: 5,
+        dropdownOpen: false,
+        keySearch: '',
+    },
+    watch: {
+        dropdownOpen: function(val) {
+            if (val) {
+                this.keySearch = '';
+                this.$nextTick(function() {
+                    if (this.$refs.keySearchInput) this.$refs.keySearchInput.focus();
+                }.bind(this));
+            }
+        }
     },
     computed: {
         qualifiedRate: function() {
@@ -142,6 +236,11 @@ new Vue({
         allKeys: function() {
             if (!this.stats || !this.stats.rows) return [];
             return this.stats.rows.map(function(r) { return r.api_key; });
+        },
+        filteredKeys: function() {
+            var q = this.keySearch.trim().toLowerCase();
+            if (!q) return this.allKeys;
+            return this.allKeys.filter(function(k) { return k.toLowerCase().indexOf(q) !== -1; });
         },
         visibleRows: function() {
             if (!this.stats || !this.stats.rows) return [];
@@ -169,9 +268,13 @@ new Vue({
             if (k.length <= 10) return k;
             return k.slice(0, 4) + '…' + k.slice(-4);
         },
+        closeDropdown: function() {
+            this.dropdownOpen = false;
+        },
         toggleKey: function(k) {
             var idx = this.selectedKeys.indexOf(k);
             if (idx === -1) {
+                if (this.selectedKeys.length >= this.maxColumns) return;
                 this.selectedKeys.push(k);
             } else {
                 this.selectedKeys.splice(idx, 1);
@@ -181,8 +284,28 @@ new Vue({
             if (this.selectedKeys.length === this.allKeys.length) {
                 this.selectedKeys = [];
             } else {
-                this.selectedKeys = this.allKeys.slice();
+                this.selectedKeys = this.allKeys.slice(0, this.maxColumns);
             }
+        },
+        selectTop5: function() {
+            this.selectedKeys = this._getDefaultKeys();
+        },
+        _getDefaultKeys: function() {
+            if (!this.stats || !this.stats.rows) return [];
+            var rows = this.stats.rows.slice();
+            rows.sort(function(a, b) { return b.row_total - a.row_total; });
+            var today = new Date().toISOString().slice(0, 10);
+            var todayKeys = [];
+            var otherKeys = [];
+            rows.forEach(function(r) {
+                if (r.cells && r.cells[today] && r.cells[today].total > 0) {
+                    todayKeys.push(r.api_key);
+                } else {
+                    otherKeys.push(r.api_key);
+                }
+            });
+            var result = todayKeys.concat(otherKeys);
+            return result.slice(0, this.maxColumns);
         },
         fetchStats: function(refresh) {
             this.loading = true;
@@ -199,7 +322,7 @@ new Vue({
                         this.stats = null;
                     } else {
                         this.stats = data;
-                        this.selectedKeys = (data.rows || []).map(function(r) { return r.api_key; });
+                        this.selectedKeys = this._getDefaultKeys();
                     }
                 }.bind(this))
                 .catch(function(e) {
