@@ -528,7 +528,7 @@ async function loadLogDirs() {
             if (d.count !== undefined) label += ' (' + d.count + ')';
             if (d.current) label += ' (当前)';
             opt.textContent = label;
-            if (_sharedMode ? d.name === '__ALL__' : d.current) opt.selected = true;
+            if (d.current) opt.selected = true;
             sel.appendChild(opt);
         });
         _logDirsLoaded = true;

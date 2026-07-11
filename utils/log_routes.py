@@ -630,7 +630,7 @@ def register_log_routes(app: FastAPI) -> None:
                         "current": sub.name == current_tag,
                         "count": count,
                     })
-        dirs.insert(0, {"name": "__ALL__", "current": False, "count": total_count, "label": "全部目录"})
+        # __ALL__ 已移除：文件数过多时全目录聚合会导致超时
         return JSONResponse({"dirs": dirs, "current": current_tag})
 
     # --- 统一路由（新） ---
@@ -696,8 +696,6 @@ def register_log_routes(app: FastAPI) -> None:
 
     @app.get("/logs/aggregate")
     def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = "", search: str = ""):
-        if log_dir == "__ALL__":
-            return JSONResponse(_aggregate_all_payload("anthropic", _env_dir, min_messages, offset, limit, api_key, refresh, model, search))
         return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model, search))
 
     # --- 旧路由（别名，向后兼容） ---
@@ -750,10 +748,8 @@ def register_log_routes(app: FastAPI) -> None:
         err = _check_shared(key, code)
         if err:
             return err
-        target_dir = log_dir or "__ALL__"
-        if target_dir == "__ALL__":
-            return JSONResponse(_aggregate_all_payload("anthropic", _env_dir, min_messages, offset, limit, key, refresh, model, search))
-        return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(target_dir), min_messages, offset, limit, key, refresh, model, search))
+        target_dir = resolve_log_dir(log_dir) if log_dir and log_dir != "__ALL__" else resolve_log_dir("")
+        return JSONResponse(_aggregate_payload("anthropic", target_dir, min_messages, offset, limit, key, refresh, model, search))
 
     @app.get("/api/shared/logs/file")
     def shared_logs_file(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
