@@ -508,6 +508,40 @@ let knownKeys = new Set();
 let knownModels = new Set();
 let _logDirsLoaded = false;
 let _keyPrefRestored = false;
+const _adminSharedCode = '{{ shared_code|default("") }}';
+
+function _buildShareUrl(filename, logDir, apiKey) {
+    const base = location.origin + '/history/shared';
+    const key = apiKey || '';
+    const code = _adminSharedCode;
+    if (!key || !code) return '';
+    let url = `${base}?key=${encodeURIComponent(key)}&code=${encodeURIComponent(code)}`;
+    if (filename) url += `#file=${encodeURIComponent(filename)}`;
+    if (logDir) url += (filename ? '&' : '#') + `log_dir=${encodeURIComponent(logDir)}`;
+    return url;
+}
+
+function _shareLink(filename, logDir, apiKey) {
+    const url = _buildShareUrl(filename, logDir, apiKey);
+    if (!url) { alert('缺少 API Key 或 shared code'); return; }
+    navigator.clipboard.writeText(url).then(
+        () => { _showToast('分享链接已复制'); },
+        () => { prompt('复制此链接:', url); }
+    );
+}
+
+function _showToast(msg) {
+    let t = document.getElementById('_shareToast');
+    if (!t) {
+        t = document.createElement('div');
+        t.id = '_shareToast';
+        t.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--success,#22c55e);color:#fff;padding:8px 20px;border-radius:6px;font-size:13px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none;';
+        document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.style.opacity = '1';
+    setTimeout(() => { t.style.opacity = '0'; }, 2000);
+}
 
 function currentLogDir() {
     const sel = document.getElementById('logDirSelect');
@@ -880,7 +914,7 @@ async function selectFile(item, el) {
     }
 }
 
-async function loadTraceFile(el, filename) {
+async function loadTraceFile(el, filename, apiKey) {
     document.querySelectorAll('#traceList .trace-item').forEach(t => t.classList.remove('active'));
     el.classList.add('active');
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
@@ -892,6 +926,7 @@ async function loadTraceFile(el, filename) {
         const data = await res.json();
         data._req_file = filename;
         data._log_dir = logDir || '';
+        data._api_key = apiKey || '';
         renderMessages(data, filename);
     } catch(e) {
         showError(`加载失败：${e.message}`);
@@ -931,7 +966,7 @@ function renderDetailPanel(data) {
         html += `<div class="trace-list" id="traceList">`;
         data.trace_list.forEach((t, i) => {
             const ts = (t.ts || '').replace(/_/g, ' ').slice(0, 19);
-            html += `<div class="trace-item${t.filename === data.latest_file ? ' active' : ''}" data-filename="${esc(t.filename)}" onclick="loadTraceFile(this, '${esc(t.filename)}')">`;
+            html += `<div class="trace-item${t.filename === data.latest_file ? ' active' : ''}" data-filename="${esc(t.filename)}" onclick="loadTraceFile(this, '${esc(t.filename)}', '${esc(data.api_key || '')}')">`;
             html += `<div>${esc(t.filename)}</div>`;
             html += `<div><span class="trace-item-ts">${esc(ts)}</span>`;
             if (t.model) html += `<span class="trace-item-model">${esc(t.model)}</span>`;
@@ -951,6 +986,49 @@ function toggleDetail() {
 }
 
 // ----------------------------------------------------------------
+// Raw file viewer (headers / res)
+// ----------------------------------------------------------------
+async function _viewRawFile(reqFilename, logDir, suffix) {
+    const rawName = reqFilename.replace('-req.json', suffix);
+    const params = `filename=${encodeURIComponent(rawName)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}${_sharedParams()}`;
+    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+    try {
+        const res = await fetch(`${_apiPrefix()}/file/raw?${params}`);
+        if (res.status === 404) {
+            chatPanel.innerHTML = `<div class="empty-state"><p>${esc(rawName)} 文件不存在</p></div>`;
+            return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        chatPanel.innerHTML = '';
+        const currentType = suffix === '-headers.json' ? 'headers' : (suffix === '-res.json' ? 'res' : 'req');
+        const header = document.createElement('div');
+        header.className = 'metadata';
+        header.innerHTML = `<div class="metadata-title">请求文件</div><div class="metadata-item"><strong>文件</strong><span>${esc(rawName)}${_fileToggleLinks(reqFilename, logDir, currentType)}</span></div>`;
+        chatPanel.appendChild(header);
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'margin:12px;padding:12px;background:#1e1e1e;color:#d4d4d4;border-radius:6px;overflow:auto;font-size:12px;line-height:1.5;max-height:calc(100vh - 200px);white-space:pre-wrap;word-break:break-all;';
+        pre.textContent = JSON.stringify(data, null, 2);
+        chatPanel.appendChild(pre);
+    } catch(e) {
+        showError(`加载失败：${e.message}`);
+    }
+}
+
+function _fileToggleLinks(reqFile, logDir, current) {
+    if (!reqFile) return '';
+    let links = '';
+    if (current !== 'req') links += ` <a href="#" onclick="_loadReqFile('${esc(reqFile)}','${esc(logDir||'')}');return false" style="margin-left:6px;font-size:11px">[req]</a>`;
+    if (current !== 'headers') links += ` <a href="#" onclick="_viewRawFile('${esc(reqFile)}','${esc(logDir||'')}','-headers.json');return false" style="margin-left:6px;font-size:11px">[headers]</a>`;
+    if (current !== 'res') links += ` <a href="#" onclick="_viewRawFile('${esc(reqFile)}','${esc(logDir||'')}','-res.json');return false" style="margin-left:6px;font-size:11px">[res]</a>`;
+    return links;
+}
+
+async function _loadReqFile(reqFilename, logDir) {
+    _viewRawFile(reqFilename, logDir, '-req.json');
+}
+
+// ----------------------------------------------------------------
 // Render messages (enhanced: tool modes, thinking, system collapse)
 // ----------------------------------------------------------------
 let _toolMode = 0;
@@ -962,7 +1040,7 @@ function renderJson(data, filename) {
     header.className = 'metadata';
     header.innerHTML = `
         <div class="metadata-title">请求文件</div>
-        <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
+        <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}${!_sharedMode && data._req_file && data._api_key ? ` <a href="#" onclick="_shareLink('${esc(data._req_file)}','${esc(data._log_dir||'')}','${esc(data._api_key)}');return false" style="margin-left:6px;font-size:11px">分享</a>` : ''}${_fileToggleLinks(data._req_file, data._log_dir, 'req')}</span></div>
     `;
     chatPanel.appendChild(header);
     const pre = document.createElement('pre');
@@ -996,7 +1074,7 @@ function renderMessages(data, filename) {
             ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${data.temperature}</span></div>` : ''}
             ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${data.max_tokens}</span></div>` : ''}
             <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
-            <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}</span></div>
+            <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}${!_sharedMode && data._req_file && data._api_key ? ` <a href="#" onclick="_shareLink('${esc(data._req_file)}','${esc(data._log_dir||'')}','${esc(data._api_key)}');return false" style="margin-left:6px;font-size:11px">分享</a>` : ''}${_fileToggleLinks(data._req_file, data._log_dir, 'req')}</span></div>
         `;
         chatPanel.appendChild(meta);
     }

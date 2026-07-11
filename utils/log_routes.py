@@ -694,6 +694,41 @@ def register_log_routes(app: FastAPI) -> None:
                     return JSONResponse({"error": "file not found"}, status_code=404)
         return FileResponse(path, filename=filename, media_type="application/json")
 
+    _RAW_SUFFIXES = ("-req.json", "-headers.json", "-res.json")
+
+    @app.get("/logs/file/raw")
+    def logs_file_raw(filename: str, log_dir: str = ""):
+        """返回原始 JSON 文件内容（支持 req / headers / res 三种后缀）。"""
+        if not any(filename.endswith(s) for s in _RAW_SUFFIXES):
+            return JSONResponse({"error": "invalid filename suffix"}, status_code=400)
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return JSONResponse({"error": "invalid filename"}, status_code=400)
+        if log_dir == "__ALL__":
+            req_name = filename
+            for s in _RAW_SUFFIXES:
+                if filename.endswith(s):
+                    req_name = filename[:-len(s)] + "-req.json"
+                    break
+            found = _find_file_in_all_dirs(_env_dir, req_name)
+            if found:
+                path = os.path.join(os.path.dirname(found), filename)
+            else:
+                return JSONResponse({"error": "file not found"}, status_code=404)
+        else:
+            target_dir = resolve_log_dir(log_dir)
+            path = os.path.join(target_dir, filename)
+            if not os.path.isfile(path):
+                for search_dir in [unified_log_dir(), anthropic_log_dir(), openai_log_dir()]:
+                    alt = os.path.join(search_dir, filename)
+                    if os.path.isfile(alt):
+                        path = alt
+                        break
+        if not os.path.isfile(path):
+            return JSONResponse({"error": "file not found"}, status_code=404)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return JSONResponse(data)
+
     @app.get("/logs/aggregate")
     def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = "", search: str = ""):
         return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model, search))
@@ -764,3 +799,10 @@ def register_log_routes(app: FastAPI) -> None:
         if err:
             return err
         return logs_file_download(filename, log_dir=log_dir or "__ALL__")
+
+    @app.get("/api/shared/logs/file/raw")
+    def shared_logs_file_raw(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
+        err = _check_shared(key, code)
+        if err:
+            return err
+        return logs_file_raw(filename, log_dir=log_dir or "__ALL__")
