@@ -72,7 +72,7 @@
 {% raw %}
 <div id="app">
     <div class="card mb-3">
-        <div class="grid grid-4 items-end">
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
             <div>
                 <label class="text-sm text-muted">环境</label>
                 <select class="input input-sm" v-model="envFilter" @change="loadList">
@@ -81,8 +81,15 @@
                 </select>
             </div>
             <div>
+                <label class="text-sm text-muted">模型</label>
+                <select class="input input-sm" v-model="modelFilter" @change="loadList">
+                    <option value="">全部模型</option>
+                    <option v-for="m in modelList" :key="m" :value="m">{{ m }}</option>
+                </select>
+            </div>
+            <div style="flex:1;min-width:120px">
                 <label class="text-sm text-muted">关键字</label>
-                <input class="input input-sm" v-model="keyword" @keyup.enter="loadList" placeholder="按文件名 / 模型 / reason 过滤">
+                <input class="input input-sm" v-model="keyword" @keyup.enter="loadList" placeholder="按文件名 / reason 过滤">
             </div>
             <div>
                 <label class="text-sm text-muted">数量</label>
@@ -104,7 +111,7 @@
             <div class="log-list">
                 <div v-if="!items.length" class="empty-box" style="min-height:70vh">暂无失败日志</div>
                 <div v-for="item in items" :key="item.filename" class="log-item" :class="{ active: selected && selected.filename === item.filename }" @click="selectItem(item)">
-                    <div class="font-semibold">{{ item.reason || 'unknown' }}</div>
+                    <div class="font-semibold">{{ item.reason || 'unknown' }} <span style="font-weight:400;color:var(--muted-foreground);font-size:.82rem">· {{ item.model || '?' }}</span></div>
                     <div class="log-meta">{{ item.created_at }} · <span v-if="item.attempt_count > 1" class="badge badge-warning" style="font-size:.7rem;padding:1px 6px;">{{ item.attempt_count }} 次重试</span><span v-else>attempt {{ item.attempt || '-' }}</span></div>
                     <div class="log-meta">{{ item.model || 'unknown model' }} · {{ item.filename }}</div>
                     <div v-if="item.env" class="log-meta log-env">{{ item.env }}</div>
@@ -133,6 +140,8 @@ new Vue({
         selectedContent: '',
         envFilter: '',
         envList: [],
+        modelFilter: '',
+        modelList: [],
     },
     methods: {
         formatSize(size) {
@@ -150,10 +159,12 @@ new Vue({
             const p = new URLSearchParams({ limit: this.limit });
             if (this.keyword) p.append('keyword', this.keyword);
             if (this.envFilter) p.append('env', this.envFilter);
+            if (this.modelFilter) p.append('model', this.modelFilter);
             fetch('/logs/debug/list?' + p.toString())
                 .then(r => r.json())
                 .then(data => {
-                    this.items = data || [];
+                    this.items = data.items || [];
+                    this.modelList = data.models || [];
                     if (!this.items.length) {
                         this.selected = null;
                         this.selectedContent = '';

@@ -6,6 +6,7 @@ import httpx
 import hmac
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -596,10 +597,29 @@ def _write_debug(ts: str, attempt: int, model: str, reason: str, body: str):
         path = os.path.join(LOGS_DEBUG, filename)
         with open(path, "w", encoding="utf-8") as f:
             f.write(body)
+        _append_debug_index(LOGS_DEBUG, filename, ts, attempt, safe_model, reason, len(body.encode("utf-8")))
         return filename
     except Exception as ex:
         logging.warning(f"Failed to write debug log: {ex}")
         return None
+
+
+def _append_debug_index(debug_dir: str, filename: str, ts: str,
+                        attempt: int, model: str, reason: str, size: int):
+    index_path = os.path.join(debug_dir, ".log_index.jsonl")
+    try:
+        parts = ts.rsplit("_", 1)
+        ts_dt = parts[0] if len(parts) == 2 else ts
+        seq = parts[1] if len(parts) == 2 else ""
+        entry = {
+            "filename": filename, "ts": ts, "ts_dt": ts_dt, "seq": seq,
+            "attempt": attempt, "model": model, "reason": reason,
+            "size": size, "written_at": time.time(),
+        }
+        with open(index_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _resp_to_obj(r):  # httpx.Response -> dict
@@ -1844,65 +1864,275 @@ def _debug_env_label(path: Path) -> str:
         return ""
 
 
-@app.get("/logs/debug/list")
-def logs_debug_list(limit: int = 200, keyword: str = "", env: str = ""):
-    safe_limit = max(1, min(limit, 1000))
-    keyword_lower = keyword.strip().lower()
-    items = []
-    seen_groups: dict[str, int] = {}
-    pattern = re.compile(r"(?P<ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_(?:(?P<seq>\d+)_)?attempt(?P<attempt>\d+)_(?P<payload>.+)\.txt$")
+_DEBUG_CACHE_LOCK = threading.Lock()
+_debug_mem_cache: dict = {}          # env_label -> {"ts": float, "items": list}
+_DEBUG_MEM_TTL = 10
 
-    for path in _iter_debug_txt_files(env):
-        name = path.name
-        match = pattern.match(name)
-        model = ""
-        reason = ""
-        attempt = 0
-        created_at = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        ts_str = ""
-        if match:
-            ts_str = match.group("ts")
-            try:
-                created_at = datetime.strptime(ts_str, "%Y-%m-%d_%H-%M-%S").strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                pass
-            attempt = int(match.group("attempt"))
-            payload = match.group("payload")
-            if "_" in payload:
-                model, reason = payload.rsplit("_", 1)
-            else:
-                model = payload
+_DEBUG_INDEX_PATTERN = re.compile(
+    r"(?P<ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})"
+    r"_(?:(?P<seq>\d+)_)?"
+    r"attempt(?P<attempt>\d+)_(?P<payload>.+)\.txt$"
+)
 
-        if keyword_lower and keyword_lower not in name.lower() and keyword_lower not in model.lower() and keyword_lower not in reason.lower():
+
+_DEBUG_KNOWN_REASONS = re.compile(r"_(http_\d+|empty_content|rate_limit|no_message_start)$")
+
+
+def _backfill_debug_index(hour_dir: Path):
+    index_path = hour_dir / ".log_index.jsonl"
+    entries = []
+    for txt_file in sorted(hour_dir.glob("*.txt")):
+        m = _DEBUG_INDEX_PATTERN.match(txt_file.name)
+        if not m:
+            continue
+        ts_dt = m.group("ts")
+        seq = m.group("seq") or ""
+        attempt = int(m.group("attempt"))
+        payload = m.group("payload")
+        rm = _DEBUG_KNOWN_REASONS.search(payload)
+        if rm:
+            model = payload[:rm.start()]
+            reason = rm.group(1)
+        elif "_" in payload:
+            model, reason = payload.rsplit("_", 1)
+        else:
+            model, reason = payload, ""
+        full_ts = f"{ts_dt}_{seq}" if seq else ts_dt
+        st = txt_file.stat()
+        entries.append({
+            "filename": txt_file.name, "ts": full_ts, "ts_dt": ts_dt, "seq": seq,
+            "attempt": attempt, "model": model, "reason": reason,
+            "size": st.st_size, "written_at": st.st_mtime,
+        })
+    if entries:
+        try:
+            with open(index_path, "w", encoding="utf-8") as f:
+                for e in entries:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+
+def _collect_debug_roots() -> list[Path]:
+    logs_root = Path("logs")
+    roots = []
+    for port_dir in sorted(logs_root.glob("port*")):
+        if not port_dir.is_dir():
+            continue
+        for env_dir in port_dir.iterdir():
+            if not env_dir.is_dir():
+                continue
+            debug_dir = env_dir / "debug"
+            if debug_dir.is_dir():
+                roots.append(debug_dir)
+    legacy = Path("logs", "debug")
+    if legacy.is_dir():
+        roots.append(legacy)
+    return roots
+
+
+def _rebuild_debug_cache(debug_root: Path) -> list:
+    cache_path = debug_root / ".log_cache.json"
+    cache: dict = {"_version": 1, "updated_at": 0, "hour_dirs": {}, "items": []}
+    if cache_path.is_file():
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    hour_meta = cache.get("hour_dirs", {})
+    hour_dirs = sorted(
+        [d for d in debug_root.iterdir() if d.is_dir() and not d.name.startswith(".")],
+        key=lambda d: d.name,
+    )
+
+    changed = False
+    seen_hour_keys = set()
+    for hdir in hour_dirs:
+        hkey = hdir.name
+        seen_hour_keys.add(hkey)
+        idx_path = hdir / ".log_index.jsonl"
+
+        if not idx_path.is_file():
+            if any(hdir.glob("*.txt")):
+                _backfill_debug_index(hdir)
+            if not idx_path.is_file():
+                continue
+
+        st = idx_path.stat()
+        prev = hour_meta.get(hkey, {})
+        if (prev.get("index_size") == st.st_size
+                and prev.get("index_mtime") == st.st_mtime):
             continue
 
-        env_label = _debug_env_label(path)
-        seq_part = match.group("seq") if match and match.group("seq") else ""
-        group_key = f"{env_label}|{ts_str}|{seq_part}|{model}|{reason}" if ts_str else ""
+        hour_meta[hkey] = {
+            "index_size": st.st_size,
+            "index_mtime": st.st_mtime,
+        }
+        changed = True
+
+    for old_key in list(hour_meta.keys()):
+        if old_key not in seen_hour_keys:
+            del hour_meta[old_key]
+            changed = True
+
+    if not changed and cache.get("items"):
+        return cache["items"], cache.get("models", [])
+
+    try:
+        rel = debug_root.relative_to(Path("logs"))
+        env_label = str(rel)
+    except ValueError:
+        env_label = str(debug_root)
+
+    all_entries: list[dict] = []
+    for hdir in hour_dirs:
+        hkey = hdir.name
+        idx_path = hdir / ".log_index.jsonl"
+        if not idx_path.is_file():
+            continue
+        try:
+            with open(idx_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                        e["_hour_dir"] = hkey
+                        all_entries.append(e)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+    seen_groups: dict[str, int] = {}
+    items: list[dict] = []
+    all_entries.sort(key=lambda e: e.get("written_at", 0), reverse=True)
+
+    for e in all_entries:
+        hdir_name = e.get("_hour_dir", "")
+        ts_dt = e.get("ts_dt", "")
+        seq = e.get("seq", "")
+        model = e.get("model", "")
+        reason = e.get("reason", "")
+        group_key = f"{ts_dt}|{seq}|{model}|{reason}" if ts_dt else ""
 
         if group_key and group_key in seen_groups:
             idx = seen_groups[group_key]
             items[idx]["attempt_count"] += 1
             continue
 
-        rel_name = f"{env_label}/{name}" if env_label else name
+        created_at = ""
+        if ts_dt:
+            try:
+                created_at = datetime.strptime(ts_dt, "%Y-%m-%d_%H-%M-%S").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                created_at = ts_dt
+
+        rel_name = f"{env_label}/{hdir_name}/{e['filename']}" if env_label else f"{hdir_name}/{e['filename']}"
         item = {
             "filename": rel_name,
             "created_at": created_at,
-            "attempt": attempt,
+            "attempt": e.get("attempt", 0),
             "attempt_count": 1,
             "model": model,
             "reason": reason,
-            "size": path.stat().st_size,
-            "env": env_label,
+            "size": e.get("size", 0),
+            "env": f"{env_label}/{hdir_name}" if env_label else hdir_name,
         }
         items.append(item)
         if group_key:
             seen_groups[group_key] = len(items) - 1
-        if len(items) >= safe_limit:
-            break
 
-    return JSONResponse(items)
+    models = sorted({i.get("model", "") for i in items if i.get("model")})
+
+    save_cache = {
+        "_version": 1,
+        "updated_at": time.time(),
+        "hour_dirs": hour_meta,
+        "items": items,
+        "models": models,
+    }
+    try:
+        tmp = str(cache_path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(save_cache, f, ensure_ascii=False)
+        os.replace(tmp, cache_path)
+    except OSError:
+        pass
+
+    return items, models
+
+
+def _load_debug_cache(env_filter: str = "", keyword: str = "", limit: int = 200) -> tuple:
+    global _debug_mem_cache
+
+    now = time.time()
+    cache_key = env_filter or "__all__"
+
+    with _DEBUG_CACHE_LOCK:
+        mem = _debug_mem_cache.get(cache_key)
+        if mem and (now - mem["ts"]) < _DEBUG_MEM_TTL:
+            items = mem["items"]
+            models = mem["models"]
+            if keyword:
+                items = [i for i in items if keyword in i.get("filename", "").lower()
+                         or keyword in i.get("model", "").lower()
+                         or keyword in i.get("reason", "").lower()]
+            return items[:limit], models
+
+    all_items: list[dict] = []
+    all_models: set = set()
+    roots = _collect_debug_roots()
+
+    if env_filter:
+        target = Path("logs") / env_filter
+        matched = False
+        for root in roots:
+            if target == root or target.parent == root:
+                if target.is_dir() and target != root:
+                    hdir = target
+                    idx_path = hdir / ".log_index.jsonl"
+                    if not idx_path.is_file() and any(hdir.glob("*.txt")):
+                        _backfill_debug_index(hdir)
+                items, models = _rebuild_debug_cache(root)
+                all_models.update(models)
+                if target != root:
+                    items = [i for i in items if env_filter in i.get("env", "")]
+                all_items = items
+                matched = True
+                break
+        if not matched:
+            return [], []
+    else:
+        for root in roots:
+            items, models = _rebuild_debug_cache(root)
+            all_items.extend(items)
+            all_models.update(models)
+        all_items.sort(key=lambda i: i.get("created_at", ""), reverse=True)
+
+    merged_models = sorted(all_models)
+
+    with _DEBUG_CACHE_LOCK:
+        _debug_mem_cache[cache_key] = {"ts": time.time(), "items": all_items, "models": merged_models}
+
+    if keyword:
+        all_items = [i for i in all_items if keyword in i.get("filename", "").lower()
+                     or keyword in i.get("model", "").lower()
+                     or keyword in i.get("reason", "").lower()]
+    return all_items[:limit], merged_models
+
+
+@app.get("/logs/debug/list")
+def logs_debug_list(limit: int = 200, keyword: str = "", env: str = "", model: str = ""):
+    safe_limit = max(1, min(limit, 1000))
+    keyword_lower = keyword.strip().lower()
+    model_lower = model.strip().lower()
+    items, models = _load_debug_cache(env_filter=env, keyword=keyword_lower, limit=safe_limit)
+    if model_lower:
+        items = [i for i in items if model_lower in i.get("model", "").lower()]
+    return JSONResponse({"items": items, "models": models})
 
 
 @app.get("/logs/debug/file")

@@ -945,6 +945,7 @@ select.input {
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
 .grid-4 { grid-template-columns: repeat(4, 1fr); }
+.grid-5 { grid-template-columns: repeat(5, 1fr); }
 .grid-6 { grid-template-columns: repeat(6, 1fr); }
 
 .flex { display: flex; }
@@ -1012,7 +1013,7 @@ select.input {
     margin-bottom: 16px;
   }
 
-  .grid-2, .grid-3, .grid-4, .grid-6 {
+  .grid-2, .grid-3, .grid-4, .grid-5, .grid-6 {
     grid-template-columns: 1fr;
   }
 }
