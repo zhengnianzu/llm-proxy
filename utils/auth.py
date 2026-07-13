@@ -87,7 +87,7 @@ async def validate_api_key(request: Request) -> str:
 def resolve_upstream_channel(api_key: str) -> Optional[dict]:
     """根据已验证的 api_key 解析要使用的上游渠道。
     优先级：DB key 绑定的渠道 > 默认渠道 > None（回退到 .env）。
-    返回的 dict 可能含 _fallback 字段标识回退原因。"""
+    绑定渠道全部离线时返回 _error 标记，由调用方处理。"""
     if api_key:
         key_id = get_key_id_by_value(api_key)
         if key_id is not None:
@@ -95,10 +95,5 @@ def resolve_upstream_channel(api_key: str) -> Optional[dict]:
             if ch:
                 return ch
             if has_channel_bindings(key_id):
-                fallback = get_default_channel()
-                if fallback:
-                    fallback["_fallback"] = "bound_channels_offline"
-                    return fallback
-                # 无默认渠道，回退到 .env，但标记原因
-                return {"_fallback": "bound_channels_offline"}
+                return {"_error": "all_channels_offline"}
     return get_default_channel()

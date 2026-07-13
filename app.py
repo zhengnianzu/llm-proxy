@@ -865,6 +865,8 @@ async def anthropic_messages(req: Request):
     """anthropic透传"""
     _api_key = await validate_api_key(req)
     _channel = resolve_upstream_channel(_api_key)
+    if _channel and _channel.get("_error"):
+        return JSONResponse({"error": {"type": "channel_error", "message": "所有绑定渠道均已离线"}}, status_code=503)
     _channel_key = _channel.get("upstream_key", "")[-4:] if _channel else ""
     _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
@@ -1176,6 +1178,8 @@ async def openai_chat_completions(req: Request):
     """
     _api_key = await validate_api_key(req)
     _channel = resolve_upstream_channel(_api_key)
+    if _channel and _channel.get("_error"):
+        return JSONResponse({"error": {"type": "channel_error", "message": "所有绑定渠道均已离线"}}, status_code=503)
     _channel_key = _channel.get("upstream_key", "")[-4:] if _channel else ""
     _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
@@ -1422,6 +1426,8 @@ async def openai_responses(req: Request):
     """
     _api_key = await validate_api_key(req)
     _channel = resolve_upstream_channel(_api_key)
+    if _channel and _channel.get("_error"):
+        return JSONResponse({"error": {"type": "channel_error", "message": "所有绑定渠道均已离线"}}, status_code=503)
     _channel_key = _channel.get("upstream_key", "")[-4:] if _channel else ""
     _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()

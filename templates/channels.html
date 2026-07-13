@@ -80,7 +80,16 @@
     <div class="card">
         <div class="flex justify-between items-center mb-3">
             <h5 class="mb-0">渠道列表</h5>
-            <button class="btn btn-primary btn-sm" @click="showCreate = true">新建渠道</button>
+            <div class="flex items-center gap-2">
+                <select v-model="filterType" class="input input-sm" style="width:120px">
+                    <option value="">全部类型</option>
+                    <option v-for="t in typeOptions" :key="t" :value="t">{{ t }}</option>
+                </select>
+                <label style="font-size:.8rem;cursor:pointer;user-select:none;display:flex;align-items:center;gap:4px">
+                    <input type="checkbox" v-model="showOffline"> 显示离线
+                </label>
+                <button class="btn btn-primary btn-sm" @click="showCreate = true">新建渠道</button>
+            </div>
         </div>
 
         <div v-if="showCreate" class="create-form">
@@ -101,6 +110,10 @@
                     <label class="form-label-sm">邀请码（可选）</label>
                     <input v-model="newInviteCode" class="input input-sm" placeholder="多个用逗号分隔">
                 </div>
+                <div class="form-field">
+                    <label class="form-label-sm">类型（可选）</label>
+                    <input v-model="newType" class="input input-sm" placeholder="如 CC、default">
+                </div>
                 <div class="form-actions">
                     <button class="btn btn-primary btn-sm" style="width:100%" @click="createChannel">创建</button>
                     <button class="btn btn-outline btn-sm" style="width:100%" @click="showCreate = false">取消</button>
@@ -108,13 +121,14 @@
             </div>
         </div>
 
-        <table class="data-table" v-if="channels.length">
+        <table class="data-table" v-if="filteredChannels.length">
             <thead><tr>
                 <th style="width:50px">ID</th>
                 <th>名称</th>
                 <th>上游地址</th>
                 <th>Key</th>
                 <th style="width:70px">标识</th>
+                <th style="width:80px">类型</th>
                 <th style="width:80px">默认</th>
                 <th>邀请码</th>
                 <th style="width:80px">状态</th>
@@ -122,12 +136,24 @@
                 <th style="width:80px">操作</th>
             </tr></thead>
             <tbody>
-                <tr v-for="ch in channels" :key="ch.id">
+                <tr v-for="ch in filteredChannels" :key="ch.id">
                     <td>{{ ch.id }}</td>
                     <td>{{ ch.name || '-' }}</td>
                     <td class="text-sm text-muted cell-truncate" :title="ch.upstream_url">{{ ch.upstream_url }}</td>
                     <td><span class="code-inline">{{ ch.upstream_key }}</span></td>
                     <td><span class="badge badge-info">{{ ch.key_suffix }}</span></td>
+                    <td class="text-sm">
+                        <template v-if="editingTypeId !== ch.id">
+                            <span v-if="ch.channel_type" class="badge" style="font-size:.7rem">{{ ch.channel_type }}</span>
+                            <span v-else class="text-muted">-</span>
+                            <button class="btn btn-outline btn-sm" style="font-size:.6rem;padding:0px 4px; margin-left:4px" @click="startEditType(ch)">编辑</button>
+                        </template>
+                        <span v-else class="invite-edit-wrap">
+                            <input v-model="editTypeValue" class="input input-sm" style="width:80px" @keyup.enter="saveType(ch.id)" placeholder="类型">
+                            <button class="btn btn-primary btn-sm" style="font-size:.65rem;padding:1px 6px" @click="saveType(ch.id)">保存</button>
+                            <button class="btn btn-outline btn-sm" style="font-size:.65rem;padding:1px 6px" @click="editingTypeId = null">取消</button>
+                        </span>
+                    </td>
                     <td>
                         <span v-if="ch.is_default" class="badge badge-warning">默认</span>
                     </td>
@@ -166,7 +192,10 @@
                 </tr>
             </tbody>
         </table>
-        <div v-else class="text-muted text-center" style="padding:24px 0">暂无渠道，点击「新建渠道」创建</div>
+        <div v-else class="text-muted text-center" style="padding:24px 0">
+            <template v-if="channels.length && !filteredChannels.length">无匹配渠道，尝试调整筛选条件</template>
+            <template v-else>暂无渠道，点击「新建渠道」创建</template>
+        </div>
     </div>
 
     <!-- 测试连通弹窗 -->
@@ -219,12 +248,31 @@ new Vue({
     data: {
         channels: [],
         showCreate: false,
-        newName: '', newUrl: '', newKey: '', newInviteCode: '',
+        newName: '', newUrl: '', newKey: '', newInviteCode: '', newType: '',
         editingInviteId: null, editInviteCode: '',
+        editingTypeId: null, editTypeValue: '',
+        showOffline: false, filterType: '',
         openMenuId: null,
         testModal: false, testChannelId: null, testChannelName: '',
         testModel: 'claude-sonnet-4-6', testMethod: 'anthropic', testMessage: '',
         testLoading: false, testResult: null,
+    },
+    computed: {
+        filteredChannels: function() {
+            var self = this;
+            return this.channels.filter(function(ch) {
+                if (!self.showOffline && !ch.alive) return false;
+                if (self.filterType && (ch.channel_type || '') !== self.filterType) return false;
+                return true;
+            });
+        },
+        typeOptions: function() {
+            var types = {};
+            this.channels.forEach(function(ch) {
+                if (ch.channel_type) types[ch.channel_type] = true;
+            });
+            return Object.keys(types).sort();
+        }
     },
     mounted() {
         this.fetchChannels();
@@ -254,9 +302,9 @@ new Vue({
             fetch('/api/channels', {
                 method: 'POST',
                 headers: this._h({'Content-Type': 'application/json'}),
-                body: JSON.stringify({name: this.newName, upstream_url: this.newUrl, upstream_key: this.newKey, invite_code: this.newInviteCode})
+                body: JSON.stringify({name: this.newName, upstream_url: this.newUrl, upstream_key: this.newKey, invite_code: this.newInviteCode, channel_type: this.newType})
             }).then(r => r.json()).then(() => {
-                this.newName = ''; this.newUrl = ''; this.newKey = ''; this.newInviteCode = '';
+                this.newName = ''; this.newUrl = ''; this.newKey = ''; this.newInviteCode = ''; this.newType = '';
                 this.showCreate = false;
                 this.fetchChannels();
             });
@@ -290,6 +338,17 @@ new Vue({
                 headers: this._h({'Content-Type': 'application/json'}),
                 body: JSON.stringify({invite_code: this.editInviteCode})
             }).then(() => { this.editingInviteId = null; this.fetchChannels(); });
+        },
+        startEditType(ch) {
+            this.editingTypeId = ch.id;
+            this.editTypeValue = ch.channel_type || '';
+        },
+        saveType(id) {
+            fetch('/api/channels/' + id + '/channel-type', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({channel_type: this.editTypeValue})
+            }).then(() => { this.editingTypeId = null; this.fetchChannels(); });
         },
         openTest(ch) {
             this.testChannelId = ch.id;

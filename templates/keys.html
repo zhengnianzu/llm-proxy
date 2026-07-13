@@ -30,6 +30,25 @@
 .test-result .label { font-weight: 600; min-width: 80px; display: inline-block; color: var(--muted-foreground); }
 .test-form-grid { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
 .test-form-grid .form-field { flex: 1; min-width: 120px; }
+.action-menu-wrap { position: relative; display: inline-block; }
+.action-menu-btn { cursor: pointer; }
+.action-menu {
+    display: none;
+    position: absolute; right: 0; top: 100%;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow-lg);
+    min-width: 100px; z-index: 100; padding: 4px 0;
+}
+.action-menu.open { display: block; }
+.action-menu-item {
+    display: block; width: 100%; padding: 6px 14px;
+    font-size: .8rem; text-align: left; cursor: pointer;
+    background: none; border: none; color: var(--foreground);
+    white-space: nowrap;
+}
+.action-menu-item:hover { background: var(--muted); }
+.action-menu-item.danger { color: var(--destructive); }
+.action-menu-item.danger:hover { background: color-mix(in srgb, var(--destructive) 8%, var(--card)); }
 {% endblock %}
 
 {% block content %}
@@ -45,7 +64,11 @@
         </div>
         <div class="flex items-center gap-2">
             <input v-model="filterName" class="input input-sm" placeholder="搜索名称…" style="width:140px;">
-            <input v-model="filterInvite" class="input input-sm" placeholder="搜索邀请码…" style="width:140px;">
+            <select v-model="filterInvite" class="input input-sm" style="width:160px;">
+                <option value="">全部邀请码</option>
+                <option value="__none__">默认（无邀请码）</option>
+                <option v-for="c in inviteCodeOptions" :key="c" :value="c">{{ c }}</option>
+            </select>
             <button class="btn btn-outline btn-sm" @click="copyInviteLink">邀请链接</button>
             <button class="btn btn-primary btn-sm" @click="openCreateModal">新建 Key</button>
         </div>
@@ -98,9 +121,15 @@
                     <td class="text-muted small">{{ k.created_at }}</td>
                     <td>
                         <button class="btn btn-outline btn-sm" @click="openTest(k)">测试</button>
-                        <button v-if="k.status === 'active'" class="btn btn-ghost btn-sm" @click="toggleKey(k.id, 'disable')">停用</button>
-                        <button v-else class="btn btn-ghost btn-sm" @click="toggleKey(k.id, 'enable')">启用</button>
-                        <button class="btn btn-destructive btn-sm ms-1" @click="removeKey(k.id, k.key)">删除</button>
+                        <div class="action-menu-wrap" :id="'key-action-' + k.id" style="margin-left:4px">
+                            <button class="btn btn-outline btn-sm action-menu-btn" @click="toggleActionMenu(k.id)">更多 ▾</button>
+                            <div class="action-menu" :class="{open: openMenuId === k.id}">
+                                <button class="action-menu-item" @click="copyKeyById(k); openMenuId = null">复制 Key</button>
+                                <button v-if="k.status === 'active'" class="action-menu-item" @click="toggleKey(k.id, 'disable'); openMenuId = null">停用</button>
+                                <button v-else class="action-menu-item" @click="toggleKey(k.id, 'enable'); openMenuId = null">启用</button>
+                                <button class="action-menu-item danger" @click="removeKey(k.id, k.key); openMenuId = null">删除</button>
+                            </div>
+                        </div>
                     </td>
                 </tr>
             </tbody>
@@ -220,6 +249,7 @@ new Vue({
         editingKeyId: null, selectedChannelIds: [],
         toastMsg: '',
         filterName: '', filterInvite: '',
+        openMenuId: null,
         testModal: false, testKeyId: null, testKeyName: '', testKeyValue: '',
         testModel: 'claude-sonnet-4-6', testMethod: 'anthropic', testMessage: '',
         testLoading: false, testResult: null,
@@ -227,17 +257,61 @@ new Vue({
     computed: {
         filteredKeys: function() {
             var name = this.filterName.toLowerCase().trim();
-            var invite = this.filterInvite.toLowerCase().trim();
+            var invite = this.filterInvite;
             return this.dbKeys.filter(function(k) {
                 if (name && (k.name || '').toLowerCase().indexOf(name) === -1) return false;
-                if (invite && (k.invite_code || '').toLowerCase().indexOf(invite) === -1) return false;
+                if (invite === '__none__') {
+                    if (k.invite_code) return false;
+                } else if (invite) {
+                    if ((k.invite_code || '') !== invite) return false;
+                }
                 return true;
             });
+        },
+        inviteCodeOptions: function() {
+            var codes = {};
+            this.dbKeys.forEach(function(k) {
+                if (k.invite_code) codes[k.invite_code] = true;
+            });
+            return Object.keys(codes).sort();
         }
     },
-    mounted() { this.fetchKeys(); this.fetchAllChannels(); },
+    mounted() {
+        this.fetchKeys();
+        this.fetchAllChannels();
+        var self = this;
+        document.addEventListener('click', function(e) {
+            if (self.openMenuId !== null) {
+                var wrap = document.getElementById('key-action-' + self.openMenuId);
+                if (!wrap || !wrap.contains(e.target)) self.openMenuId = null;
+            }
+        });
+    },
     methods: {
         _h(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
+        toggleActionMenu(id) {
+            this.openMenuId = this.openMenuId === id ? null : id;
+        },
+        copyKeyById(k) {
+            var self = this;
+            if (k._revealedKey) {
+                navigator.clipboard.writeText(k._revealedKey).then(function() {
+                    self.toastMsg = 'Key 已复制';
+                    setTimeout(function() { self.toastMsg = ''; }, 2000);
+                });
+                return;
+            }
+            fetch('/api/keys/' + k.id + '/reveal', {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d.key) {
+                        navigator.clipboard.writeText(d.key).then(function() {
+                            self.toastMsg = 'Key 已复制';
+                            setTimeout(function() { self.toastMsg = ''; }, 2000);
+                        });
+                    }
+                });
+        },
         fetchKeys() {
             fetch('/api/keys', {headers: this._h()}).then(r => r.json()).then(d => {
                 this.dbKeys = d.db_keys || [];

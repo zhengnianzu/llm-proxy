@@ -47,6 +47,7 @@ def init_db(db_dir: str = "data"):
         _conn.commit()
         _migrate_add_is_default()
         _migrate_add_invite_code()
+        _migrate_add_channel_type()
         _auto_import_env_channel()
 
 
@@ -64,6 +65,14 @@ def _migrate_add_invite_code():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
     if "invite_code" not in cols:
         conn.execute("ALTER TABLE channels ADD COLUMN invite_code TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+
+def _migrate_add_channel_type():
+    conn = _conn
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
+    if "channel_type" not in cols:
+        conn.execute("ALTER TABLE channels ADD COLUMN channel_type TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
 
@@ -103,12 +112,12 @@ def key_suffix(key: str) -> str:
     return key[-4:] if len(key) >= 4 else key
 
 
-def add_channel(name: str, upstream_url: str, upstream_key: str, invite_code: str = "") -> dict:
+def add_channel(name: str, upstream_url: str, upstream_key: str, invite_code: str = "", channel_type: str = "") -> dict:
     conn = _get_conn()
     with _lock:
         cur = conn.execute(
-            "INSERT INTO channels (name, upstream_url, upstream_key, invite_code) VALUES (?, ?, ?, ?)",
-            (name, upstream_url, upstream_key, invite_code),
+            "INSERT INTO channels (name, upstream_url, upstream_key, invite_code, channel_type) VALUES (?, ?, ?, ?, ?)",
+            (name, upstream_url, upstream_key, invite_code, channel_type),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM channels WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -121,7 +130,7 @@ def add_channel(name: str, upstream_url: str, upstream_key: str, invite_code: st
 def list_channels() -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT id, name, upstream_url, upstream_key, alive, is_default, invite_code, created_at FROM channels ORDER BY id"
+        "SELECT id, name, upstream_url, upstream_key, alive, is_default, invite_code, channel_type, created_at FROM channels ORDER BY id"
     ).fetchall()
     result = []
     for r in rows:
@@ -162,6 +171,16 @@ def update_channel_invite_code(channel_id: int, invite_code: str) -> bool:
     with _lock:
         cur = conn.execute(
             "UPDATE channels SET invite_code = ? WHERE id = ?", (invite_code, channel_id)
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def update_channel_type(channel_id: int, channel_type: str) -> bool:
+    conn = _get_conn()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE channels SET channel_type = ? WHERE id = ?", (channel_type, channel_id)
         )
         conn.commit()
     return cur.rowcount > 0

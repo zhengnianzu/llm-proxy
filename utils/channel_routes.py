@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from utils.channel_store import (
     add_channel, list_channels, toggle_channel_alive, delete_channel,
     set_key_channels, get_key_channels, set_default_channel,
-    update_channel_invite_code, get_channel_raw,
+    update_channel_invite_code, update_channel_type, get_channel_raw,
 )
 from utils.connection_test import run_test
 
@@ -51,9 +51,10 @@ def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
         upstream_url = body.get("upstream_url", "").strip()
         upstream_key = body.get("upstream_key", "").strip()
         invite_code = body.get("invite_code", "").strip()
+        channel_type = body.get("channel_type", "").strip()
         if not upstream_url or not upstream_key:
             return JSONResponse({"detail": "upstream_url and upstream_key are required"}, status_code=400)
-        result = add_channel(name, upstream_url, upstream_key, invite_code=invite_code)
+        result = add_channel(name, upstream_url, upstream_key, invite_code=invite_code, channel_type=channel_type)
         return JSONResponse(result)
 
     @app.post("/api/channels/test")
@@ -113,6 +114,15 @@ def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
         body = await request.json()
         invite_code = body.get("invite_code", "").strip()
         return JSONResponse({"success": update_channel_invite_code(channel_id, invite_code)})
+
+    @app.post("/api/channels/{channel_id}/channel-type")
+    async def api_channels_update_type(request: Request, channel_id: int):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        channel_type = body.get("channel_type", "").strip()
+        return JSONResponse({"success": update_channel_type(channel_id, channel_type)})
 
     @app.get("/api/keys/{key_id}/channels")
     def api_key_channels(request: Request, key_id: int):
