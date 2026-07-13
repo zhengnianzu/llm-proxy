@@ -408,6 +408,34 @@
         }
         .searchable-select .ss-option:hover { background: var(--muted); }
         .searchable-select .ss-option.selected { background: var(--accent); color: var(--accent-foreground); font-weight: 600; }
+
+        /* ========= JSON Tree ========= */
+        .json-tree {
+            margin: 12px; padding: 12px; background: #1e1e1e; color: #d4d4d4;
+            border-radius: 6px; overflow: auto; font-size: 12px; line-height: 1.6;
+            font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+            max-height: calc(100vh - 200px);
+        }
+        .jt-row { white-space: nowrap; }
+        .jt-toggle {
+            display: inline-block; width: 14px; text-align: center;
+            cursor: pointer; user-select: none; color: #808080;
+            font-size: 10px; vertical-align: middle; margin-right: 2px;
+        }
+        .jt-toggle:hover { color: #d4d4d4; }
+        .jt-key { color: #9cdcfe; }
+        .jt-str { color: #ce9178; }
+        .jt-num { color: #b5cea8; }
+        .jt-bool { color: #569cd6; }
+        .jt-null { color: #808080; font-style: italic; }
+        .jt-bracket { color: #d4d4d4; }
+        .jt-summary { color: #6a6a6a; font-style: italic; font-size: 11px; }
+        .jt-children { margin-left: 20px; }
+        .jt-children.collapsed { display: none; }
+        .jt-close { margin-left: 20px; }
+        .jt-close.root { margin-left: 0; }
+        .jt-str-long { cursor: pointer; text-decoration: underline dotted #6a6a6a; }
+        .jt-str-long:hover { text-decoration: underline solid #ce9178; }
 {% endblock %}
 
 {% block content %}
@@ -1049,10 +1077,7 @@ async function _viewRawFile(reqFilename, logDir, suffix) {
         header.className = 'metadata';
         header.innerHTML = `<div class="metadata-title">请求文件</div><div class="metadata-item"><strong>文件</strong><span>${esc(rawName)}${_fileToggleLinks(reqFilename, logDir, currentType)}</span></div>`;
         chatPanel.appendChild(header);
-        const pre = document.createElement('pre');
-        pre.style.cssText = 'margin:12px;padding:12px;background:#1e1e1e;color:#d4d4d4;border-radius:6px;overflow:auto;font-size:12px;line-height:1.5;max-height:calc(100vh - 200px);white-space:pre-wrap;word-break:break-all;';
-        pre.textContent = JSON.stringify(data, null, 2);
-        chatPanel.appendChild(pre);
+        renderJsonTree(data, chatPanel);
     } catch(e) {
         showError(`加载失败：${e.message}`);
     }
@@ -1072,6 +1097,148 @@ async function _loadReqFile(reqFilename, logDir) {
 }
 
 // ----------------------------------------------------------------
+// JSON Tree viewer — collapsible tree with syntax highlighting
+// ----------------------------------------------------------------
+function renderJsonTree(value, container, defaultDepth) {
+    if (defaultDepth === undefined) defaultDepth = 1;
+    const root = document.createElement('div');
+    root.className = 'json-tree';
+
+    function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+    function isArr(v) { return Array.isArray(v); }
+
+    function valSpan(v) {
+        const s = document.createElement('span');
+        if (v === null) { s.className = 'jt-null'; s.textContent = 'null'; }
+        else if (typeof v === 'boolean') { s.className = 'jt-bool'; s.textContent = String(v); }
+        else if (typeof v === 'number') { s.className = 'jt-num'; s.textContent = String(v); }
+        else if (typeof v === 'string') {
+            s.className = 'jt-str';
+            const escaped = JSON.stringify(v);
+            if (v.length > 120) {
+                const short = JSON.stringify(v.slice(0, 120));
+                s.textContent = short.slice(0, -1) + '…"';
+                s.classList.add('jt-str-long');
+                s.title = '点击展开/折叠完整内容';
+                s._full = escaped;
+                s._short = short.slice(0, -1) + '…"';
+                s._expanded = false;
+                s.addEventListener('click', function() {
+                    this._expanded = !this._expanded;
+                    this.textContent = this._expanded ? this._full : this._short;
+                    this.style.whiteSpace = this._expanded ? 'pre-wrap' : '';
+                    this.style.wordBreak = this._expanded ? 'break-all' : '';
+                });
+            } else {
+                s.textContent = escaped;
+            }
+        }
+        return s;
+    }
+
+    function buildNode(parentEl, key, val, depth, isLast) {
+        if (isObj(val) || isArr(val)) {
+            const entries = isArr(val) ? val.map(function(v,i){return [i,v];}) : Object.entries(val);
+            const open = isArr(val) ? '[' : '{';
+            const close = isArr(val) ? ']' : '}';
+            const count = entries.length;
+            const label = isArr(val) ? count + ' items' : count + ' fields';
+            const expanded = depth < defaultDepth;
+
+            const row = document.createElement('div');
+            row.className = 'jt-row';
+
+            const toggle = document.createElement('span');
+            toggle.className = 'jt-toggle';
+            toggle.textContent = expanded ? '▼' : '▶';
+            row.appendChild(toggle);
+
+            if (key !== null) {
+                const k = document.createElement('span');
+                k.className = 'jt-key';
+                k.textContent = JSON.stringify(String(key));
+                row.appendChild(k);
+                row.appendChild(document.createTextNode(': '));
+            }
+
+            const br = document.createElement('span');
+            br.className = 'jt-bracket';
+            br.textContent = open;
+            row.appendChild(br);
+
+            const summary = document.createElement('span');
+            summary.className = 'jt-summary';
+            summary.textContent = ' ' + label + ' ';
+            row.appendChild(summary);
+
+            const closeBr = document.createElement('span');
+            closeBr.className = 'jt-bracket';
+            closeBr.textContent = close;
+
+            const comma = document.createTextNode(isLast ? '' : ',');
+
+            const closeSummary = document.createElement('span');
+            closeSummary.appendChild(closeBr.cloneNode(true));
+            closeSummary.appendChild(comma.cloneNode(true));
+            row.appendChild(closeSummary);
+
+            parentEl.appendChild(row);
+
+            const children = document.createElement('div');
+            children.className = 'jt-children' + (expanded ? '' : ' collapsed');
+            entries.forEach(function(entry, i) {
+                buildNode(children, isArr(val) ? i : entry[0], entry[1], depth + 1, i === entries.length - 1);
+            });
+            parentEl.appendChild(children);
+
+            const closeRow = document.createElement('div');
+            closeRow.className = 'jt-row jt-close' + (depth === 0 ? ' root' : '');
+            const closeBr2 = document.createElement('span');
+            closeBr2.className = 'jt-bracket';
+            closeBr2.textContent = close + (isLast ? '' : ',');
+            closeRow.appendChild(closeBr2);
+            parentEl.appendChild(closeRow);
+
+            function setExpanded(exp) {
+                children.className = 'jt-children' + (exp ? '' : ' collapsed');
+                closeRow.style.display = exp ? '' : 'none';
+                summary.style.display = exp ? 'none' : '';
+                closeSummary.style.display = exp ? 'none' : '';
+                toggle.textContent = exp ? '▼' : '▶';
+            }
+            setExpanded(expanded);
+
+            toggle.addEventListener('click', function() {
+                var isExp = !children.classList.contains('collapsed');
+                setExpanded(!isExp);
+            });
+        } else {
+            var row = document.createElement('div');
+            row.className = 'jt-row';
+            var spacer = document.createElement('span');
+            spacer.style.display = 'inline-block';
+            spacer.style.width = '14px';
+            spacer.style.marginRight = '2px';
+            row.appendChild(spacer);
+
+            if (key !== null) {
+                var k = document.createElement('span');
+                k.className = 'jt-key';
+                k.textContent = JSON.stringify(String(key));
+                row.appendChild(k);
+                row.appendChild(document.createTextNode(': '));
+            }
+            row.appendChild(valSpan(val));
+            if (!isLast) row.appendChild(document.createTextNode(','));
+            parentEl.appendChild(row);
+        }
+    }
+
+    buildNode(root, null, value, 0, true);
+    container.appendChild(root);
+}
+
+// ----------------------------------------------------------------
 // Render messages (enhanced: tool modes, thinking, system collapse)
 // ----------------------------------------------------------------
 let _toolMode = 0;
@@ -1086,13 +1253,10 @@ function renderJson(data, filename) {
         <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}${!_sharedMode && data._req_file && data._api_key ? ` <a href="#" onclick="_shareLink('${esc(data._req_file)}','${esc(data._log_dir||'')}','${esc(data._api_key)}');return false" style="margin-left:6px;font-size:11px">分享</a>` : ''}${_fileToggleLinks(data._req_file, data._log_dir, 'req')}</span></div>
     `;
     chatPanel.appendChild(header);
-    const pre = document.createElement('pre');
-    pre.style.cssText = 'margin:12px;padding:12px;background:#1e1e1e;color:#d4d4d4;border-radius:6px;overflow:auto;font-size:12px;line-height:1.5;max-height:calc(100vh - 200px);white-space:pre-wrap;word-break:break-all;';
     const display = {...data};
     delete display._req_file;
     delete display._log_dir;
-    pre.textContent = JSON.stringify(display, null, 2);
-    chatPanel.appendChild(pre);
+    renderJsonTree(display, chatPanel);
 }
 
 function renderMessages(data, filename) {
