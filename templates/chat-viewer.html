@@ -284,6 +284,23 @@
         }
         .dark .reasoning-body { color: #c4b5fd; border-top-color: rgba(167,139,250,0.25); }
         .reasoning-body.collapsed { display: none; }
+        .signature-row {
+            display: flex; align-items: center; gap: 6px;
+            padding: 5px 14px; cursor: pointer; user-select: none;
+            font-size: 11px; color: #9333ea; font-weight: 500;
+            background: rgba(147,51,234,.04); border-bottom: 1px solid #e9d5ff;
+        }
+        .dark .signature-row { color: #c084fc; background: rgba(147,51,234,.08); border-bottom-color: rgba(167,139,250,0.2); }
+        .signature-row:hover { background: rgba(147,51,234,.08); }
+        .signature-chevron { font-size: 9px; transition: transform .15s; }
+        .signature-chevron.collapsed { transform: rotate(-90deg); }
+        .signature-body {
+            padding: 6px 14px; font-size: 11px; color: #6b21a8;
+            word-break: break-all; white-space: pre-wrap; border-bottom: 1px solid #e9d5ff;
+            max-height: 120px; overflow-y: auto; background: rgba(147,51,234,.02);
+        }
+        .dark .signature-body { color: #a78bfa; border-bottom-color: rgba(167,139,250,0.2); background: rgba(147,51,234,.05); }
+        .signature-body.collapsed { display: none; }
 
         /* ========= System prompt ========= */
         .block.system-prompt { background: var(--muted); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; margin-bottom: 12px; }
@@ -881,6 +898,19 @@ async function selectAggChain(idx, el) {
             data._req_file = chain.latest_file;
             data._log_dir = logDir || '';
             renderMessages(data, `${chain.q1_preview || chain.latest_file}  (${chain.file_count} 个文件)`);
+            if (data._usage) {
+                renderDetailPanel({
+                    api_key: chain.api_key || '',
+                    models: chain.models || (chain.model ? [chain.model] : []),
+                    message_count: chain.message_count || 0,
+                    first_time: chain.first_time || '',
+                    last_time: chain.last_time || '',
+                    file_count: chain.file_count || 1,
+                    trace_list: chain.trace_list || [],
+                    latest_file: chain.latest_file || '',
+                    usage: data._usage,
+                });
+            }
         } catch(e) {
             showError(`加载失败：${e.message}`);
         }
@@ -908,6 +938,7 @@ async function selectFile(item, el) {
             models: [data.model || item.model].filter(Boolean),
             message_count: (data.messages || []).length,
             filename: item.filename,
+            usage: data._usage || null,
         });
     } catch(e) {
         showError(`加载失败：${e.message}`);
@@ -972,6 +1003,18 @@ function renderDetailPanel(data) {
             if (t.model) html += `<span class="trace-item-model">${esc(t.model)}</span>`;
             html += `</div></div>`;
         });
+        html += `</div></div>`;
+    }
+    if (data.usage) {
+        const u = data.usage;
+        html += `<div class="detail-item"><div class="detail-label">Token 用量</div><div class="detail-value" style="font-size:12px;line-height:1.8">`;
+        if (u.input_tokens != null) html += `输入: <b>${u.input_tokens.toLocaleString()}</b><br>`;
+        if (u.cache_read_input_tokens) html += `缓存读取: <b>${u.cache_read_input_tokens.toLocaleString()}</b><br>`;
+        if (u.cache_creation_input_tokens) html += `缓存创建: <b>${u.cache_creation_input_tokens.toLocaleString()}</b><br>`;
+        if (u.output_tokens != null) html += `输出: <b>${u.output_tokens.toLocaleString()}</b><br>`;
+        const thinkingTokens = (u.output_tokens_details || {}).thinking_tokens;
+        if (thinkingTokens) html += `思考: <b>${thinkingTokens.toLocaleString()}</b><br>`;
+        if (u.service_tier) html += `服务层级: <b>${esc(u.service_tier)}</b>`;
         html += `</div></div>`;
     }
     body.innerHTML = html || '<div class="detail-empty">无详情</div>';
@@ -1357,11 +1400,23 @@ function renderSystemPrompt(content) {
 // ----------------------------------------------------------------
 // Reasoning / thinking (collapsible)
 // ----------------------------------------------------------------
-function renderReasoningBlock(text) {
+function renderReasoningBlock(text, signature) {
     const el = document.createElement('div');
     el.className = 'block reasoning';
     const charCount = (text || '').length;
+    let sigHtml = '';
+    if (signature) {
+        const sigLen = signature.length;
+        sigHtml = `
+            <div class="signature-row" onclick="this.nextElementSibling.classList.toggle('collapsed'); this.querySelector('.signature-chevron').classList.toggle('collapsed')">
+                <span class="signature-chevron collapsed">&#9660;</span>
+                <span>🔏 signature (${sigLen} chars)</span>
+            </div>
+            <div class="signature-body collapsed">${esc(signature)}</div>
+        `;
+    }
     el.innerHTML = `
+        ${sigHtml}
         <div class="reasoning-summary" onclick="this.nextElementSibling.classList.toggle('collapsed'); this.querySelector('.reasoning-chevron').classList.toggle('collapsed')">
             <span class="reasoning-chevron collapsed">&#9660;</span>
             <span>思考过程 (${charCount} 字)</span>
@@ -1377,7 +1432,7 @@ function renderReasoningBlock(text) {
 function renderBlock(block) {
     switch (block.type) {
         case 'text':            return renderTextBlock(block);
-        case 'thinking':        return renderReasoningBlock(block.thinking);
+        case 'thinking':        return renderReasoningBlock(block.thinking, block.signature);
         case 'tool_use':        return renderToolUseBlock(block);
         case 'tool_result':     return renderToolResultBlock(block);
         case '_oai_tool_call':  return renderOaiToolCallBlock(block);

@@ -248,6 +248,12 @@ def parse_streaming_response(chunks: List[dict]) -> dict:
             if dtype == "text_delta":
                 blocks.setdefault(idx, {"type": "text", "text": ""})
                 blocks[idx]["text"] = blocks[idx].get("text", "") + delta.get("text", "")
+            elif dtype == "thinking_delta":
+                blocks.setdefault(idx, {"type": "thinking", "thinking": ""})
+                blocks[idx]["thinking"] = blocks[idx].get("thinking", "") + delta.get("thinking", "")
+            elif dtype == "signature_delta":
+                blocks.setdefault(idx, {"type": "thinking", "thinking": "", "signature": ""})
+                blocks[idx]["signature"] = blocks[idx].get("signature", "") + delta.get("signature", "")
             elif dtype == "input_json_delta":
                 block_json_buf[idx] = block_json_buf.get(idx, "") + delta.get("partial_json", "")
 
@@ -281,6 +287,29 @@ def parse_streaming_response_content(chunks: List[dict]) -> Optional[list]:
     msg = parse_streaming_response(chunks)
     content = msg.get("content")
     return content if content else None
+
+
+def extract_res_usage(res_data: dict) -> Optional[dict]:
+    """从 res.json 提取 usage 信息，支持 Anthropic/OpenAI 的流式和非流式格式。"""
+    if not res_data:
+        return None
+
+    rtype = res_data.get("type", "")
+
+    if rtype == "anthropic_passthrough_sse_capture":
+        chunks = res_data.get("chunks", [])
+        msg = parse_streaming_response(
+            [c for c in chunks if c.get("type") != "anthropic_passthrough_sse_meta"]
+        )
+        return msg.get("usage") or None
+
+    if rtype == "openai_passthrough_sse_capture":
+        chunks = res_data.get("chunks", [])
+        msg = parse_openai_streaming_response(chunks)
+        return msg.get("usage") or None
+
+    body = res_data.get("json") or {}
+    return body.get("usage") or None
 
 
 def parse_openai_streaming_response(chunks: List[dict]) -> dict:

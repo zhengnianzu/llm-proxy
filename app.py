@@ -26,6 +26,7 @@ from utils.auth import validate_api_key, resolve_upstream_channel
 from utils.key_store import init_db as init_key_db, find_key as _find_key
 from utils.key_config import init_key_config
 from utils.channel_store import init_db as init_channel_db
+from utils.custom_models import resolve_custom_model, load_custom_models
 from utils.metrics import (
     get_metrics_snapshot,
     get_rate_history,
@@ -800,6 +801,7 @@ init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
 init_backup_db(SERVICE_LOG_DIR)
 init_user_db(SERVICE_LOG_DIR)
+load_custom_models()
 mark_export_interrupted()
 _load_index()
 start_metrics_scanner(os.path.dirname(LOGS_DIR))
@@ -867,6 +869,7 @@ async def anthropic_messages(req: Request):
     _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
+    resolve_custom_model(body)
     body_model = body.get("model")
     ban_explore = BAN_EXPLORE
 
@@ -1177,6 +1180,7 @@ async def openai_chat_completions(req: Request):
     _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
+    resolve_custom_model(body)
     body_model = body.get("model")
     ban_explore = BAN_EXPLORE
 
@@ -1422,6 +1426,7 @@ async def openai_responses(req: Request):
     _channel_fallback = _channel.get("_fallback", "") if _channel else ""
     body = await req.json()
     stream = bool(body.get("stream", False))
+    resolve_custom_model(body)
     body_model = body.get("model")
     ban_explore = BAN_EXPLORE
 

@@ -17,6 +17,7 @@ from utils.log_paths import build_index_path, get_log_dir
 from utils.message_common import (
     build_chain_key,
     count_real_user_turns,
+    extract_res_usage,
     get_first_user_text,
     get_text_from_content,
     load_json_safe,
@@ -670,6 +671,10 @@ def register_log_routes(app: FastAPI) -> None:
             openai_content = _extract_openai_res_content(res_path)
             if openai_content is not None:
                 data["messages"].append({**openai_content, "_from_res": True})
+        res_data = _load_json(res_path)
+        usage = extract_res_usage(res_data) if res_data else None
+        if usage:
+            data["_usage"] = usage
         return JSONResponse(data)
 
     @app.get("/logs/file/download")

@@ -1,0 +1,14 @@
+# 自定义模型配置
+# alias: 客户端调用的模型名
+# model: 实际转发的上游模型名
+# params: 自动注入到请求 body 的参数（不覆盖客户端已显式传入的同名参数）
+
+models:
+  THINKING:claude-opus-4-8:
+    model: claude-opus-4-8
+    params:
+      thinking:
+        type: adaptive
+        display: summarized
+      output_config:
+        effort: high
