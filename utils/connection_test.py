@@ -119,12 +119,26 @@ def run_test(
             ch_fallback = resp.headers.get("x-channel-fallback", "")
             if ch_fallback:
                 result["channel_fallback"] = ch_fallback
+            ch_id = resp.headers.get("x-channel-id", "")
+            if ch_id:
+                result["channel_id"] = ch_id
+            ch_name = resp.headers.get("x-channel-name", "")
+            if ch_name:
+                result["channel_name"] = ch_name
+            ch_upstream = resp.headers.get("x-channel-upstream", "")
+            if ch_upstream:
+                result["channel_upstream"] = ch_upstream
         else:
             try:
                 result["error"] = resp.text[:300]
             except Exception:
                 result["error"] = f"HTTP {resp.status_code}"
             result["ok"] = False
+            for hdr, rkey in [("x-channel-key", "channel_key"), ("x-channel-id", "channel_id"),
+                              ("x-channel-name", "channel_name"), ("x-channel-upstream", "channel_upstream")]:
+                v = resp.headers.get(hdr, "")
+                if v:
+                    result[rkey] = v
     except Exception as e:
         elapsed = time.time() - t0
         result["elapsed_ms"] = int(elapsed * 1000)
@@ -141,13 +155,15 @@ def print_result(r: dict) -> None:
     print(f"  Model: {r['model']}  Key: {r['api_key']}")
     if "status_code" in r:
         print(f"  Status: {r['status_code']}  Time: {r['elapsed_ms']}ms")
+    if r.get("channel_name") or r.get("channel_id"):
+        print(f"  Channel: #{r.get('channel_id', '?')} {r.get('channel_name', '?')} (key=...{r.get('channel_key', '?')})")
+    if r.get("channel_upstream"):
+        print(f"  Upstream: {r['channel_upstream']}")
+    if r.get("channel_fallback"):
+        print(f"  ⚠ 回退: 绑定渠道全部离线，已回退到默认渠道/.env")
     if r.get("ok"):
         print(f"  Model used: {r.get('model_used', '?')}")
         print(f"  Tokens: {r.get('tokens', '?')}")
-        if r.get("channel_key"):
-            print(f"  Channel: {r['channel_key']}")
-        if r.get("channel_fallback"):
-            print(f"  ⚠ 回退: 绑定渠道全部离线，已回退到默认渠道/.env")
         print(f"  Reply: {(r.get('reply') or '')[:200]}")
     else:
         print(f"  Error: {r.get('error', 'unknown')}")

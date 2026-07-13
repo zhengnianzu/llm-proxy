@@ -375,12 +375,19 @@ def build_upstream_headers(x_auth_token: str, model_id: str, upstream_key_overri
     return headers
 
 
-def _channel_response_headers(channel_key: str, fallback: str) -> dict:
+def _channel_response_headers(channel_key: str, fallback: str, channel: dict = None) -> dict:
     h = {}
     if channel_key:
         h["X-Channel-Key"] = channel_key
     if fallback:
         h["X-Channel-Fallback"] = fallback
+    if channel:
+        if channel.get("id"):
+            h["X-Channel-Id"] = str(channel["id"])
+        if channel.get("name"):
+            h["X-Channel-Name"] = channel["name"]
+        if channel.get("upstream_url"):
+            h["X-Channel-Upstream"] = channel["upstream_url"]
     return h
 
 
@@ -1013,7 +1020,7 @@ async def anthropic_messages(req: Request):
             content=r.content,
             status_code=r.status_code,
             media_type=r.headers.get("content-type", "application/json"),
-            headers=_channel_response_headers(_channel_key, _channel_fallback),
+            headers=_channel_response_headers(_channel_key, _channel_fallback, _channel),
         )
 
     # ---- stream SSE (pure pass-through) ----
@@ -1163,7 +1170,7 @@ async def anthropic_messages(req: Request):
     return StreamingResponse(
         anthropic_sse_passthrough(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={**{"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}, **_channel_response_headers(_channel_key, _channel_fallback, _channel)},
     )
 
 
@@ -1309,7 +1316,7 @@ async def openai_chat_completions(req: Request):
             content=r.content,
             status_code=r.status_code,
             media_type=r.headers.get("content-type", "application/json"),
-            headers=_channel_response_headers(_channel_key, _channel_fallback),
+            headers=_channel_response_headers(_channel_key, _channel_fallback, _channel),
         )
 
     # ---- stream SSE (OpenAI SSE pass-through) ----
@@ -1412,7 +1419,7 @@ async def openai_chat_completions(req: Request):
     return StreamingResponse(
         sse_passthrough(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={**{"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}, **_channel_response_headers(_channel_key, _channel_fallback, _channel)},
     )
 
 
@@ -1556,7 +1563,7 @@ async def openai_responses(req: Request):
             content=r.content,
             status_code=r.status_code,
             media_type=r.headers.get("content-type", "application/json"),
-            headers=_channel_response_headers(_channel_key, _channel_fallback),
+            headers=_channel_response_headers(_channel_key, _channel_fallback, _channel),
         )
 
     # ---- stream SSE (Responses API pass-through) ----
@@ -1656,7 +1663,7 @@ async def openai_responses(req: Request):
     return StreamingResponse(
         responses_sse_passthrough(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={**{"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}, **_channel_response_headers(_channel_key, _channel_fallback, _channel)},
     )
 
 

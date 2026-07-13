@@ -6,6 +6,8 @@
 """
 
 import os
+import asyncio
+from functools import partial
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -68,16 +70,19 @@ def register_channel_routes(app: FastAPI, templates: Jinja2Templates):
         model = body.get("model", "claude-sonnet-4-6")
         method = body.get("method", "anthropic")
         message = body.get("message", "")
+        timeout = int(body.get("timeout", 60))
 
         if channel_id:
             ch = get_channel_raw(channel_id)
             if not ch:
                 return JSONResponse({"ok": False, "error": "渠道不存在"}, status_code=404)
             base_url = ch["upstream_url"].rstrip("/").removesuffix("/v1")
-            result = run_test(base_url, method, model, ch["upstream_key"], message=message)
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, partial(run_test, base_url, method, model, ch["upstream_key"], timeout=timeout, message=message))
         elif api_key:
             port = os.getenv("PROXY_PORT", "4000")
-            result = run_test(f"http://127.0.0.1:{port}", method, model, api_key, message=message)
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, partial(run_test, f"http://127.0.0.1:{port}", method, model, api_key, timeout=timeout, message=message))
         else:
             return JSONResponse({"ok": False, "error": "需要 channel_id 或 api_key"}, status_code=400)
 

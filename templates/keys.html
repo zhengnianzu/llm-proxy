@@ -224,10 +224,13 @@
                 <div><span class="label">状态：</span>{{ testResult.ok ? '成功' : '失败' }}</div>
                 <div v-if="testResult.status_code"><span class="label">HTTP：</span>{{ testResult.status_code }}</div>
                 <div v-if="testResult.elapsed_ms != null"><span class="label">耗时：</span>{{ testResult.elapsed_ms }}ms</div>
+                <div v-if="testResult.url"><span class="label">请求：</span>{{ testResult.url }}</div>
+                <div v-if="testResult.channel_name || testResult.channel_id"><span class="label">渠道：</span><span class="badge badge-info">#{{ testResult.channel_id }} {{ testResult.channel_name }}</span> <span v-if="testResult.channel_key" class="text-muted" style="font-size:.8rem">(key=...{{ testResult.channel_key }})</span></div>
+                <div v-if="testResult.channel_upstream"><span class="label">上游：</span>{{ testResult.channel_upstream }}</div>
+                <div v-if="!testResult.channel_id && !testResult.channel_name && testResult.ok" style="color:var(--warning)"><span class="label">渠道：</span>未匹配到渠道，走 .env 默认配置</div>
+                <div v-if="testResult.channel_fallback" style="color:var(--warning)"><span class="label">⚠ 回退：</span>绑定渠道全部离线，已回退到默认渠道</div>
                 <div v-if="testResult.model_used"><span class="label">模型：</span>{{ testResult.model_used }}</div>
                 <div v-if="testResult.tokens"><span class="label">Token：</span>{{ testResult.tokens }}</div>
-                <div v-if="testResult.channel_key"><span class="label">渠道：</span><span class="badge badge-info">{{ testResult.channel_key }}</span></div>
-                <div v-if="testResult.channel_fallback" style="color:var(--warning)"><span class="label">⚠ 回退：</span>绑定渠道全部离线，已回退到默认渠道</div>
                 <div v-if="testResult.reply"><span class="label">回复：</span>{{ testResult.reply }}</div>
                 <div v-if="testResult.error"><span class="label">错误：</span><span style="color:var(--destructive)">{{ testResult.error }}</span></div>
             </div>
