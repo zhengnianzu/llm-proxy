@@ -65,7 +65,6 @@ def resolve_custom_model(body: dict) -> Optional[str]:
     body["model"] = actual_model
 
     for key, value in cfg.get("params", {}).items():
-        if key not in body:
-            body[key] = value
+        body[key] = value
 
     return actual_model
