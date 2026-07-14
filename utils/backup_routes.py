@@ -26,6 +26,7 @@ from utils.backup_store import (
     get_live_syncing_dirs,
     get_logs,
     list_dirs,
+    list_env_names,
     mark_backed_up,
     update_sync_pid,
     update_sync_status,
@@ -169,12 +170,19 @@ def _require_ajax(request: Request):
     return None
 
 
-def _scan_data_dirs(logs_all: Path) -> List[dict]:
-    """扫描 logs_all 下所有有数据的 mtime 目录。"""
+def _scan_data_dirs(logs_all: Path, env_name: str = None, port_env_map: dict = None) -> List[dict]:
+    """扫描 logs_all 下有数据的 mtime 目录。可选只扫描指定 env。"""
     result = []
     if not logs_all.is_dir():
         return result
-    for env_dir in sorted(logs_all.iterdir()):
+    if env_name:
+        target = logs_all / env_name
+        env_dirs = [target] if target.is_dir() else []
+    else:
+        env_dirs = sorted(d for d in logs_all.iterdir()
+                          if d.is_dir() and not d.name.startswith("logs_") and not d.name.startswith("."))
+    port_map = port_env_map or {}
+    for env_dir in env_dirs:
         if not env_dir.is_dir() or env_dir.name.startswith("logs_") or env_dir.name.startswith("."):
             continue
         for mtime_dir in sorted(env_dir.iterdir()):
@@ -199,6 +207,35 @@ def _scan_data_dirs(logs_all: Path) -> List[dict]:
                 "env_name": env_dir.name,
                 "mtime_tag": mtime_dir.name,
                 "file_count": file_count,
+                "port": port_map.get(env_dir.name, ""),
+            })
+    return result
+
+
+def _scan_obs_dirs(obs_base: str, env_name: str = None) -> List[dict]:
+    """扫描 OBS 上 {obs_base}/raw/ 下的 env/mtime 目录结构。"""
+    result = []
+    if not obs_base:
+        return result
+    raw_path = f"{obs_base.rstrip('/')}/raw/"
+    env_items = obsutil_ls(raw_path, show_dirs=True)
+    for env_item in env_items:
+        if not env_item.get("is_dir"):
+            continue
+        ename = env_item["name"]
+        if env_name and ename != env_name:
+            continue
+        env_obs_path = env_item["path"]
+        mtime_items = obsutil_ls(env_obs_path, show_dirs=True)
+        for mt_item in mtime_items:
+            if not mt_item.get("is_dir"):
+                continue
+            mtag = mt_item["name"]
+            result.append({
+                "dir_path": f"{ename}/{mtag}",
+                "env_name": ename,
+                "mtime_tag": mtag,
+                "obs_path": mt_item["path"],
             })
     return result
 
@@ -260,12 +297,25 @@ def _run_sync_batch(dirs: List[str], logs_all: Path):
         _run_sync_for_dir(d, logs_all, obs_base, workers, upload_script)
 
 
-def register_backup_routes(app: FastAPI, logs_dir: str) -> None:
+def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
     logs_all = Path(logs_dir).parent.parent
     templates = Jinja2Templates(directory="templates")
     parts = Path(logs_dir).parts
     _active_dir_path = f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else ""
+    _active_env_name = parts[-2] if len(parts) >= 2 else ""
     _project_root = str(Path(__file__).resolve().parent.parent)
+
+    _port_env_map: dict = {}
+    logs_root = Path("logs")
+    if logs_root.is_dir():
+        for port_dir in logs_root.iterdir():
+            if port_dir.is_dir() and port_dir.name.startswith("port"):
+                p = port_dir.name[4:]
+                for env_d in port_dir.iterdir():
+                    if env_d.is_dir():
+                        _port_env_map[env_d.name] = p
+    if _active_env_name and port:
+        _port_env_map[_active_env_name] = port
 
     def _ctx(request: Request) -> dict:
         return {
@@ -289,44 +339,38 @@ def register_backup_routes(app: FastAPI, logs_dir: str) -> None:
         if denied:
             return denied
 
-        fs_dirs = _scan_data_dirs(logs_all)
-        fs_paths = set()
-        for d in fs_dirs:
-            upsert_dir(d["dir_path"], d["env_name"], d["mtime_tag"], d["file_count"])
-            fs_paths.add(d["dir_path"])
+        env_name = request.query_params.get("env_name", "")
 
-        db_dirs = list_dirs()
-        db_map = {d["dir_path"]: d for d in db_dirs}
+        if env_name:
+            fs_dirs = _scan_data_dirs(logs_all, env_name=env_name, port_env_map=_port_env_map)
+            for d in fs_dirs:
+                upsert_dir(d["dir_path"], d["env_name"], d["mtime_tag"], d["file_count"],
+                           port=d.get("port", ""), source="local")
+
+        db_dirs = list_dirs(env_name=env_name if env_name else None)
+
+        fs_paths = set()
+        if env_name:
+            fs_paths = {d["dir_path"] for d in fs_dirs}
 
         merged = []
-        for d in fs_dirs:
-            db_info = db_map.get(d["dir_path"], {})
-            merged.append({
-                **d,
-                "synced": db_info.get("synced", 0),
-                "status": db_info.get("status", "pending"),
-                "sync_time": db_info.get("sync_time", ""),
-                "obs_path": db_info.get("obs_path", ""),
-                "error_msg": db_info.get("error_msg", ""),
-                "sync_pid": db_info.get("sync_pid"),
-                "is_active": d["dir_path"] == _active_dir_path,
-            })
-
         for d in db_dirs:
-            if d["dir_path"] not in fs_paths and d["status"] == "backed_up":
-                merged.append({
-                    "dir_path": d["dir_path"],
-                    "env_name": d["env_name"],
-                    "mtime_tag": d["mtime_tag"],
-                    "file_count": d["file_count"],
-                    "synced": d.get("synced", 0),
-                    "status": d["status"],
-                    "sync_time": d.get("sync_time", ""),
-                    "obs_path": d.get("obs_path", ""),
-                    "error_msg": d.get("error_msg", ""),
-                    "sync_pid": d.get("sync_pid"),
-                    "is_active": False,
-                })
+            entry = {
+                "dir_path": d["dir_path"],
+                "env_name": d["env_name"],
+                "mtime_tag": d["mtime_tag"],
+                "file_count": d["file_count"],
+                "synced": d.get("synced", 0),
+                "status": d.get("status", "pending"),
+                "sync_time": d.get("sync_time", ""),
+                "obs_path": d.get("obs_path", ""),
+                "error_msg": d.get("error_msg", ""),
+                "sync_pid": d.get("sync_pid"),
+                "is_active": d["dir_path"] == _active_dir_path,
+                "source": d.get("source", "local"),
+                "port": d.get("port", ""),
+            }
+            merged.append(entry)
 
         return JSONResponse({"dirs": merged})
 
@@ -454,7 +498,48 @@ def register_backup_routes(app: FastAPI, logs_dir: str) -> None:
         denied = _require_ajax(request)
         if denied:
             return denied
-        return JSONResponse({"active_dir": _active_dir_path})
+        return JSONResponse({
+            "active_dir": _active_dir_path,
+            "current_env": _active_env_name,
+            "port": port,
+        })
+
+    @app.get("/api/backup/env-list")
+    def backup_env_list(request: Request):
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        env_set = set(list_env_names())
+        if logs_all.is_dir():
+            for d in logs_all.iterdir():
+                if d.is_dir() and not d.name.startswith("logs_") and not d.name.startswith("."):
+                    env_set.add(d.name)
+        envs = []
+        for name in sorted(env_set):
+            envs.append({"name": name, "port": _port_env_map.get(name, "")})
+        return JSONResponse({"envs": envs, "current_env": _active_env_name})
+
+    @app.post("/api/backup/scan-obs")
+    async def backup_scan_obs(request: Request):
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        body = await request.json()
+        env_name = body.get("env_name", "")
+        cfg = load_sync_config()
+        obs_base = cfg.get("obs_base", "") or load_obs_base()
+        if not obs_base:
+            return JSONResponse({"detail": "obs_base 未配置"}, status_code=400)
+        obs_dirs = _scan_obs_dirs(obs_base, env_name=env_name if env_name else None)
+        for d in obs_dirs:
+            upsert_dir(d["dir_path"], d["env_name"], d["mtime_tag"],
+                       port=_port_env_map.get(d["env_name"], ""), source="obs")
+            existing = get_dir(d["dir_path"])
+            if existing and existing.get("status") == "pending":
+                update_sync_status(d["dir_path"], "backed_up", obs_path=d["obs_path"])
+            elif existing and not existing.get("obs_path"):
+                update_sync_status(d["dir_path"], existing["status"], obs_path=d["obs_path"])
+        return JSONResponse({"found": len(obs_dirs)})
 
     @app.post("/api/backup/live-sync/start")
     async def backup_live_sync_start(request: Request):

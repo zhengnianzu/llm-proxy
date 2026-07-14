@@ -1621,7 +1621,7 @@ register_session_routes(app, LOGS_DIR)
 register_key_routes(app, templates)
 register_channel_routes(app, templates)
 register_export_routes(app, LOGS_DIR)
-register_backup_routes(app, LOGS_DIR)
+register_backup_routes(app, LOGS_DIR, port=os.getenv("PROXY_PORT", "4000"))
 register_user_routes(app, templates)
 register_debug_routes(app, LOGS_DEBUG, STARTUP_DATE_TAG)
 

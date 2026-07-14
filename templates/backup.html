@@ -41,6 +41,11 @@
 .status-badge.live_syncing { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); animation: pulse 1.5s infinite; border: 1px solid color-mix(in srgb, var(--success) 40%, transparent); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
 
+/* source badge */
+.status-badge.source-local { background: color-mix(in srgb, var(--info) 12%, transparent); color: var(--info); }
+.status-badge.source-obs { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); }
+.status-badge.source-both { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); }
+
 /* action buttons */
 .btn-xs { font-size: .78rem; padding: 3px 10px; border-radius: var(--radius); cursor: pointer; border: 1px solid var(--border); background: var(--card); color: var(--foreground); transition: all var(--transition); }
 .btn-xs:hover { border-color: var(--primary); color: var(--primary); }
@@ -122,12 +127,21 @@
 
     <!-- Toolbar -->
     <div class="toolbar">
+        <select class="form-input" v-model="envFilter" @change="refresh()" style="width:auto;min-width:180px;font-size:.84rem;">
+            <option v-for="e in envList" :key="e.name" :value="e.name">
+                {{ e.name }}{{ e.port ? ' (port' + e.port + ')' : '' }}
+            </option>
+        </select>
         <button class="btn btn-primary btn-sm" @click="syncSelected" :disabled="selectedDirs.length === 0 || syncing">
             同步选中 ({{ selectedDirs.length }})
         </button>
         <button class="btn btn-sm danger" @click="deleteSelected" :disabled="deletableDirs.length === 0"
             style="background:transparent;border:1px solid var(--danger);color:var(--danger);">
             删除选中 ({{ deletableDirs.length }})
+        </button>
+        <button class="btn btn-sm" @click="scanObs" :disabled="obsScanning"
+            style="background:transparent;border:1px solid var(--success);color:var(--success);">
+            {{ obsScanning ? '扫描中...' : '扫描OBS' }}
         </button>
         <button class="btn btn-sm" @click="refresh" :disabled="loading" style="background:transparent;border:1px solid var(--border);">
             刷新
@@ -144,6 +158,7 @@
                     <th>环境</th>
                     <th>目录</th>
                     <th>文件数</th>
+                    <th>来源</th>
                     <th>状态</th>
                     <th>同步时间</th>
                     <th>OBS 路径</th>
@@ -158,7 +173,10 @@
                         {{ d.mtime_tag }}
                         <span v-if="d.is_active" style="font-size:.7rem;background:var(--success);color:#fff;padding:1px 6px;border-radius:99px;margin-left:4px;">活跃</span>
                     </td>
-                    <td>{{ d.file_count }}</td>
+                    <td>{{ d.source === 'obs' && d.status === 'backed_up' ? '-' : d.file_count }}</td>
+                    <td>
+                        <span :class="['status-badge', sourceClass(d.source)]">{{ sourceLabel(d.source) }}</span>
+                    </td>
                     <td>
                         <span :class="['status-badge', d.status]">{{ statusLabel(d.status) }}</span>
                     </td>
@@ -256,6 +274,10 @@ new Vue({
         obsHistory: [],
         activeDir: '',
         liveSyncing: false,
+        envList: [],
+        envFilter: '',
+        currentEnv: '',
+        obsScanning: false,
     },
     computed: {
         allChecked() {
@@ -286,6 +308,14 @@ new Vue({
             var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', deleted: '已删除', backed_up: '已备份' };
             return m[s] || s;
         },
+        sourceLabel(s) {
+            var m = { local: '本地', obs: 'OBS', both: '两者' };
+            return m[s] || s || '本地';
+        },
+        sourceClass(s) {
+            var m = { local: 'source-local', obs: 'source-obs', both: 'source-both' };
+            return m[s] || 'source-local';
+        },
         toggleAll(e) {
             if (e.target.checked) {
                 this.checked = this.dirs.map(d => d.dir_path);
@@ -295,7 +325,9 @@ new Vue({
         },
         refresh() {
             this.loading = true;
-            fetch('/api/backup/dirs', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+            var url = '/api/backup/dirs';
+            if (this.envFilter) url += '?env_name=' + encodeURIComponent(this.envFilter);
+            fetch(url, { headers: { 'x-requested-with': 'XMLHttpRequest' } })
                 .then(r => r.json())
                 .then(data => { this.dirs = data.dirs || []; })
                 .catch(e => console.error(e))
@@ -460,8 +492,44 @@ new Vue({
         loadActiveDir() {
             fetch('/api/backup/active-dir', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
                 .then(r => r.json())
-                .then(data => { this.activeDir = data.active_dir || ''; })
+                .then(data => {
+                    this.activeDir = data.active_dir || '';
+                    this.currentEnv = data.current_env || '';
+                })
                 .catch(e => console.error(e));
+        },
+        loadEnvList() {
+            fetch('/api/backup/env-list', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => {
+                    this.envList = data.envs || [];
+                    this.currentEnv = data.current_env || '';
+                    if (!this.envFilter) {
+                        var match = this.envList.find(e => e.name === this.currentEnv);
+                        this.envFilter = match ? match.name : (this.envList.length > 0 ? this.envList[0].name : '');
+                    }
+                    this.refresh();
+                })
+                .catch(e => console.error(e));
+        },
+        scanObs() {
+            this.obsScanning = true;
+            fetch('/api/backup/scan-obs', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                body: JSON.stringify({ env_name: this.envFilter }),
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.found !== undefined) {
+                        this.refresh();
+                        this.loadEnvList();
+                    } else {
+                        alert(data.detail || '扫描失败');
+                    }
+                })
+                .catch(e => alert('OBS 扫描失败: ' + e))
+                .finally(() => { this.obsScanning = false; });
         },
         startLiveSync(d) {
             if (!confirm('确定为活跃目录 ' + d.dir_path + ' 开启在线同步？')) return;
@@ -504,7 +572,7 @@ new Vue({
         },
     },
     mounted() {
-        this.refresh();
+        this.loadEnvList();
         this.loadConfig();
         this.loadActiveDir();
     },

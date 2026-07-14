@@ -56,6 +56,14 @@ def init_db(db_dir: str):
             _conn.execute("ALTER TABLE backup_dirs ADD COLUMN sync_pid INTEGER DEFAULT NULL")
         except sqlite3.OperationalError:
             pass
+        try:
+            _conn.execute("ALTER TABLE backup_dirs ADD COLUMN port TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            _conn.execute("ALTER TABLE backup_dirs ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")
+        except sqlite3.OperationalError:
+            pass
         _conn.commit()
 
 
@@ -63,15 +71,29 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def upsert_dir(dir_path: str, env_name: str, mtime_tag: str, file_count: int = 0):
+def upsert_dir(dir_path: str, env_name: str, mtime_tag: str, file_count: int = 0, port: str = "", source: str = "local"):
     with _lock:
-        _conn.execute("""
-            INSERT INTO backup_dirs (dir_path, env_name, mtime_tag, file_count, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(dir_path) DO UPDATE SET
-                file_count = excluded.file_count,
-                updated_at = excluded.updated_at
-        """, (dir_path, env_name, mtime_tag, file_count, _now(), _now()))
+        existing = _conn.execute(
+            "SELECT source, port FROM backup_dirs WHERE dir_path = ?", (dir_path,)
+        ).fetchone()
+        if existing:
+            old_source = existing["source"] or "local"
+            old_port = existing["port"] or ""
+            if source and old_source and source != old_source:
+                merged_source = "both"
+            else:
+                merged_source = source or old_source
+            merged_port = old_port or port
+            _conn.execute("""
+                UPDATE backup_dirs SET
+                    file_count = ?, source = ?, port = ?, updated_at = ?
+                WHERE dir_path = ?
+            """, (file_count, merged_source, merged_port, _now(), dir_path))
+        else:
+            _conn.execute("""
+                INSERT INTO backup_dirs (dir_path, env_name, mtime_tag, file_count, port, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (dir_path, env_name, mtime_tag, file_count, port, source, _now(), _now()))
         _conn.commit()
 
 
@@ -118,6 +140,14 @@ def list_dirs(env_name: Optional[str] = None) -> List[dict]:
     return [dict(r) for r in rows]
 
 
+def list_env_names() -> List[str]:
+    with _lock:
+        rows = _conn.execute(
+            "SELECT DISTINCT env_name FROM backup_dirs WHERE env_name != '' ORDER BY env_name"
+        ).fetchall()
+    return [r["env_name"] for r in rows]
+
+
 def get_dir(dir_path: str) -> Optional[dict]:
     with _lock:
         row = _conn.execute(
@@ -129,7 +159,7 @@ def get_dir(dir_path: str) -> Optional[dict]:
 def mark_backed_up(dir_path: str):
     with _lock:
         _conn.execute(
-            "UPDATE backup_dirs SET status = 'backed_up', updated_at = ? WHERE dir_path = ?",
+            "UPDATE backup_dirs SET status = 'backed_up', source = 'obs', updated_at = ? WHERE dir_path = ?",
             (_now(), dir_path),
         )
         _conn.commit()
