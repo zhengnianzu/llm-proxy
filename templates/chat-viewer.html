@@ -903,6 +903,7 @@ async function selectAggChain(idx, el) {
     el.classList.add('active');
     activeItem = el;
     const chain = aggChains[idx];
+    const _failedTrace = (chain.trace_list || []).find(function(t) { return t.success === false; });
 
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     renderDetailPanel({
@@ -914,6 +915,9 @@ async function selectAggChain(idx, el) {
         file_count: chain.file_count || 1,
         trace_list: chain.trace_list || [],
         latest_file: chain.latest_file || '',
+        has_failure: chain.has_failure || false,
+        debug_file: _failedTrace ? _failedTrace.debug_file || '' : '',
+        total_attempts: _failedTrace ? _failedTrace.total_attempts || 1 : 1,
     });
 
     if (chain.latest_file) {
@@ -937,6 +941,9 @@ async function selectAggChain(idx, el) {
                     trace_list: chain.trace_list || [],
                     latest_file: chain.latest_file || '',
                     usage: data._usage,
+                    has_failure: chain.has_failure || false,
+                    debug_file: _failedTrace ? _failedTrace.debug_file || '' : '',
+                    total_attempts: _failedTrace ? _failedTrace.total_attempts || 1 : 1,
                 });
             }
         } catch(e) {
@@ -967,6 +974,9 @@ async function selectFile(item, el) {
             message_count: (data.messages || []).length,
             filename: item.filename,
             usage: data._usage || null,
+            success: item.success !== undefined ? item.success : true,
+            debug_file: item.debug_file || '',
+            total_attempts: item.total_attempts || 1,
         });
     } catch(e) {
         showError(`加载失败：${e.message}`);
@@ -1017,6 +1027,14 @@ function renderDetailPanel(data) {
     if (data.filename) {
         html += `<div class="detail-item"><div class="detail-label">文件名</div><div class="detail-value">${esc(data.filename)}</div></div>`;
     }
+    if (data.success === false || data.has_failure) {
+        let failHtml = '<span style="color:var(--destructive);font-weight:600">请求失败</span>';
+        if (data.total_attempts > 1) failHtml += ` <span style="font-size:11px;color:var(--muted-foreground)">(${data.total_attempts} 次尝试)</span>`;
+        html += `<div class="detail-item"><div class="detail-label">状态</div><div class="detail-value">${failHtml}</div></div>`;
+        if (data.debug_file) {
+            html += `<div class="detail-item"><div class="detail-label">失败详情</div><div class="detail-value"><a href="#" onclick="loadDebugFile('${esc(data.debug_file)}');return false" style="color:var(--primary);font-size:12px">查看失败日志</a></div></div>`;
+        }
+    }
     if (data.trace_list && data.trace_list.length > 1) {
         html += `<div class="trace-section">`;
         html += `<div class="trace-toggle" onclick="this.querySelector('.trace-chevron').classList.toggle('open');this.nextElementSibling.classList.toggle('open')">`;
@@ -1026,9 +1044,10 @@ function renderDetailPanel(data) {
         data.trace_list.forEach((t, i) => {
             const ts = (t.ts || '').replace(/_/g, ' ').slice(0, 19);
             html += `<div class="trace-item${t.filename === data.latest_file ? ' active' : ''}" data-filename="${esc(t.filename)}" onclick="loadTraceFile(this, '${esc(t.filename)}', '${esc(data.api_key || '')}')">`;
-            html += `<div>${esc(t.filename)}</div>`;
+            html += `<div>${esc(t.filename)}${t.success === false ? ' <span style="color:var(--destructive)" title="失败">&#x2716;</span>' : ''}</div>`;
             html += `<div><span class="trace-item-ts">${esc(ts)}</span>`;
             if (t.model) html += `<span class="trace-item-model">${esc(t.model)}</span>`;
+            if (t.debug_file) html += ` <a href="#" onclick="event.stopPropagation();loadDebugFile('${esc(t.debug_file)}');return false" style="font-size:10px;color:var(--primary)">[日志]</a>`;
             html += `</div></div>`;
         });
         html += `</div></div>`;
@@ -1094,6 +1113,31 @@ function _fileToggleLinks(reqFile, logDir, current) {
 
 async function _loadReqFile(reqFilename, logDir) {
     _viewRawFile(reqFilename, logDir, '-req.json');
+}
+
+async function loadDebugFile(debugFile) {
+    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载失败日志…</p></div>';
+    try {
+        const res = await fetch('/logs/debug/file?filename=' + encodeURIComponent(debugFile));
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (data.error) { showError(data.error); return; }
+        chatPanel.innerHTML = '';
+        const header = document.createElement('div');
+        header.className = 'metadata';
+        header.innerHTML = '<div class="metadata-title">失败日志详情</div>' +
+            '<div class="metadata-item"><strong>文件</strong><span>' + esc(debugFile) + '</span></div>' +
+            '<div class="metadata-item"><strong>更新时间</strong><span>' + esc(data.updated_at || '') + '</span></div>';
+        chatPanel.appendChild(header);
+        const pre = document.createElement('pre');
+        pre.className = 'code-block';
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.style.wordBreak = 'break-all';
+        pre.textContent = data.content || '';
+        chatPanel.appendChild(pre);
+    } catch(e) {
+        showError('加载失败日志失败：' + e.message);
+    }
 }
 
 // ----------------------------------------------------------------

@@ -303,6 +303,12 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     full_message_count = message_count + (1 if has_res else 0)
 
     trace_entry = {"filename": filename, "model": model, "msg_count": full_message_count, "ts": ts}
+    if index_entry:
+        if not index_entry.get("success", True):
+            trace_entry["success"] = False
+            trace_entry["total_attempts"] = index_entry.get("total_attempts", 1)
+        if index_entry.get("debug_file"):
+            trace_entry["debug_file"] = index_entry["debug_file"]
 
     chain_map = state["_chain_map"]
     session_key = chain_map.get(lookup_key)
@@ -414,12 +420,18 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
                 if trace.get("msg_count", 0) >= min_messages:
                     if model and trace.get("model", "") != model:
                         continue
-                    items.append({
+                    item = {
                         "filename": trace["filename"],
                         "message_count": trace["msg_count"],
                         "model": trace.get("model", ""),
                         "api_key": session.get("api_key", ""),
-                    })
+                    }
+                    if not trace.get("success", True):
+                        item["success"] = False
+                        item["total_attempts"] = trace.get("total_attempts", 1)
+                    if trace.get("debug_file"):
+                        item["debug_file"] = trace["debug_file"]
+                    items.append(item)
         items.sort(key=lambda x: x["filename"], reverse=True)
         total = len(items)
         paged = items[offset:offset + limit] if limit > 0 else items[offset:]
@@ -510,6 +522,8 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
             "q1_preview": session.get("q1", ""),
             "trace_list": session.get("trace_list", []),
         }
+        if any(not t.get("success", True) for t in session.get("trace_list", [])):
+            payload["has_failure"] = True
         items.append(payload)
 
     return {"items": items, "total": total, "known_keys": saved_known_keys, "known_models": sorted(known_models)}
@@ -572,6 +586,8 @@ def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: i
             "q1_preview": session.get("q1", ""),
             "trace_list": session.get("trace_list", []),
         }
+        if any(not t.get("success", True) for t in session.get("trace_list", [])):
+            payload["has_failure"] = True
         items.append(payload)
 
     return {"items": items, "total": total, "known_keys": sorted(all_known_keys), "known_models": sorted(all_known_models)}
