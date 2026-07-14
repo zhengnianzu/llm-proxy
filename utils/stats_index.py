@@ -499,6 +499,14 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
     if _env_dir and not is_same_env:
         disk_cache = _load_key_cache(_env_dir)
         if disk_cache:
+            idx_dirs = {d for d, info in index.get("dirs", {}).items() if info.get("sessions")}
+            cache_dirs = set()
+            for sub in disk_cache.get("mtime_table", {}).values():
+                cache_dirs.update(sub.keys())
+            if idx_dirs - cache_dirs:
+                disk_cache = None
+
+        if disk_cache:
             _mem_key_cache = disk_cache
             _mem_key_cache_env = env_dir_str
             if changed_buckets:
