@@ -50,10 +50,11 @@ async def validate_api_key(request: Request) -> str:
     Validate API key from request headers.
 
     Checks: DB active keys -> yaml static keys -> env keys.
-    Returns the matched key if auth is enabled, or empty string if auth is disabled.
+    Returns the matched key on success.
+    When auth is disabled, still attempts to identify the key for logging
+    but does not reject unrecognized keys.
     """
-    if not is_auth_enabled():
-        return ""
+    auth_enabled = is_auth_enabled()
 
     env_keys = get_configured_api_keys()
     db_enabled = db_has_active_keys()
@@ -76,6 +77,9 @@ async def validate_api_key(request: Request) -> str:
         for key in env_keys:
             if api_key == key:
                 return api_key
+
+    if not auth_enabled:
+        return api_key or ""
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

@@ -354,7 +354,7 @@ def register_debug_routes(app: FastAPI, logs_debug: str, startup_date_tag: str):
 
     @app.get("/logs/debug/file")
     def logs_debug_file(filename: str):
-        if ".." in filename or not (filename.endswith(".txt") or filename.endswith(".jsonl")):
+        if ".." in filename or not filename.endswith(".jsonl"):
             return JSONResponse({"error": "invalid filename"}, status_code=400)
         path = Path("logs") / filename
         if not path.is_file():
@@ -368,22 +368,19 @@ def register_debug_routes(app: FastAPI, logs_debug: str, startup_date_tag: str):
         except Exception as ex:
             return JSONResponse({"error": f"read failed: {ex}"}, status_code=500)
 
-        if filename.endswith(".jsonl"):
-            parts = []
-            for line in raw.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    attempt = entry.get("attempt", "?")
-                    reason = entry.get("reason", "")
-                    parts.append(f"--- attempt {attempt} ({reason}) ---\n{entry.get('body', '')}")
-                except json.JSONDecodeError:
-                    parts.append(line)
-            content = "\n\n".join(parts)
-        else:
-            content = raw
+        parts = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                attempt = entry.get("attempt", "?")
+                reason = entry.get("reason", "")
+                parts.append(f"--- attempt {attempt} ({reason}) ---\n{entry.get('body', '')}")
+            except json.JSONDecodeError:
+                parts.append(line)
+        content = "\n\n".join(parts)
 
         return JSONResponse({
             "filename": filename,
