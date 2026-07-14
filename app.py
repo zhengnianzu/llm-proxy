@@ -45,6 +45,11 @@ from utils.backup_store import init_db as init_backup_db
 from utils.backup_routes import register_backup_routes
 from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
+from utils.debug_logs import write_debug, debug_filename, register_debug_routes
+from utils.req_index import (
+    append_index_anthropic, append_index_openai, append_index_responses,
+    load_index, get_index_counts,
+)
 
 load_dotenv(os.environ.get("ENV_FILE", ".env"), override=True)
 
@@ -130,11 +135,6 @@ def _build_debug_dir() -> str:
 
 
 LOGS_DEBUG = _build_debug_dir()
-
-# 请求计数（启动时从 index.jsonl 加载，运行时在内存中累计）
-_first_count: int = 0   # 首次请求数（每次 endpoint 调用 = 1）
-_total_count: int = 0   # 总体上游请求数（含重试）
-_valid_count: int = 0   # 有效响应数（获得有效 Anthropic 内容的首次请求）
 
 app = FastAPI(title="Anthropic+OpenAI Proxy (FastAPI)")
 
@@ -596,40 +596,6 @@ def _dump_json(path: str, obj):
         f.write("\n")
 
 
-def _write_debug(ts: str, attempt: int, model: str, reason: str, body: str):
-    """将失败尝试的原始响应写入 logs/debug/ 目录，便于排查问题。返回文件名。"""
-    try:
-        os.makedirs(LOGS_DEBUG, exist_ok=True)
-        safe_model = model.replace("/", "_").replace(":", "_")
-        filename = f"{ts}_attempt{attempt}_{safe_model}_{reason}.txt"
-        path = os.path.join(LOGS_DEBUG, filename)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(body)
-        _append_debug_index(LOGS_DEBUG, filename, ts, attempt, safe_model, reason, len(body.encode("utf-8")))
-        return filename
-    except Exception as ex:
-        logging.warning(f"Failed to write debug log: {ex}")
-        return None
-
-
-def _append_debug_index(debug_dir: str, filename: str, ts: str,
-                        attempt: int, model: str, reason: str, size: int):
-    index_path = os.path.join(debug_dir, ".log_index.jsonl")
-    try:
-        parts = ts.rsplit("_", 1)
-        ts_dt = parts[0] if len(parts) == 2 else ts
-        seq = parts[1] if len(parts) == 2 else ""
-        entry = {
-            "filename": filename, "ts": ts, "ts_dt": ts_dt, "seq": seq,
-            "attempt": attempt, "model": model, "reason": reason,
-            "size": size, "written_at": time.time(),
-        }
-        with open(index_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
-
 def _resp_to_obj(r):  # httpx.Response -> dict
     base = {"status_code": r.status_code, "headers": dict(r.headers)}
     try:
@@ -637,168 +603,6 @@ def _resp_to_obj(r):  # httpx.Response -> dict
     except Exception:
         base["text"] = r.text
     return base
-
-
-def _build_index_path(log_dir: str) -> str:
-    return build_index_path(log_dir)
-
-
-def _index_path_for_req_file(req_file: str) -> str:
-    req_path = os.path.normpath(req_file)
-    main_root = os.path.normpath(LOGS_DIR)
-
-    if req_path == main_root or req_path.startswith(main_root + os.sep):
-        return _build_index_path(LOGS_DIR)
-
-    return _build_index_path(os.path.dirname(req_file) or ".")
-
-
-def _iter_existing_index_files(*roots: str):
-    for root in roots:
-        root_index = _build_index_path(root)
-        if os.path.exists(root_index):
-            yield root_index
-
-
-def _load_index():
-    """启动时从各日志目录的 index.jsonl 恢复历史计数。"""
-    global _first_count, _total_count, _valid_count
-    dirs_to_scan = [LOGS_DIR]
-    for index_file in _iter_existing_index_files(*dirs_to_scan):
-        with open(index_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    _first_count += 1
-                    _total_count += entry.get("total_attempts", 1)
-                    if entry.get("valid") or entry.get("success"):
-                        _valid_count += 1
-                except json.JSONDecodeError:
-                    pass
-
-
-def _extract_q1_preview(messages, kind="anthropic"):
-    """提取第一条消息的预览文本（前100字符）"""
-    return get_first_user_text(messages or [])[:100]
-
-
-def _append_index(ts: str, req_file: str, provider: str, model: str = "",
-                  tok_in: int = 0, tok_out: int = 0, cache_in: int = 0,
-                  success: bool = True,
-                  api_key: str = "", chain_key: str = "", q1_preview: str = "",
-                  total_attempts: int = 1, start_turn: int = 0,
-                  channel_key: str = "", usage: dict = None):
-    """统一追加请求记录到 index.jsonl，并更新内存计数。"""
-    global _first_count, _total_count, _valid_count
-    entry = {
-        "ts": ts,
-        "req_file": req_file,
-        "provider": provider,
-        "model": model,
-        "tok_in": tok_in,
-        "tok_out": tok_out,
-        "cache_in": cache_in,
-        "success": success,
-        "api_key": api_key,
-        "chain_key": chain_key,
-        "q1_preview": q1_preview,
-        "total_attempts": total_attempts,
-        "retried": total_attempts > 1,
-        "start_turn": start_turn,
-        "channel_key": channel_key,
-        "usage": usage or {},
-    }
-    index_file = _index_path_for_req_file(req_file)
-    os.makedirs(os.path.dirname(index_file) or ".", exist_ok=True)
-    with open(index_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    _first_count += 1
-    _total_count += total_attempts
-    if success:
-        _valid_count += 1
-
-
-def _extract_chain_key_responses(input_data) -> str:
-    """提取 Responses API chain_key — 无前缀，与其他 provider 统一"""
-    if isinstance(input_data, str):
-        return input_data[:500]
-    if isinstance(input_data, list):
-        for item in input_data:
-            if not isinstance(item, dict):
-                continue
-            if item.get("role") == "user":
-                content = item.get("content", "")
-                if isinstance(content, str):
-                    return content[:500]
-                if isinstance(content, list):
-                    texts = []
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "input_text":
-                            texts.append(part.get("text", ""))
-                    return "|".join(texts)[:500]
-    return ""
-
-
-def _extract_q1_preview_responses(input_data) -> str:
-    """提取 Responses API 第一条用户消息的预览文本"""
-    if isinstance(input_data, str):
-        return input_data[:100]
-    if isinstance(input_data, list):
-        for item in input_data:
-            if not isinstance(item, dict):
-                continue
-            if item.get("role") == "user":
-                content = item.get("content", "")
-                if isinstance(content, str):
-                    return content[:100]
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "input_text":
-                            return part.get("text", "")[:100]
-    return ""
-
-
-def _append_index_anthropic(ts, req_path, total_attempts, valid, model="", tok_in=0, tok_out=0, cache_in=0, api_key="", messages=None, channel_key="", usage=None):
-    msgs = messages or []
-    _append_index(
-        ts, req_path, provider="anthropic", model=model,
-        tok_in=tok_in, tok_out=tok_out, cache_in=cache_in, success=valid,
-        api_key=api_key,
-        chain_key=build_chain_key(msgs),
-        q1_preview=_extract_q1_preview(msgs),
-        total_attempts=total_attempts,
-        start_turn=get_first_user_text(msgs, return_index=True)[1],
-        channel_key=channel_key,
-        usage=usage,
-    )
-
-
-def _append_index_openai(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", messages=None, channel_key="", usage=None):
-    msgs = messages or []
-    _append_index(
-        ts, req_path, provider="openai", model=model,
-        tok_in=tok_in, tok_out=tok_out, success=success,
-        api_key=api_key,
-        chain_key=build_chain_key(msgs),
-        q1_preview=_extract_q1_preview(msgs),
-        channel_key=channel_key,
-        usage=usage,
-    )
-
-
-def _append_index_responses(ts, req_path, model="", tok_in=0, tok_out=0, success=True, api_key="", input_data=None, channel_key="", usage=None):
-    _append_index(
-        ts, req_path, provider="responses", model=model,
-        tok_in=tok_in, tok_out=tok_out, success=success,
-        api_key=api_key,
-        chain_key=_extract_chain_key_responses(input_data),
-        q1_preview=_extract_q1_preview_responses(input_data),
-        channel_key=channel_key,
-        usage=usage,
-    )
 
 
 # 启动时初始化
@@ -810,7 +614,7 @@ init_backup_db(SERVICE_LOG_DIR)
 init_user_db(SERVICE_LOG_DIR)
 load_custom_models()
 mark_export_interrupted()
-_load_index()
+load_index(LOGS_DIR)
 start_metrics_scanner(os.path.dirname(LOGS_DIR))
 
 
@@ -960,7 +764,7 @@ async def anthropic_messages(req: Request):
                                     final_valid = True
                                     break
                                 logging.warning(f"Attempt {attempt} empty content (anthropic non-stream), retrying: {r.text[:200]}")
-                                _dbg = _write_debug(ts, attempt, model, "empty_content", r.text[:2000])
+                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, "empty_content", r.text[:2000])
                                 if _dbg: logging.warning(f"  -> debug: {_dbg}")
                             except Exception:
                                 # JSON 解析失败：透传原始响应
@@ -968,7 +772,7 @@ async def anthropic_messages(req: Request):
                                 break
                         else:
                             # 非 200 一律重试，最大次数后透传
-                            _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                            _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                             logging.warning(f"Attempt {attempt} non-200 (anthropic non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
@@ -988,7 +792,7 @@ async def anthropic_messages(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (anthropic non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+                append_index_anthropic(ts, req_path, upstream_attempts, False, LOGS_DIR, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -998,7 +802,7 @@ async def anthropic_messages(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_anthropic(ts, req_path, upstream_attempts, False, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+                append_index_anthropic(ts, req_path, upstream_attempts, False, LOGS_DIR, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
                 return JSONResponse(
                     status_code=502,
                     content={"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}},
@@ -1015,7 +819,7 @@ async def anthropic_messages(req: Request):
             cache_in = (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
         except Exception:
             pass
-        _append_index_anthropic(ts, req_path, upstream_attempts, final_valid, model, tok_in, tok_out, cache_in=cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
+        append_index_anthropic(ts, req_path, upstream_attempts, final_valid, LOGS_DIR, model, tok_in, tok_out, cache_in=cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1055,7 +859,7 @@ async def anthropic_messages(req: Request):
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                _dbg = _write_debug(ts, attempt, model, "rate_limit", last_retry_err_text[:2000])
+                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, "rate_limit", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} rate limit (anthropic stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
@@ -1107,7 +911,7 @@ async def anthropic_messages(req: Request):
                             if not committed:
                                 raw_text = raw_buf.decode("utf-8", errors="replace")
                                 if attempt < MAX_RETRIES - 1:
-                                    _dbg = _write_debug(ts, attempt, model, "no_message_start", raw_text[:4000])
+                                    _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, "no_message_start", raw_text[:4000])
                                     logging.warning(f"Attempt {attempt} no message_start in SSE (anthropic stream), retrying" + (f" -> debug: {_dbg}" if _dbg else ""))
                                     connection_established = False
                                     up_chunks.clear()
@@ -1164,7 +968,7 @@ async def anthropic_messages(req: Request):
                         _tok_in = _u.get("input_tokens") or 0
                         _tok_out = _u.get("output_tokens") or 0
                         _cache_in = (_u.get("cache_read_input_tokens") or 0) + (_u.get("cache_creation_input_tokens") or 0)
-            _append_index_anthropic(ts, req_path, upstream_attempts, connection_established, model, _tok_in, _tok_out, cache_in=_cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw)
+            append_index_anthropic(ts, req_path, upstream_attempts, connection_established, LOGS_DIR, model, _tok_in, _tok_out, cache_in=_cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "")
 
 
     return StreamingResponse(
@@ -1265,7 +1069,7 @@ async def openai_chat_completions(req: Request):
                             success = True
                             break
                         # 非 200 一律重试，最大次数后透传
-                        _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                        _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                         logging.warning(f"Attempt {attempt} non-200 (openai non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
@@ -1285,7 +1089,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (openai non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+                append_index_openai(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -1295,7 +1099,7 @@ async def openai_chat_completions(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_openai(ts, req_path, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key)
+                append_index_openai(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
@@ -1311,7 +1115,7 @@ async def openai_chat_completions(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        _append_index_openai(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
+        append_index_openai(ts, req_path, LOGS_DIR, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1351,7 +1155,7 @@ async def openai_chat_completions(req: Request):
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
+                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} non-200 (openai stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
@@ -1414,7 +1218,7 @@ async def openai_chat_completions(req: Request):
                         _usage_raw.update(_u)
                     _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
-            _append_index_openai(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw)
+            append_index_openai(ts, req_path, LOGS_DIR, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "")
 
     return StreamingResponse(
         sse_passthrough(),
@@ -1513,7 +1317,7 @@ async def openai_responses(req: Request):
                         if r.status_code == 200:
                             success = True
                             break
-                        _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                        _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                         logging.warning(f"Attempt {attempt} non-200 (responses non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
@@ -1532,7 +1336,7 @@ async def openai_responses(req: Request):
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (responses non-stream), passing through: {error_msg}")
                 _dump_json(res_path, _resp_to_obj(r))
-                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
+                append_index_responses(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key, debug_file=debug_filename(ts, model))
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -1542,7 +1346,7 @@ async def openai_responses(req: Request):
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (responses non-stream): {error_msg}")
                 _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                _append_index_responses(ts, req_path, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key)
+                append_index_responses(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key, debug_file=debug_filename(ts, model))
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
@@ -1558,7 +1362,7 @@ async def openai_responses(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        _append_index_responses(ts, req_path, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=usage)
+        append_index_responses(ts, req_path, LOGS_DIR, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=usage)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1597,7 +1401,7 @@ async def openai_responses(req: Request):
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                _dbg = _write_debug(ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
+                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} non-200 (responses stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
@@ -1658,7 +1462,7 @@ async def openai_responses(req: Request):
                         _usage_raw.update(_u)
                     _tok_in = _tok_in or (_u.get("input_tokens") or _u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("output_tokens") or _u.get("completion_tokens") or 0)
-            _append_index_responses(ts, req_path, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=_usage_raw)
+            append_index_responses(ts, req_path, LOGS_DIR, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "")
 
     return StreamingResponse(
         responses_sse_passthrough(),
@@ -1713,7 +1517,8 @@ async def chat_viewer_shared(request: Request, key: str = "", code: str = ""):
 
 @app.get("/failures")
 async def failure_viewer(request: Request):
-    return templates.TemplateResponse(request, "failures.html", context=_ctx(request, "failures"))
+    debug_env = str(Path(LOGS_DEBUG).relative_to(Path("logs"))) if LOGS_DEBUG else ""
+    return templates.TemplateResponse(request, "failures.html", context=_ctx(request, "failures", default_env=debug_env))
 
 
 @app.get("/api/statistic")
@@ -1782,14 +1587,15 @@ def metrics_realtime(hours: int = 2):
 @app.get("/metrics/index-stats")
 def index_stats():
     """返回请求的首次/总体/有效次数及成功率。"""
-    rate = (_valid_count / _total_count) if _total_count > 0 else 0.0
+    first_count, total_count, valid_count = get_index_counts()
+    rate = (valid_count / total_count) if total_count > 0 else 0.0
     metrics_info = get_metrics_storage_info()
     return JSONResponse({
-        "first_count": _first_count,
-        "total_count": _total_count,
-        "valid_count": _valid_count,
+        "first_count": first_count,
+        "total_count": total_count,
+        "valid_count": valid_count,
         "success_rate": round(rate, 4),
-        "index_file": _build_index_path(LOGS_DIR),
+        "index_file": build_index_path(LOGS_DIR),
         "debug_dir": LOGS_DEBUG,
         "rpm_log": metrics_info["rpm_log"],
         "rate_log": metrics_info["rate_log"],
@@ -1810,379 +1616,6 @@ def rate_history(hours: int = 2):
     return JSONResponse(history)
 
 
-@app.get("/logs/debug/envs")
-def logs_debug_envs():
-    envs = []
-    logs_root = Path("logs")
-    if not logs_root.is_dir():
-        return JSONResponse(envs)
-
-    # New structure: logs/port*/*/debug/{hour}/
-    for port_dir in sorted(logs_root.glob("port*")):
-        if not port_dir.is_dir():
-            continue
-        for env_dir in sorted(port_dir.iterdir()):
-            if not env_dir.is_dir():
-                continue
-            debug_dir = env_dir / "debug"
-            if not debug_dir.is_dir():
-                continue
-            for hour_dir in sorted(debug_dir.iterdir(), reverse=True):
-                if hour_dir.is_dir():
-                    envs.append(f"{port_dir.name}/{env_dir.name}/{hour_dir.name}")
-
-    # COMPAT: 旧版 debug 目录 logs/debug/{suffix}/{hour}/，可移除整段
-    legacy_root = Path("logs", "debug")
-    if legacy_root.is_dir():
-        for env_dir in sorted(legacy_root.iterdir()):
-            if not env_dir.is_dir():
-                continue
-            for hour_dir in sorted(env_dir.iterdir(), reverse=True):
-                if hour_dir.is_dir():
-                    envs.append(f"debug/{env_dir.name}/{hour_dir.name}")
-
-    return JSONResponse(envs)
-
-
-def _iter_debug_txt_files(env_filter: str = ""):
-    logs_root = Path("logs")
-
-    if env_filter:
-        target = logs_root / env_filter
-        if target.is_dir():
-            yield from sorted(target.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
-        return
-
-    # Collect from new structure: logs/port*/*/debug/
-    all_files = []
-    for port_dir in logs_root.glob("port*"):
-        if not port_dir.is_dir():
-            continue
-        for env_dir in port_dir.iterdir():
-            if not env_dir.is_dir():
-                continue
-            debug_dir = env_dir / "debug"
-            if debug_dir.is_dir():
-                all_files.extend(debug_dir.rglob("*.txt"))
-
-    # COMPAT: 旧版 debug 目录 logs/debug/，可移除
-    legacy_root = Path("logs", "debug")
-    if legacy_root.is_dir():
-        all_files.extend(legacy_root.rglob("*.txt"))
-
-    yield from sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
-
-
-def _debug_env_label(path: Path) -> str:
-    logs_root = Path("logs")
-    try:
-        rel = path.parent.relative_to(logs_root)
-        return str(rel) if str(rel) != "." else ""
-    except ValueError:
-        return ""
-
-
-_DEBUG_CACHE_LOCK = threading.Lock()
-_debug_mem_cache: dict = {}          # env_label -> {"ts": float, "items": list}
-_DEBUG_MEM_TTL = 10
-
-_DEBUG_INDEX_PATTERN = re.compile(
-    r"(?P<ts>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})"
-    r"_(?:(?P<seq>\d+)_)?"
-    r"attempt(?P<attempt>\d+)_(?P<payload>.+)\.txt$"
-)
-
-
-_DEBUG_KNOWN_REASONS = re.compile(r"_(http_\d+|empty_content|rate_limit|no_message_start)$")
-
-
-def _backfill_debug_index(hour_dir: Path):
-    index_path = hour_dir / ".log_index.jsonl"
-    entries = []
-    for txt_file in sorted(hour_dir.glob("*.txt")):
-        m = _DEBUG_INDEX_PATTERN.match(txt_file.name)
-        if not m:
-            continue
-        ts_dt = m.group("ts")
-        seq = m.group("seq") or ""
-        attempt = int(m.group("attempt"))
-        payload = m.group("payload")
-        rm = _DEBUG_KNOWN_REASONS.search(payload)
-        if rm:
-            model = payload[:rm.start()]
-            reason = rm.group(1)
-        elif "_" in payload:
-            model, reason = payload.rsplit("_", 1)
-        else:
-            model, reason = payload, ""
-        full_ts = f"{ts_dt}_{seq}" if seq else ts_dt
-        st = txt_file.stat()
-        entries.append({
-            "filename": txt_file.name, "ts": full_ts, "ts_dt": ts_dt, "seq": seq,
-            "attempt": attempt, "model": model, "reason": reason,
-            "size": st.st_size, "written_at": st.st_mtime,
-        })
-    if entries:
-        try:
-            with open(index_path, "w", encoding="utf-8") as f:
-                for e in entries:
-                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
-
-
-def _collect_debug_roots() -> list[Path]:
-    logs_root = Path("logs")
-    roots = []
-    for port_dir in sorted(logs_root.glob("port*")):
-        if not port_dir.is_dir():
-            continue
-        for env_dir in port_dir.iterdir():
-            if not env_dir.is_dir():
-                continue
-            debug_dir = env_dir / "debug"
-            if debug_dir.is_dir():
-                roots.append(debug_dir)
-    legacy = Path("logs", "debug")
-    if legacy.is_dir():
-        roots.append(legacy)
-    return roots
-
-
-def _rebuild_debug_cache(debug_root: Path) -> list:
-    cache_path = debug_root / ".log_cache.json"
-    cache: dict = {"_version": 1, "updated_at": 0, "hour_dirs": {}, "items": []}
-    if cache_path.is_file():
-        try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    hour_meta = cache.get("hour_dirs", {})
-    hour_dirs = sorted(
-        [d for d in debug_root.iterdir() if d.is_dir() and not d.name.startswith(".")],
-        key=lambda d: d.name,
-    )
-
-    changed = False
-    seen_hour_keys = set()
-    for hdir in hour_dirs:
-        hkey = hdir.name
-        seen_hour_keys.add(hkey)
-        idx_path = hdir / ".log_index.jsonl"
-
-        if not idx_path.is_file():
-            if any(hdir.glob("*.txt")):
-                _backfill_debug_index(hdir)
-            if not idx_path.is_file():
-                continue
-
-        st = idx_path.stat()
-        prev = hour_meta.get(hkey, {})
-        if (prev.get("index_size") == st.st_size
-                and prev.get("index_mtime") == st.st_mtime):
-            continue
-
-        hour_meta[hkey] = {
-            "index_size": st.st_size,
-            "index_mtime": st.st_mtime,
-        }
-        changed = True
-
-    for old_key in list(hour_meta.keys()):
-        if old_key not in seen_hour_keys:
-            del hour_meta[old_key]
-            changed = True
-
-    if not changed and cache.get("items"):
-        return cache["items"], cache.get("models", [])
-
-    try:
-        rel = debug_root.relative_to(Path("logs"))
-        env_label = str(rel)
-    except ValueError:
-        env_label = str(debug_root)
-
-    all_entries: list[dict] = []
-    for hdir in hour_dirs:
-        hkey = hdir.name
-        idx_path = hdir / ".log_index.jsonl"
-        if not idx_path.is_file():
-            continue
-        try:
-            with open(idx_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                        e["_hour_dir"] = hkey
-                        all_entries.append(e)
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            continue
-
-    seen_groups: dict[str, int] = {}
-    items: list[dict] = []
-    all_entries.sort(key=lambda e: e.get("written_at", 0), reverse=True)
-
-    for e in all_entries:
-        hdir_name = e.get("_hour_dir", "")
-        ts_dt = e.get("ts_dt", "")
-        seq = e.get("seq", "")
-        model = e.get("model", "")
-        reason = e.get("reason", "")
-        group_key = f"{ts_dt}|{seq}|{model}|{reason}" if ts_dt else ""
-
-        if group_key and group_key in seen_groups:
-            idx = seen_groups[group_key]
-            items[idx]["attempt_count"] += 1
-            continue
-
-        created_at = ""
-        if ts_dt:
-            try:
-                created_at = datetime.strptime(ts_dt, "%Y-%m-%d_%H-%M-%S").strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                created_at = ts_dt
-
-        rel_name = f"{env_label}/{hdir_name}/{e['filename']}" if env_label else f"{hdir_name}/{e['filename']}"
-        item = {
-            "filename": rel_name,
-            "created_at": created_at,
-            "attempt": e.get("attempt", 0),
-            "attempt_count": 1,
-            "model": model,
-            "reason": reason,
-            "size": e.get("size", 0),
-            "env": f"{env_label}/{hdir_name}" if env_label else hdir_name,
-        }
-        items.append(item)
-        if group_key:
-            seen_groups[group_key] = len(items) - 1
-
-    models = sorted({i.get("model", "") for i in items if i.get("model")})
-
-    save_cache = {
-        "_version": 1,
-        "updated_at": time.time(),
-        "hour_dirs": hour_meta,
-        "items": items,
-        "models": models,
-    }
-    try:
-        tmp = str(cache_path) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(save_cache, f, ensure_ascii=False)
-        os.replace(tmp, cache_path)
-    except OSError:
-        pass
-
-    return items, models
-
-
-def _load_debug_cache(env_filter: str = "", keyword: str = "", limit: int = 200) -> tuple:
-    global _debug_mem_cache
-
-    now = time.time()
-    cache_key = env_filter or "__all__"
-
-    with _DEBUG_CACHE_LOCK:
-        mem = _debug_mem_cache.get(cache_key)
-        if mem and (now - mem["ts"]) < _DEBUG_MEM_TTL:
-            items = mem["items"]
-            models = mem["models"]
-            if keyword:
-                items = [i for i in items if keyword in i.get("filename", "").lower()
-                         or keyword in i.get("model", "").lower()
-                         or keyword in i.get("reason", "").lower()]
-            return items[:limit], models
-
-    all_items: list[dict] = []
-    all_models: set = set()
-    roots = _collect_debug_roots()
-
-    if env_filter:
-        target = Path("logs") / env_filter
-        matched = False
-        for root in roots:
-            if target == root or target.parent == root:
-                if target.is_dir() and target != root:
-                    hdir = target
-                    idx_path = hdir / ".log_index.jsonl"
-                    if not idx_path.is_file() and any(hdir.glob("*.txt")):
-                        _backfill_debug_index(hdir)
-                items, models = _rebuild_debug_cache(root)
-                all_models.update(models)
-                if target != root:
-                    items = [i for i in items if env_filter in i.get("env", "")]
-                all_items = items
-                matched = True
-                break
-        if not matched:
-            return [], []
-    else:
-        for root in roots:
-            items, models = _rebuild_debug_cache(root)
-            all_items.extend(items)
-            all_models.update(models)
-        all_items.sort(key=lambda i: i.get("created_at", ""), reverse=True)
-
-    merged_models = sorted(all_models)
-
-    with _DEBUG_CACHE_LOCK:
-        _debug_mem_cache[cache_key] = {"ts": time.time(), "items": all_items, "models": merged_models}
-
-    if keyword:
-        all_items = [i for i in all_items if keyword in i.get("filename", "").lower()
-                     or keyword in i.get("model", "").lower()
-                     or keyword in i.get("reason", "").lower()]
-    return all_items[:limit], merged_models
-
-
-@app.get("/logs/debug/list")
-def logs_debug_list(limit: int = 200, keyword: str = "", env: str = "", model: str = ""):
-    safe_limit = max(1, min(limit, 1000))
-    keyword_lower = keyword.strip().lower()
-    model_lower = model.strip().lower()
-    items, models = _load_debug_cache(env_filter=env, keyword=keyword_lower, limit=safe_limit)
-    if model_lower:
-        items = [i for i in items if model_lower in i.get("model", "").lower()]
-    return JSONResponse({"items": items, "models": models})
-
-
-@app.get("/logs/debug/file")
-def logs_debug_file(filename: str):
-    if ".." in filename or not filename.endswith(".txt"):
-        return JSONResponse({"error": "invalid filename"}, status_code=400)
-    # Try as relative path under logs/ (works for both new and legacy)
-    path = Path("logs") / filename
-    if not path.is_file():
-        # Try current instance's debug dir
-        cur_path = Path(LOGS_DEBUG) / Path(filename).name
-        if cur_path.is_file():
-            path = cur_path
-        else:
-            # COMPAT: 旧版 debug 文件在 logs/debug/，可移除
-            legacy_path = Path("logs", "debug") / filename
-            if legacy_path.is_file():
-                path = legacy_path
-            else:
-                return JSONResponse({"error": "file not found"}, status_code=404)
-    try:
-        content = path.read_text(encoding="utf-8")
-    except Exception as ex:
-        return JSONResponse({"error": f"read failed: {ex}"}, status_code=500)
-    return JSONResponse({
-        "filename": filename,
-        "content": content,
-        "size": path.stat().st_size,
-        "updated_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-    })
-
-
 register_log_routes(app)
 register_session_routes(app, LOGS_DIR)
 register_key_routes(app, templates)
@@ -2190,6 +1623,7 @@ register_channel_routes(app, templates)
 register_export_routes(app, LOGS_DIR)
 register_backup_routes(app, LOGS_DIR)
 register_user_routes(app, templates)
+register_debug_routes(app, LOGS_DEBUG, STARTUP_DATE_TAG)
 
 
 if __name__ == "__main__":

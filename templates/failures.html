@@ -52,6 +52,12 @@
         .failures-detail {
             padding-left: 12px;
         }
+        .load-more {
+            text-align: center;
+            padding: 12px;
+            color: var(--muted-foreground);
+            font-size: .85rem;
+        }
         @media (max-width: 991px) {
             .failures-split {
                 grid-template-columns: 1fr;
@@ -74,10 +80,11 @@
     <div class="card mb-3">
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
             <div>
-                <label class="text-sm text-muted">环境</label>
-                <select class="input input-sm" v-model="envFilter" @change="loadList">
-                    <option value="">全部环境</option>
-                    <option v-for="e in envList" :key="e" :value="e">{{ e }}</option>
+                <label class="text-sm text-muted">时间目录</label>
+                <select class="input input-sm" v-model="envFilter" @change="switchEnv">
+                    <option v-for="e in envList" :key="e.name" :value="e.name">
+                        {{ e.label }} ({{ e.count }}) {{ e.mtime }}{{ e.current ? ' ★' : '' }}
+                    </option>
                 </select>
             </div>
             <div>
@@ -92,15 +99,6 @@
                 <input class="input input-sm" v-model="keyword" @keyup.enter="loadList" placeholder="按文件名 / reason 过滤">
             </div>
             <div>
-                <label class="text-sm text-muted">数量</label>
-                <select class="input input-sm" v-model.number="limit" @change="loadList">
-                    <option :value="50">50</option>
-                    <option :value="100">100</option>
-                    <option :value="200">200</option>
-                    <option :value="500">500</option>
-                </select>
-            </div>
-            <div>
                 <button class="btn btn-primary btn-sm w-full" @click="loadList">刷新列表</button>
             </div>
         </div>
@@ -108,15 +106,16 @@
 
     <div class="card">
         <div class="failures-split">
-            <div class="log-list">
-                <div v-if="!items.length" class="empty-box" style="min-height:70vh">暂无失败日志</div>
+            <div class="log-list" ref="logList" @scroll="onScroll">
+                <div v-if="!items.length && !loading" class="empty-box" style="min-height:70vh">暂无失败日志</div>
                 <div v-for="item in items" :key="item.filename" class="log-item" :class="{ active: selected && selected.filename === item.filename }" @click="selectItem(item)">
                     <div class="font-semibold">{{ item.reason || 'unknown' }} <span style="font-weight:400;color:var(--muted-foreground);font-size:.82rem">· {{ item.model || '?' }}</span></div>
                     <div class="log-meta">{{ item.created_at }} · <span v-if="item.attempt_count > 1" class="badge badge-warning" style="font-size:.7rem;padding:1px 6px;">{{ item.attempt_count }} 次重试</span><span v-else>attempt {{ item.attempt || '-' }}</span></div>
                     <div class="log-meta">{{ item.model || 'unknown model' }} · {{ item.filename }}</div>
-                    <div v-if="item.env" class="log-meta log-env">{{ item.env }}</div>
                     <div class="log-meta">{{ formatSize(item.size) }}</div>
                 </div>
+                <div v-if="loading" class="load-more">加载中…</div>
+                <div v-else-if="items.length && items.length >= total" class="load-more">已加载全部 {{ total }} 条</div>
             </div>
             <div class="failures-detail">
                 <div v-if="selectedContent" class="code-block" style="min-height:70vh">{{ selectedContent }}</div>
@@ -134,14 +133,16 @@ new Vue({
     el: '#app',
     data: {
         keyword: '',
-        limit: 200,
         items: [],
         selected: null,
         selectedContent: '',
-        envFilter: '',
+        envFilter: {{ (default_env or "")|tojson }},
         envList: [],
         modelFilter: '',
         modelList: [],
+        offset: 0,
+        total: 0,
+        loading: false,
     },
     methods: {
         formatSize(size) {
@@ -150,43 +151,78 @@ new Vue({
             return (size / 1024 / 1024).toFixed(2) + ' MB';
         },
         loadEnvs() {
+            var self = this;
             fetch('/logs/debug/envs')
                 .then(r => r.json())
-                .then(data => { this.envList = data || []; })
-                .catch(() => {});
+                .then(data => {
+                    self.envList = data || [];
+                    if (self.envList.length) {
+                        var match = self.envList.find(function(e) { return e.name === self.envFilter; });
+                        if (!match) {
+                            var cur = self.envList.find(function(e) { return e.current; });
+                            self.envFilter = cur ? cur.name : self.envList[0].name;
+                        }
+                    }
+                    self.loadList();
+                })
+                .catch(() => { self.loadList(); });
+        },
+        switchEnv() {
+            this.loadList();
         },
         loadList() {
-            const p = new URLSearchParams({ limit: this.limit });
+            this.offset = 0;
+            this.items = [];
+            this.total = 0;
+            this.selected = null;
+            this.selectedContent = '';
+            this.fetchMore();
+        },
+        fetchMore() {
+            if (this.loading) return;
+            if (this.offset > 0 && this.items.length >= this.total) return;
+            this.loading = true;
+            var p = new URLSearchParams({ limit: 50, offset: this.offset });
             if (this.keyword) p.append('keyword', this.keyword);
             if (this.envFilter) p.append('env', this.envFilter);
             if (this.modelFilter) p.append('model', this.modelFilter);
+            var self = this;
             fetch('/logs/debug/list?' + p.toString())
-                .then(r => r.json())
-                .then(data => {
-                    this.items = data.items || [];
-                    this.modelList = data.models || [];
-                    if (!this.items.length) {
-                        this.selected = null;
-                        this.selectedContent = '';
-                        return;
-                    }
-                    if (!this.selected || !this.items.find(v => v.filename === this.selected.filename)) {
-                        this.selectItem(this.items[0]);
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var newItems = data.items || [];
+                    self.items = self.items.concat(newItems);
+                    self.total = data.total || 0;
+                    self.modelList = data.models || [];
+                    self.offset += newItems.length;
+                    self.loading = false;
+                    if (!self.selected && self.items.length > 0) {
+                        self.selectItem(self.items[0]);
                     }
                 })
-                .catch(e => alert('加载失败：' + e));
+                .catch(function(e) {
+                    self.loading = false;
+                    alert('加载失败：' + e);
+                });
+        },
+        onScroll() {
+            var el = this.$refs.logList;
+            if (!el) return;
+            if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+                this.fetchMore();
+            }
         },
         selectItem(item) {
             this.selected = item;
+            var self = this;
             fetch('/logs/debug/file?filename=' + encodeURIComponent(item.filename))
-                .then(r => r.json())
-                .then(data => { this.selectedContent = data.content || ''; })
-                .catch(e => { this.selectedContent = '加载失败：' + e; });
+                .then(function(r) { return r.json(); })
+                .then(function(data) { self.selectedContent = data.content || ''; })
+                .catch(function(e) { self.selectedContent = '加载失败：' + e; });
         },
     },
     mounted() {
         this.loadEnvs();
-        this.loadList();
     }
 });
 </script>
