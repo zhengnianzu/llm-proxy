@@ -332,30 +332,24 @@ methods:{
       this.config=await this.json('/api/reflection/config');
       var summary=await this.json('/api/reflection/tasks-summary');
       this.stats=summary;
-      var slots=this.config.source_key_slots||[];
+      var allDs=await this.json('/api/reflection/datasets-all');
       var rows=[];
-      for(var i=0;i<slots.length;i++){
-        var s=slots[i];
-        var ds=await this.json('/api/reflection/datasets?key_slot='+encodeURIComponent(s.key_slot));
-        for(var j=0;j<ds.length;j++){
-          var d=ds[j];
-          var runs=[];
-          try{runs=await this.json('/api/reflection/runs?source_export_id='+d.id)}catch(e){}
-          if(!runs.length)continue;
-          var run=runs[0];
-          rows.push({
-            export_id:d.id,key_slot:d.key_slot||s.key_slot,
-            created_at:d.created_at,
-            run_id:run.run_id,run_status:run.status,
-            task_total:run.total_count||0,
-            task_done:run.done||0,
-            task_pending:run.pending||0,
-            task_processing:run.processing||0,
-            task_failed:run.failed||0,
-            run:run,checked:false,
-            _tasks:null,_tasks_loading:false
-          });
-        }
+      for(var j=0;j<allDs.length;j++){
+        var d=allDs[j];
+        var run=d.latest_run;
+        if(!run)continue;
+        rows.push({
+          export_id:d.id,key_slot:d.key_slot,
+          created_at:d.created_at,
+          run_id:run.run_id,run_status:run.status,
+          task_total:run.total_count||0,
+          task_done:run.done||0,
+          task_pending:run.pending||0,
+          task_processing:run.processing||0,
+          task_failed:run.failed||0,
+          run:run,checked:false,
+          _tasks:null,_tasks_loading:false
+        });
       }
       this.rows=rows;
       if(!this.globalConfig.reflection_api_key_id&&this.config.keys&&this.config.keys.length){

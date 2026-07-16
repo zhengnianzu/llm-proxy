@@ -9,8 +9,10 @@ from typing import Any
 from utils.export_store import (
     get_record,
     get_record_resolved,
+    get_records_summary,
     list_records,
     list_records_by_key,
+    list_records_for_datasets,
 )
 from utils.key_store import get_key_full, list_keys, mask_key
 from utils.obs_utils import run_download_cmd
@@ -31,11 +33,13 @@ class ReflectionService:
         db.init(config.db_path)
         db.reset_processing(config.db_path)
         self.workers = WorkerManager(config.db_path, config.prompt_dir)
+        self._ds_cache = None
+        self._ds_cache_key = None
 
     @staticmethod
     def source_key_slots() -> list[dict]:
         grouped: dict[str, list[dict]] = {}
-        for record in list_records(limit=1000):
+        for record in list_records_for_datasets(limit=1000):
             if "analysis" not in (record.get("local_copy_dir") or "").lower():
                 continue
             grouped.setdefault(record["key_slot"], []).append(record)
@@ -69,6 +73,34 @@ class ReflectionService:
                 "error": quality_error or record.get("error_message", ""),
                 "latest_run": latest,
             })
+        return result
+
+    def datasets_all(self) -> list[dict]:
+        summary = get_records_summary()
+        if self._ds_cache is not None and self._ds_cache_key == summary:
+            return self._ds_cache
+        result = []
+        for record in list_records_for_datasets(limit=1000):
+            if "analysis" not in (record.get("local_copy_dir") or "").lower():
+                continue
+            if record["status"] != "success":
+                continue
+            artifacts_valid = True
+            quality_error = ""
+            d = Path(record["local_copy_dir"])
+            if not d.is_dir():
+                artifacts_valid = False
+                quality_error = f"质检目录不存在: {d}"
+            runs = db.list_runs(self.config.db_path, record["id"])
+            latest = runs[0] if runs else None
+            result.append({
+                **record,
+                "artifacts_valid": artifacts_valid,
+                "error": quality_error or record.get("error_message", ""),
+                "latest_run": latest,
+            })
+        self._ds_cache = result
+        self._ds_cache_key = summary
         return result
 
     def create_run(self, body: dict) -> dict:

@@ -194,6 +194,16 @@ def latest_quality_record(source_export_id: int) -> Optional[dict]:
 
 _SLIM_COLS = "id, key_slot, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message"
 
+_DS_COLS = "id, key_slot, api_key, status, mode, created_at, total_sessions, obs_dst, error_message, local_copy_dir"
+
+
+def list_records_for_datasets(limit: int = 1000) -> list:
+    conn = _get_conn()
+    rows = conn.execute(
+        f"SELECT {_DS_COLS} FROM export_records ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
 
 def get_records_summary() -> tuple:
     """返回 (max_id, count, running_count)，用于快速判断 export_records 是否有变化。

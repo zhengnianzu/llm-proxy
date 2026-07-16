@@ -55,6 +55,9 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     @app.get("/api/reflection/datasets")
     def datasets(key_slot: str): return service.datasets(key_slot)
 
+    @app.get("/api/reflection/datasets-all")
+    def datasets_all(): return service.datasets_all()
+
     @app.get("/api/reflection/datasets/{record_id}/analysis")
     def analysis(record_id: int): return call(service.analysis, record_id)
 

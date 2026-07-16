@@ -186,17 +186,11 @@ methods:{
     this.loading=true;this.error='';
     try{
       this.config=await this.json('/api/reflection/config');
-      var slots=this.config.source_key_slots||[];
-      var all=[];var keySet={};
-      for(var i=0;i<slots.length;i++){
-        var s=slots[i];
-        var ds=await this.json('/api/reflection/datasets?key_slot='+encodeURIComponent(s.key_slot));
-        keySet[s.key_slot]=true;
-        for(var j=0;j<ds.length;j++){
-          var d=ds[j];
-          this.$set(d,'_importing',false);
-          all.push(d);
-        }
+      var all=await this.json('/api/reflection/datasets-all');
+      var keySet={};
+      for(var i=0;i<all.length;i++){
+        this.$set(all[i],'_importing',false);
+        keySet[all[i].key_slot]=true;
       }
       this.allDatasets=all;
       var keyCount=0;for(var k in keySet){if(keySet.hasOwnProperty(k))keyCount++}
