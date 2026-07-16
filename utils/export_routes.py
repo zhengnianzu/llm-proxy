@@ -33,6 +33,7 @@ from utils.obs_utils import load_obs_base, load_sync_config, obsutil_ls
 from utils.stats_index import (
     refresh_index, build_stats_from_index, get_date_to_mtime_map,
     get_current_key_cache, update_key_meta, update_key_records,
+    get_last_refresh_ts, start_stats_warmer,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             reverse=True,
         )
 
-        return JSONResponse({"keys": keys_result, "mtimes": mtimes})
+        return JSONResponse({"keys": keys_result, "mtimes": mtimes, "last_refresh_ts": get_last_refresh_ts()})
 
     # -----------------------------------------------------------------
     # 统一任务执行（导出 / 质检）
@@ -551,3 +552,5 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             "total_sessions": rec.get("total_sessions", 0),
             "error_message": rec.get("error_message", ""),
         })
+
+    start_stats_warmer(str(env_dir))

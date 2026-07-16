@@ -110,6 +110,7 @@
                 <button class="btn btn-primary btn-sm" @click="fetchKeys" :disabled="loading">
                     {{ loading ? '加载中…' : '刷新统计' }}
                 </button>
+                <span v-if="lastRefreshTs" style="font-size:12px;color:var(--muted-foreground);margin-left:8px;">{{ lastRefreshTime }}</span>
             </div>
         </div>
     </div>
@@ -277,6 +278,7 @@ new Vue({
         obsPrefix: '',
         keys: [],
         loading: false,
+        lastRefreshTs: 0,
         error: '',
         keyFilter: '',
 
@@ -304,6 +306,16 @@ new Vue({
         logPollTimer: null,
     },
     computed: {
+        lastRefreshTime: function() {
+            if (!this.lastRefreshTs) return '';
+            var d = new Date(this.lastRefreshTs * 1000);
+            var y = d.getFullYear();
+            var m = ('0' + (d.getMonth() + 1)).slice(-2);
+            var dd = ('0' + d.getDate()).slice(-2);
+            var hh = ('0' + d.getHours()).slice(-2);
+            var mm = ('0' + d.getMinutes()).slice(-2);
+            return y + '/' + m + '/' + dd + ' ' + hh + ':' + mm;
+        },
         totalSessions: function() {
             return this.keys.reduce(function(s, k) { return s + k.total_sessions; }, 0);
         },
@@ -350,6 +362,7 @@ new Vue({
             }).then(function(d) {
                 this.keys = d.keys || [];
                 if (d.mtimes) this.config.mtimes = d.mtimes;
+                if (d.last_refresh_ts) this.lastRefreshTs = d.last_refresh_ts;
             }.bind(this)).catch(function(e) {
                 if (e !== 'auth') this.error = '加载失败: ' + e;
             }.bind(this)).finally(function() {

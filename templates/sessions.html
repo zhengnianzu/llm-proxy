@@ -73,6 +73,7 @@
                 <button class="btn btn-primary btn-sm flex-grow-1" @click="fetchStats(true)" :disabled="loading">
                     {{ loading ? '加载中…' : '刷新' }}
                 </button>
+                <span v-if="lastRefreshTs" style="font-size:12px;color:var(--muted-foreground);white-space:nowrap;align-self:center;">{{ lastRefreshTime }}</span>
             </div>
         </div>
     </div>
@@ -212,6 +213,7 @@ new Vue({
         threshold: 5,
         stats: null,
         loading: false,
+        lastRefreshTs: 0,
         error: '',
         selectedKeys: [],
         maxColumns: 5,
@@ -229,6 +231,16 @@ new Vue({
         }
     },
     computed: {
+        lastRefreshTime: function() {
+            if (!this.lastRefreshTs) return '';
+            var d = new Date(this.lastRefreshTs * 1000);
+            var y = d.getFullYear();
+            var m = ('0' + (d.getMonth() + 1)).slice(-2);
+            var dd = ('0' + d.getDate()).slice(-2);
+            var hh = ('0' + d.getHours()).slice(-2);
+            var mm = ('0' + d.getMinutes()).slice(-2);
+            return y + '/' + m + '/' + dd + ' ' + hh + ':' + mm;
+        },
         qualifiedRate: function() {
             if (!this.stats || !this.stats.total_sessions) return 'N/A';
             return (this.stats.qualified_sessions / this.stats.total_sessions * 100).toFixed(1) + '%';
@@ -323,6 +335,7 @@ new Vue({
                     } else {
                         this.stats = data;
                         this.selectedKeys = this._getDefaultKeys();
+                        if (data.last_refresh_ts) this.lastRefreshTs = data.last_refresh_ts;
                     }
                 }.bind(this))
                 .catch(function(e) {

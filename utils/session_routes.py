@@ -14,6 +14,8 @@ from utils.log_paths import get_service_log_dir
 from utils.stats_index import (
     refresh_index,
     build_stats_from_index,
+    get_last_refresh_ts,
+    start_stats_warmer,
     QUALIFIED_THRESHOLD_DEFAULT,
 )
 
@@ -49,5 +51,8 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
 
         stats["_dir"] = str(env_dir)
         stats["_threshold"] = threshold
+        stats["last_refresh_ts"] = get_last_refresh_ts()
 
         return JSONResponse(stats)
+
+    start_stats_warmer(str(env_dir))

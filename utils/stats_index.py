@@ -15,6 +15,7 @@ utils/stats_index.py — 增量汇总索引
 
 import hashlib
 import json
+import logging
 import os
 import time
 import threading
@@ -642,3 +643,51 @@ def get_date_to_mtime_map(index: dict) -> Dict[str, List[str]]:
             if dir_name not in mapping[d]:
                 mapping[d].append(dir_name)
     return mapping
+
+
+# ---------------------------------------------------------------------------
+# 后台预热线程 — stats_index
+# ---------------------------------------------------------------------------
+
+_stats_warmer_thread = None
+_stats_warmer_stop = threading.Event()
+_stats_logger = logging.getLogger("stats-warmer")
+
+_last_refresh_ts: float = 0.0
+
+
+def get_last_refresh_ts() -> float:
+    return _last_refresh_ts
+
+
+def _stats_warmer_loop(env_dir: str, threshold: int, interval: float = 30.0) -> None:
+    global _last_refresh_ts
+    env_path = Path(env_dir)
+    _stats_logger.info("stats-warmer: 开始预热 env_dir=%s", env_dir)
+
+    index = refresh_index(env_path, threshold, force=True)
+    build_stats_from_index(index, threshold, env_dir=env_path)
+    _last_refresh_ts = time.time()
+    _stats_logger.info("stats-warmer: 首次预热完成")
+
+    while not _stats_warmer_stop.is_set():
+        _stats_warmer_stop.wait(interval)
+        if _stats_warmer_stop.is_set():
+            break
+        index = refresh_index(env_path, threshold, force=True)
+        build_stats_from_index(index, threshold, env_dir=env_path)
+        _last_refresh_ts = time.time()
+
+
+def start_stats_warmer(env_dir: str, threshold: int = QUALIFIED_THRESHOLD_DEFAULT) -> None:
+    global _stats_warmer_thread
+    if _stats_warmer_thread is not None and _stats_warmer_thread.is_alive():
+        return
+    _stats_warmer_stop.clear()
+    _stats_warmer_thread = threading.Thread(
+        target=_stats_warmer_loop,
+        args=(env_dir, threshold),
+        daemon=True,
+        name="stats-cache-warmer",
+    )
+    _stats_warmer_thread.start()
