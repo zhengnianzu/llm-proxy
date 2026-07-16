@@ -386,6 +386,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             api_key=rec["api_key"], key_slot=rec["key_slot"],
             mtime_dirs=rec["mtime_dirs"],
             mode="eval",
+            source_export_id=src_record_id,
         )
 
         t = threading.Thread(

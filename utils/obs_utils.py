@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OBSUTIL_BIN = str(PROJECT_ROOT / "tools" / "obsutil" / "obsutil")
 DEFAULT_UPLOAD_SCRIPT = str(PROJECT_ROOT / "tools" / "obs_upload.sh")
+DEFAULT_DOWNLOAD_SCRIPT = str(PROJECT_ROOT / "tools" / "obs_download.sh")
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,34 @@ def run_upload_cmd(
             upload_script = str((PROJECT_ROOT / p).resolve())
 
     cmd = [upload_script, local, dst]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, (result.stderr or result.stdout).strip()
+    except Exception as e:
+        return False, str(e)
+
+
+# ---------------------------------------------------------------------------
+# 下载
+# ---------------------------------------------------------------------------
+
+def run_download_cmd(
+    obs_path: str,
+    local: str,
+    download_script: Optional[str] = None,
+    timeout: int = 300,
+) -> Tuple[bool, str]:
+    """执行下载脚本，将 OBS 文件/目录下载到本地。"""
+    if download_script is None:
+        download_script = DEFAULT_DOWNLOAD_SCRIPT
+    else:
+        p = Path(download_script)
+        if not p.is_absolute():
+            download_script = str((PROJECT_ROOT / p).resolve())
+
+    cmd = [download_script, obs_path, local]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode == 0:

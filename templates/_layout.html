@@ -57,8 +57,23 @@
                 </a>
             </div>
 
-            <!-- Management Section (permission-based) -->
             {% set user_permissions = user_permissions|default([]) %}
+            {% set show_thinking = user_role == 'admin' or 'thinking' in user_permissions %}
+            {% if show_thinking %}
+            <div class="sidebar-section">
+                <div class="sidebar-section-label">任务</div>
+                <a href="/thinking" class="sidebar-item {% if active_page == 'thinking' %}active{% endif %}" title="Session 管理">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18h6M10 22h4M8.5 14.5A7 7 0 1 1 15.5 14.5C14.5 15.3 14 16 14 18h-4c0-2-.5-2.7-1.5-3.5z"/></svg>
+                    <span>Session 管理</span>
+                </a>
+                <a href="/thinking/tasks" class="sidebar-item {% if active_page == 'thinking_tasks' %}active{% endif %}" title="解析任务">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    <span>解析任务</span>
+                </a>
+            </div>
+            {% endif %}
+
+            <!-- Management Section (permission-based) -->
             {% set show_keys = user_role == 'admin' or 'keys' in user_permissions %}
             {% set show_channels = user_role == 'admin' or 'channels' in user_permissions %}
             {% set show_export = user_role == 'admin' or 'export' in user_permissions %}

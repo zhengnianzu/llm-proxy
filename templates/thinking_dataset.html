@@ -1,0 +1,528 @@
+{% extends "_layout.html" %}
+{% block title %}数据集详情{% endblock %}
+{% block mobile_title %}数据集详情{% endblock %}
+{% block head_extra %}
+<script src="/static/js/vue.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+{% endblock %}
+{% block page_styles %}
+.ds-wrap{display:flex;height:calc(100vh - 60px);overflow:hidden}
+.ds-left{width:280px;min-width:220px;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.ds-left .filter-bar{padding:10px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center}
+.ds-left .filter-bar select{flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font-size:.8rem}
+.ds-left .traj-list{flex:1;overflow-y:auto}
+.traj-item{padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;font-size:.82rem}
+.traj-item:hover{background:var(--muted)}
+.traj-item.active{background:var(--primary);color:var(--primary-foreground)}
+.traj-item .name{font-weight:600;word-break:break-all}
+.traj-item .meta{margin-top:4px;font-size:.75rem;opacity:.8}
+.traj-item .counts{display:flex;gap:8px;margin-top:4px;font-size:.72rem}
+.traj-item .counts .ok{color:var(--success)}.traj-item .counts .bad{color:var(--destructive)}.traj-item .counts .warn{color:#e67e00}
+.ds-center{flex:1;overflow-y:auto;padding:24px 28px;background:var(--background)}
+.ds-right{width:320px;min-width:260px;border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.ds-right .section{padding:12px;border-bottom:1px solid var(--border)}
+.ds-right .section h4{margin:0 0 8px 0;font-size:.82rem;color:var(--muted-foreground)}
+.ds-right .issue-list{flex:1;overflow-y:auto}
+.issue-item{padding:8px 12px;border-bottom:1px solid var(--border);font-size:.78rem}
+.issue-item .path{font-weight:600;color:var(--primary);cursor:pointer}
+.issue-item .err{color:var(--destructive);margin-top:3px;word-break:break-all}
+.issue-item .meta{margin-top:3px;font-size:.72rem;color:var(--muted-foreground)}
+
+.mode-toggle{display:flex;gap:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:12px}
+.mode-toggle button{padding:6px 14px;border:none;background:var(--card);color:var(--foreground);font-size:.8rem;cursor:pointer}
+.mode-toggle button.active{background:var(--primary);color:var(--primary-foreground)}
+
+.stat-row{display:flex;gap:12px;flex-wrap:wrap;font-size:.8rem}
+.stat-row .stat{padding:4px 8px;border-radius:var(--radius);background:var(--muted)}
+.stat-row .stat b{font-weight:700}
+
+/* ========= Chat-view message rows ========= */
+.msg-row{display:flex;margin-bottom:18px;gap:10px}
+.msg-row.user{justify-content:flex-start}
+.msg-row.assistant{justify-content:flex-end}
+.msg-row.user .msg-bubble-col{align-items:flex-start}
+.msg-row.assistant .msg-bubble-col{align-items:flex-end}
+.msg-bubble-col{display:flex;flex-direction:column;gap:6px;max-width:70%;min-width:0}
+.avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;margin-top:2px}
+.avatar.user{background:linear-gradient(135deg,#667eea,#764ba2)}
+.avatar.assistant{background:linear-gradient(135deg,#10a37f,#0d8c6e)}
+
+/* ========= Block cards ========= */
+.block{border-radius:var(--radius-lg);overflow:hidden;font-size:14px;line-height:1.65;word-break:break-word;max-width:100%}
+.block.text{background:var(--accent);border:1px solid var(--border);padding:12px 16px;white-space:pre-wrap;overflow-wrap:break-word;overflow-x:auto}
+.block.tool-use{background:#fff7ed;border:1px solid #fed7aa}
+.block.tool-result{background:#fff7ed;border:1px solid #fed7aa}
+.block.tool-result.is-error{background:#fff1f2;border-color:#fecdd3}
+.dark .block.tool-use{background:rgba(180,83,9,0.12);border-color:rgba(251,146,60,0.3)}
+.dark .block.tool-result{background:rgba(180,83,9,0.12);border-color:rgba(251,146,60,0.3)}
+.dark .block.tool-result.is-error{background:rgba(244,63,94,0.12);border-color:rgba(244,63,94,0.3)}
+.block-hdr{display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:11px;font-weight:600;border-bottom:1px solid rgba(0,0,0,.07);color:#92400e;background:rgba(0,0,0,.03)}
+.dark .block-hdr{color:#fbbf24;border-bottom-color:rgba(255,255,255,.07);background:rgba(255,255,255,.03)}
+.block-hdr .badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.03em}
+.badge-tool-use{background:#fb923c;color:#fff}
+.badge-tool-result{background:#f97316;color:#fff}
+.badge-error{background:var(--destructive);color:var(--destructive-foreground)}
+.block-hdr .tool-name{color:#78350f;font-weight:700}
+.block-hdr .tool-id{color:#b45309;font-size:10px;font-family:var(--font-mono)}
+.dark .block-hdr .tool-name{color:#fde68a}
+.dark .block-hdr .tool-id{color:#fbbf24}
+.block-body{padding:10px 14px}
+.cmd-pre{background:#1e1e2e;color:#cdd6f4;border-radius:7px;padding:10px 14px;font-family:var(--font-mono);font-size:12.5px;white-space:pre-wrap;word-break:break-all;margin:4px 0 0;line-height:1.6}
+.cmd-label{font-size:11px;color:var(--muted-foreground);margin-bottom:4px;font-weight:500}
+.result-pre{background:var(--card);border:1px solid var(--border);border-radius:7px;padding:8px 12px;font-family:var(--font-mono);font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--foreground);margin-top:4px;line-height:1.55;max-height:260px;overflow-y:auto}
+.result-pre.is-error{background:#fff1f2;color:#9f1239;border-color:#fecdd3}
+.dark .result-pre.is-error{background:rgba(244,63,94,0.12);color:#fda4af;border-color:rgba(244,63,94,0.3)}
+.input-kv{margin-top:4px}
+.input-kv .kv-row{display:flex;gap:6px;font-size:12.5px;margin-top:3px}
+.input-kv .kv-key{color:#92400e;font-weight:600;min-width:80px}
+.input-kv .kv-val{color:var(--foreground);white-space:pre-wrap;word-break:break-all}
+.dark .input-kv .kv-key{color:#fbbf24}
+
+/* ========= Reasoning / thinking ========= */
+.block.reasoning{background:#faf5ff;border:1px solid #e9d5ff;border-radius:var(--radius-lg);overflow:hidden;margin:0}
+.dark .block.reasoning{background:rgba(124,58,237,0.1);border-color:rgba(167,139,250,0.25)}
+.block.reasoning.has-error{border-color:var(--destructive)}
+.reasoning-summary{display:flex;align-items:center;gap:8px;padding:8px 14px;cursor:pointer;user-select:none;font-size:13px;color:#7c3aed;font-weight:500;background:rgba(0,0,0,.02)}
+.dark .reasoning-summary{color:#a78bfa;background:rgba(255,255,255,.02)}
+.reasoning-summary:hover{background:rgba(124,58,237,.06)}
+.reasoning-chevron{font-size:10px;transition:transform .15s}
+.reasoning-chevron.collapsed{transform:rotate(-90deg)}
+.reasoning-body{padding:10px 14px;font-size:13px;color:#4c1d95;white-space:pre-wrap;border-top:1px solid #e9d5ff;max-height:380px;overflow-y:auto;background:var(--card)}
+.dark .reasoning-body{color:#c4b5fd;border-top-color:rgba(167,139,250,0.25)}
+.reasoning-body.collapsed{display:none}
+.signature-row{display:flex;align-items:center;gap:6px;padding:5px 14px;cursor:pointer;user-select:none;font-size:11px;color:#9333ea;font-weight:500;background:rgba(147,51,234,.04);border-bottom:1px solid #e9d5ff}
+.dark .signature-row{color:#c084fc;background:rgba(147,51,234,.08);border-bottom-color:rgba(167,139,250,0.2)}
+.signature-body{padding:6px 14px;font-size:11px;color:#6b21a8;word-break:break-all;white-space:pre-wrap;border-bottom:1px solid #e9d5ff;max-height:120px;overflow-y:auto;background:rgba(147,51,234,.02)}
+.signature-body.collapsed{display:none}
+
+.reflect-tag{display:inline-block;padding:2px 6px;border-radius:var(--radius);font-size:.7rem;font-weight:600;margin-left:6px}
+.reflect-tag.done{background:#dcfce7;color:#166534}.reflect-tag.failed{background:#fee2e2;color:#991b1b}
+.reflect-tag.pending{background:#fef3c7;color:#92400e}.reflect-tag.processing{background:#dbeafe;color:#1e40af}
+
+/* Markdown rendered content */
+.block.text.md-rendered{white-space:normal;line-height:1.6}
+.block.text.md-rendered p{margin:.4em 0}
+.block.text.md-rendered h1{font-size:16px;font-weight:600;margin:.5em 0 .3em}
+.block.text.md-rendered h2{font-size:15px;font-weight:600;margin:.5em 0 .3em}
+.block.text.md-rendered h3,.block.text.md-rendered h4,.block.text.md-rendered h5,.block.text.md-rendered h6{font-size:15px;font-weight:600;margin:.4em 0 .2em}
+.block.text.md-rendered pre{background:#1e1e1e;color:#d4d4d4;padding:10px;border-radius:6px;overflow-x:auto;margin:.5em 0;max-width:100%}
+.block.text.md-rendered code{background:var(--muted);padding:1px 4px;border-radius:3px;font-size:.9em}
+.block.text.md-rendered pre code{background:none;padding:0}
+.block.text.md-rendered ul,.block.text.md-rendered ol{margin:.4em 0;padding-left:1.5em}
+.block.text.md-rendered blockquote{border-left:3px solid var(--border);padding-left:10px;color:var(--muted-foreground);margin:.4em 0}
+.block.text.md-rendered table{border-collapse:collapse;margin:.5em 0}
+.block.text.md-rendered th,.block.text.md-rendered td{border:1px solid var(--border);padding:4px 8px;font-size:.9em}
+
+/* Collapsible long text */
+.block.text.collapsible{position:relative}
+.block.text.collapsible.collapsed{max-height:300px;overflow:hidden}
+.block.text.collapsible.collapsed::after{content:'';position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(transparent,var(--accent));pointer-events:none}
+.text-toggle-btn{display:block;width:100%;padding:4px 0;margin-top:4px;background:none;border:1px dashed var(--primary);border-radius:4px;color:var(--primary);font-size:12px;cursor:pointer;text-align:center}
+.text-toggle-btn:hover{background:var(--accent)}
+
+.load-more-status{padding:8px 14px;font-size:11px;color:var(--muted-foreground);text-align:center;border-top:1px solid var(--border);flex-shrink:0}
+
+.btn{border:1px solid var(--border);background:var(--card);color:var(--foreground);padding:5px 10px;border-radius:var(--radius);cursor:pointer;font-size:.78rem}
+.btn.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
+.btn.sm{padding:3px 7px;font-size:.72rem}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+
+.tab-bar{display:flex;border-bottom:1px solid var(--border);padding:0 12px}
+.tab-bar button{padding:8px 14px;border:none;border-bottom:2px solid transparent;background:none;color:var(--muted-foreground);cursor:pointer;font-size:.82rem}
+.tab-bar button.active{color:var(--foreground);border-bottom-color:var(--primary)}
+
+.highlight-block{animation:highlightPulse .8s ease-out}
+@keyframes highlightPulse{0%{box-shadow:0 0 0 3px var(--primary)}100%{box-shadow:none}}
+{% endblock %}
+{% block content %}
+<div id="datasetApp">{% raw %}
+  <div class="ds-wrap">
+    <!-- Left panel: trajectory list -->
+    <div class="ds-left">
+      <div class="filter-bar">
+        <select v-model="trajFilter">
+          <option value="all">全部</option>
+          <option value="has_failed">有失败</option>
+          <option value="done">已完成</option>
+          <option value="processing">处理中</option>
+        </select>
+        <button class="btn sm" @click="loadTrajectories">刷新</button>
+      </div>
+      <div class="traj-list">
+        <div v-for="t in filteredTrajectories" :key="t.trajectory_id" class="traj-item" :class="{active:selectedTrajId===t.trajectory_id}" @click="selectTrajectory(t)">
+          <div class="name">{{t.session_id}}</div>
+          <div class="meta">{{shortPath(t.trajectory_path)}}</div>
+          <div class="counts">
+            <span class="ok">✓ {{t.done||0}}</span>
+            <span class="bad">✗ {{t.failed||0}}</span>
+            <span class="warn">⏳ {{t.pending||0}}</span>
+            <span>📊 {{t.total_tasks||0}}</span>
+          </div>
+        </div>
+        <div v-if="trajLoadingMore" style="padding:12px;text-align:center;color:var(--muted-foreground);font-size:.78rem">加载中...</div>
+        <div v-if="!filteredTrajectories.length&&!trajLoading" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">{{trajectories.length?'无匹配项':'暂无轨迹'}}</div>
+        <div v-if="trajLoading&&!trajectories.length" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">加载中...</div>
+      </div>
+      <div v-if="trajTotal>0" class="load-more-status">已加载 {{trajectories.length}} / 共 {{trajTotal}}</div>
+    </div>
+
+    <!-- Center panel: chat-view conversation rendering -->
+    <div class="ds-center" ref="centerPanel">
+      <div v-if="selectedTrajId" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <b>{{currentTrajSessionId}}</b>
+          <small style="margin-left:8px;color:var(--muted-foreground)">{{currentTrajPath}}</small>
+        </div>
+        <div class="mode-toggle">
+          <button :class="{active:viewMode==='reflect'}" @click="viewMode='reflect'">Reflect</button>
+          <button :class="{active:viewMode==='original'}" @click="viewMode='original'">Original</button>
+        </div>
+      </div>
+      <div v-if="mergedData" ref="messagesContainer" id="chatMessages"></div>
+      <div v-else-if="selectedTrajId" style="padding:40px;text-align:center;color:var(--muted-foreground)">加载对话内容中...</div>
+      <div v-else style="padding:60px;text-align:center;color:var(--muted-foreground)">← 请从左侧选择一个 Trajectory</div>
+    </div>
+
+    <!-- Right panel: status + issues -->
+    <div class="ds-right">
+      <div class="tab-bar">
+        <button :class="{active:rightTab==='issues'}" @click="rightTab='issues'">问题</button>
+        <button :class="{active:rightTab==='failed'}" @click="rightTab='failed'">失败列表</button>
+        <button :class="{active:rightTab==='exports'}" @click="rightTab='exports'">导出</button>
+      </div>
+
+      <div class="section" v-if="currentTrajSessionId">
+        <h4>当前 Trajectory 统计</h4>
+        <div class="stat-row">
+          <span class="stat">✓ 成功 <b>{{currentTrajStats.done}}</b></span>
+          <span class="stat">✗ 失败 <b>{{currentTrajStats.failed}}</b></span>
+          <span class="stat">⏳ 等待 <b>{{currentTrajStats.pending}}</b></span>
+          <span class="stat">⚙ 处理中 <b>{{currentTrajStats.processing}}</b></span>
+        </div>
+      </div>
+      <div class="section" v-if="runInfo">
+        <h4>Run 信息</h4>
+        <div style="font-size:.78rem">
+          <div>状态: <b>{{runInfo.status}}</b></div>
+          <div>模型: {{runInfo.reflection_model}}</div>
+          <div>方法: {{runInfo.method}}</div>
+          <div>总进度: {{runInfo.done||0}}/{{runInfo.total_count||0}} (失败 {{runInfo.failed||0}})</div>
+        </div>
+      </div>
+
+      <div v-show="rightTab==='issues'" class="issue-list">
+        <div v-for="task in issueTasks" :key="task.uuid" class="issue-item">
+          <div class="path" @click="scrollToBlock(task.block_path)">{{task.block_path}}</div>
+          <div v-if="task.last_error" class="err">{{task.last_error}}</div>
+          <div class="meta">
+            重试 {{task.retry_count}}/{{task.max_retries}}
+            <span v-if="task.last_attempt_at"> · {{formatTime(task.last_attempt_at)}}</span>
+          </div>
+          <div style="margin-top:4px">
+            <button class="btn sm" @click="retryTask(task.uuid)">重试</button>
+            <button class="btn sm" @click="scrollToBlock(task.block_path)">定位</button>
+          </div>
+        </div>
+        <div v-if="!issueTasks.length" style="padding:20px;text-align:center;font-size:.8rem;color:var(--muted-foreground)">无问题项</div>
+      </div>
+
+      <div v-show="rightTab==='failed'" class="issue-list">
+        <div style="padding:8px 12px" v-if="failedTasks.length">
+          <button class="btn sm primary" @click="retryAllFailed">批量重试 ({{failedTasks.length}})</button>
+        </div>
+        <div v-for="task in failedTasks" :key="task.uuid" class="issue-item">
+          <div class="path" @click="scrollToBlock(task.block_path)">{{task.session_id}} / {{task.block_path}}</div>
+          <div class="err">{{task.last_error}}</div>
+          <div class="meta">重试 {{task.retry_count}}/{{task.max_retries}}</div>
+        </div>
+        <div v-if="!failedTasks.length" style="padding:20px;text-align:center;font-size:.8rem;color:var(--muted-foreground)">无失败任务</div>
+      </div>
+
+      <div v-show="rightTab==='exports'" class="issue-list">
+        <div style="padding:8px 12px">
+          <button class="btn sm primary" @click="exportRun" :disabled="!runId">导出全部</button>
+          <button class="btn sm" @click="uploadObs" :disabled="!runId" style="margin-left:4px">上传OBS</button>
+        </div>
+        <div v-for="t in exportedTrajectories" :key="t.trajectory_id" class="issue-item">
+          <div class="name" style="font-weight:600">{{t.session_id}}</div>
+          <div class="meta">{{t.output_path||'未导出'}}</div>
+          <div v-if="t.exported_at" class="meta">导出于 {{formatTime(t.exported_at)}}</div>
+        </div>
+        <div v-if="!exportedTrajectories.length" style="padding:20px;text-align:center;font-size:.8rem;color:var(--muted-foreground)">暂无导出记录</div>
+      </div>
+    </div>
+  </div>
+{% endraw %}</div>
+<script>
+if (typeof marked !== 'undefined') {
+    marked.setOptions({ breaks: true, gfm: true });
+}
+
+function _esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function _looksLikeMarkdown(text) {
+    return /^#{1,6}\s|^\s*[-*+]\s|\*\*|__|\[.*\]\(.*\)|```|^\s*>\s|^\|.*\|/m.test(text);
+}
+
+function _renderTextBlock(text) {
+    var el = document.createElement('div');
+    el.className = 'block text';
+    if (typeof marked !== 'undefined' && _looksLikeMarkdown(text)) {
+        el.classList.add('md-rendered');
+        el.innerHTML = marked.parse(text);
+    } else {
+        el.textContent = text;
+    }
+    if (text.length > 1500) {
+        var wrapper = document.createElement('div');
+        wrapper.style.cssText = 'display:flex;flex-direction:column;min-width:0;max-width:100%';
+        el.classList.add('collapsible', 'collapsed');
+        wrapper.appendChild(el);
+        var btn = document.createElement('button');
+        btn.className = 'text-toggle-btn';
+        btn.textContent = '展开全部';
+        btn.onclick = function() {
+            var c = el.classList.toggle('collapsed');
+            btn.textContent = c ? '展开全部' : '收起';
+        };
+        wrapper.appendChild(btn);
+        return wrapper;
+    }
+    return el;
+}
+
+function _renderToolUseBlock(block) {
+    var el = document.createElement('div');
+    el.className = 'block tool-use';
+    var hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = '<span class="badge badge-tool-use">tool_use</span>' +
+        '<span class="tool-name">' + _esc(block.name || '') + '</span>' +
+        '<span class="tool-id">' + _esc(block.id || '') + '</span>';
+    el.appendChild(hdr);
+    var body = document.createElement('div');
+    body.className = 'block-body';
+    var input = block.input || {};
+    if (input.command !== undefined) {
+        var lbl = document.createElement('div');
+        lbl.className = 'cmd-label';
+        lbl.textContent = '$ command';
+        var pre = document.createElement('pre');
+        pre.className = 'cmd-pre';
+        pre.textContent = input.command;
+        body.appendChild(lbl);
+        body.appendChild(pre);
+    } else if (typeof input === 'object') {
+        var keys = Object.keys(input);
+        if (keys.length) {
+            var kv = document.createElement('div');
+            kv.className = 'input-kv';
+            for (var ki = 0; ki < keys.length; ki++) {
+                var row = document.createElement('div');
+                row.className = 'kv-row';
+                var keyEl = document.createElement('span');
+                keyEl.className = 'kv-key';
+                keyEl.textContent = keys[ki] + ':';
+                var valEl = document.createElement('span');
+                valEl.className = 'kv-val';
+                var v = input[keys[ki]];
+                valEl.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+                row.appendChild(keyEl);
+                row.appendChild(valEl);
+                kv.appendChild(row);
+            }
+            body.appendChild(kv);
+        }
+    }
+    el.appendChild(body);
+    return el;
+}
+
+function _renderToolResultBlock(block) {
+    var isError = block.is_error;
+    var el = document.createElement('div');
+    el.className = 'block tool-result' + (isError ? ' is-error' : '');
+    var hdr = document.createElement('div');
+    hdr.className = 'block-hdr';
+    hdr.innerHTML = '<span class="badge ' + (isError ? 'badge-error' : 'badge-tool-result') + '">' + (isError ? 'error' : 'tool_result') + '</span>' +
+        '<span class="tool-id">' + _esc(block.tool_use_id || '') + '</span>';
+    el.appendChild(hdr);
+    var body = document.createElement('div');
+    body.className = 'block-body';
+    var rawContent = block.content;
+    var text = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent, null, 2);
+    var pre = document.createElement('pre');
+    pre.className = 'result-pre' + (isError ? ' is-error' : '');
+    pre.textContent = text || '(no output)';
+    body.appendChild(pre);
+    el.appendChild(body);
+    return el;
+}
+
+function _renderThinkingBlock(block, viewMode, tasks) {
+    var el = document.createElement('div');
+    el.className = 'block reasoning' + (block.reflect && block.reflect.status === 'failed' ? ' has-error' : '');
+    if (block.signature) {
+        var bp = '';
+        if (tasks) {
+            for (var i = 0; i < tasks.length; i++) {
+                if (block.signature && tasks[i].signature === block.signature) { bp = tasks[i].block_path; break; }
+            }
+        }
+        if (bp) el.id = 'block-' + bp;
+        var sigRow = document.createElement('div');
+        sigRow.className = 'signature-row';
+        sigRow.innerHTML = '<span class="reasoning-chevron collapsed">&#9660;</span><span>🔏 signature (' + block.signature.length + ' chars)</span>';
+        sigRow.onclick = function() {
+            var body = sigRow.nextElementSibling;
+            if (body) { body.classList.toggle('collapsed'); sigRow.querySelector('.reasoning-chevron').classList.toggle('collapsed'); }
+        };
+        el.appendChild(sigRow);
+        var sigBody = document.createElement('div');
+        sigBody.className = 'signature-body collapsed';
+        sigBody.textContent = block.signature;
+        el.appendChild(sigBody);
+    }
+    var summary = document.createElement('div');
+    summary.className = 'reasoning-summary';
+    if (viewMode === 'reflect' && block.reflect) {
+        var reflectText = block.reflect.text || '';
+        var statusCls = block.reflect.status || '';
+        var statusMap = {done:'完成',failed:'失败',pending:'等待',processing:'处理中'};
+        summary.innerHTML = '<span class="reasoning-chevron collapsed">&#9660;</span><span>Reflect 思考 (' + reflectText.length + ' 字)<span class="reflect-tag ' + _esc(statusCls) + '">' + _esc(statusMap[statusCls] || statusCls) + '</span></span>';
+    } else {
+        var thinkingText = block.thinking || '';
+        summary.innerHTML = '<span class="reasoning-chevron collapsed">&#9660;</span><span>思考过程 (' + thinkingText.length + ' 字)</span>';
+    }
+    summary.onclick = function() {
+        var body = summary.nextElementSibling;
+        if (body) { body.classList.toggle('collapsed'); summary.querySelector('.reasoning-chevron').classList.toggle('collapsed'); }
+    };
+    el.appendChild(summary);
+    var thinkBody = document.createElement('div');
+    thinkBody.className = 'reasoning-body collapsed';
+    if (viewMode === 'reflect' && block.reflect) {
+        thinkBody.textContent = block.reflect.text || block.reflect.error || '处理中...';
+    } else {
+        thinkBody.textContent = block.thinking || '(无内容)';
+    }
+    el.appendChild(thinkBody);
+    if (block.reflect && block.reflect.status === 'failed') {
+        var errDiv = document.createElement('div');
+        errDiv.style.cssText = 'padding:6px 14px;font-size:.75rem;color:var(--destructive);border-top:1px solid #fca5a5';
+        errDiv.textContent = '错误: ' + (block.reflect.error || '');
+        el.appendChild(errDiv);
+    }
+    return el;
+}
+
+function renderChatMessages(container, mergedData, viewMode, tasks) {
+    container.innerHTML = '';
+    var msgs = (mergedData && mergedData.messages) || [];
+    if (!msgs.length && mergedData && mergedData.request) msgs = mergedData.request.messages || [];
+    for (var mi = 0; mi < msgs.length; mi++) {
+        var m = msgs[mi];
+        var role = m.role || 'unknown';
+        var blocks = [];
+        if (typeof m.content === 'string') {
+            blocks = [{type: 'text', text: m.content}];
+        } else if (Array.isArray(m.content)) {
+            blocks = m.content;
+        } else if (m.content) {
+            blocks = [{type: 'text', text: JSON.stringify(m.content)}];
+        }
+        var displayRole = role === 'tool' ? 'user' : role;
+        var row = document.createElement('div');
+        row.className = 'msg-row ' + displayRole;
+        row.id = 'msg-' + mi;
+        var avatar = document.createElement('div');
+        avatar.className = 'avatar ' + displayRole;
+        avatar.textContent = displayRole === 'user' ? '👤' : '🤖';
+        var col = document.createElement('div');
+        col.className = 'msg-bubble-col';
+        for (var bi = 0; bi < blocks.length; bi++) {
+            var b = blocks[bi];
+            var blockEl = null;
+            if (b.type === 'text') {
+                blockEl = _renderTextBlock(b.text || '');
+            } else if (b.type === 'thinking') {
+                blockEl = _renderThinkingBlock(b, viewMode, tasks);
+            } else if (b.type === 'tool_use') {
+                blockEl = _renderToolUseBlock(b);
+            } else if (b.type === 'tool_result') {
+                blockEl = _renderToolResultBlock(b);
+            } else {
+                blockEl = document.createElement('div');
+                blockEl.className = 'block text';
+                blockEl.style.fontSize = '12px';
+                blockEl.style.color = 'var(--muted-foreground)';
+                blockEl.textContent = JSON.stringify(b, null, 2);
+            }
+            if (blockEl) col.appendChild(blockEl);
+        }
+        if (displayRole === 'user') {
+            row.appendChild(avatar);
+            row.appendChild(col);
+        } else {
+            row.appendChild(col);
+            row.appendChild(avatar);
+        }
+        container.appendChild(row);
+    }
+}
+
+new Vue({el:'#datasetApp',data:{
+    recordId:{{ record_id }},
+    runId:new URLSearchParams(location.search).get('run_id')||'',
+    trajectories:[],selectedTrajId:'',mergedData:null,currentTasks:[],runInfo:null,failedTasks:[],
+    viewMode:'reflect',trajFilter:'all',rightTab:'issues',timer:null,
+    trajOffset:0,trajTotal:0,trajLoading:false,trajLoadingMore:false,TRAJ_PAGE:50
+},computed:{
+    filteredTrajectories:function(){var self=this;return this.trajectories.filter(function(t){if(self.trajFilter==='all')return true;if(self.trajFilter==='has_failed')return(t.failed||0)>0;if(self.trajFilter==='done')return(t.pending||0)===0&&(t.processing||0)===0;if(self.trajFilter==='processing')return(t.processing||0)>0||(t.pending||0)>0;return true})},
+    currentTrajSessionId:function(){var t=this._findCurrentTraj();return t?t.session_id:''},
+    currentTrajPath:function(){var t=this._findCurrentTraj();return t?this.shortPath(t.trajectory_path):''},
+    currentTrajStats:function(){var t=this._findCurrentTraj();return{done:(t&&t.done)||0,failed:(t&&t.failed)||0,pending:(t&&t.pending)||0,processing:(t&&t.processing)||0}},
+    issueTasks:function(){return this.currentTasks.filter(function(t){return t.status==='failed'||t.status==='processing'})},
+    exportedTrajectories:function(){return this.trajectories.filter(function(t){return t.output_path})}
+},watch:{
+    viewMode:function(){this._renderChat()},
+    mergedData:function(){var self=this;this.$nextTick(function(){self._renderChat()})},
+    trajFilter:function(){this.loadTrajectories()}
+},async mounted(){
+    if(!this.runId&&this.recordId){try{var runs=await this.json('/api/reflection/runs?source_export_id='+this.recordId);if(runs.length)this.runId=runs[0].run_id}catch(e){}}
+    if(this.runId){await this.loadRun();await this.loadTrajectories();if(this.trajectories.length)this.selectTrajectory(this.trajectories[0])}
+    this.setupTimer();
+},beforeDestroy:function(){clearInterval(this.timer)},
+methods:{
+    headers:function(){return{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
+    async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},
+    _findCurrentTraj:function(){var id=this.selectedTrajId;for(var i=0;i<this.trajectories.length;i++){if(this.trajectories[i].trajectory_id===id)return this.trajectories[i]}return null},
+    _renderChat:function(){var el=document.getElementById('chatMessages');if(el&&this.mergedData){renderChatMessages(el,this.mergedData,this.viewMode,this.currentTasks)}},
+    setupTimer:function(){clearInterval(this.timer);if(this.runInfo&&this.runInfo.status==='running'){var self=this;this.timer=setInterval(function(){self.refreshAll()},5000)}},
+    async loadRun(){try{this.runInfo=await this.json('/api/reflection/runs/'+this.runId);this.setupTimer()}catch(e){}},
+    async loadTrajectories(){if(!this.runId)return;try{this.trajLoading=true;this.trajOffset=0;var raw=await this.json('/api/reflection/runs/'+this.runId+'/trajectories?offset=0&limit='+this.TRAJ_PAGE);if(Array.isArray(raw)){this.trajectories=raw;this.trajTotal=raw.length}else{this.trajectories=raw.items||[];this.trajTotal=raw.total||0}this.trajLoading=false;this.$nextTick(this._bindTrajScroll)}catch(e){this.trajLoading=false}},
+    async loadMoreTrajectories(){if(this.trajLoadingMore||this.trajectories.length>=this.trajTotal)return;this.trajLoadingMore=true;try{var raw=await this.json('/api/reflection/runs/'+this.runId+'/trajectories?offset='+this.trajectories.length+'&limit='+this.TRAJ_PAGE);var items=Array.isArray(raw)?raw:(raw.items||[]);for(var i=0;i<items.length;i++){this.trajectories.push(items[i])}if(!Array.isArray(raw))this.trajTotal=raw.total||this.trajTotal;this.trajLoadingMore=false}catch(e){this.trajLoadingMore=false}},
+    async loadFailedTasks(){if(!this.runId)return;try{this.failedTasks=await this.json('/api/reflection/tasks?run_id='+this.runId+'&status=failed')}catch(e){}},
+    async selectTrajectory(t){
+        this.selectedTrajId=t.trajectory_id;
+        try{
+            var data=await this.json('/api/reflection/trajectories/'+t.trajectory_id+'/merged?run_id='+this.runId);
+            this.mergedData=data.merged;this.currentTasks=data.tasks||[];
+            await this.loadFailedTasks();
+        }catch(e){this.mergedData=null;this.currentTasks=[]}
+    },
+    async refreshAll(){await this.loadRun();var oldLen=this.trajectories.length;try{var lim=oldLen>this.TRAJ_PAGE?oldLen:this.TRAJ_PAGE;var raw=await this.json('/api/reflection/runs/'+this.runId+'/trajectories?offset=0&limit='+lim);if(Array.isArray(raw)){this.trajectories=raw;this.trajTotal=raw.length}else{this.trajectories=raw.items||[];this.trajTotal=raw.total||0}}catch(e){}if(this.selectedTrajId){var t=this._findCurrentTraj();if(t)await this.selectTrajectory(t)}},
+    shortPath:function(p){if(!p)return'';var parts=p.split('/');return parts.length>2?'...'+parts.slice(-2).join('/'):p},
+    formatTime:function(ts){if(!ts)return'';return new Date(ts*1000).toLocaleString('zh-CN')},
+    scrollToBlock:function(blockPath){var el=document.getElementById('block-'+blockPath);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('highlight-block');setTimeout(function(){el.classList.remove('highlight-block')},1000)}},
+    async retryTask(uuid){try{await this.json('/api/reflection/tasks/'+uuid+'/retry',{method:'POST',headers:this.headers()});await this.refreshAll()}catch(e){alert(e.message)}},
+    async retryAllFailed(){if(!confirm('确认重试全部 '+this.failedTasks.length+' 个失败任务？'))return;try{var r=await this.json('/api/reflection/tasks/retry-failed',{method:'POST',headers:this.headers(),body:JSON.stringify({run_id:this.runId})});alert('已重置 '+r.retried+' 个失败任务');await this.refreshAll()}catch(e){alert(e.message)}},
+    async exportRun(){try{var r=await this.json('/api/reflection/runs/'+this.runId+'/export',{method:'POST',headers:this.headers()});alert('已导出 '+r.count+' 个文件到 '+r.root);await this.loadTrajectories()}catch(e){alert(e.message)}},
+    async uploadObs(){try{var r=await this.json('/api/reflection/runs/'+this.runId+'/upload-obs',{method:'POST',headers:this.headers()});alert('开始上传到 '+(r.dst||'OBS'))}catch(e){alert(e.message)}},
+    _bindTrajScroll:function(){var listEl=this.$el.querySelector('.traj-list');if(!listEl||listEl._trajBound)return;listEl._trajBound=true;var self=this;listEl.addEventListener('scroll',function(){if(self.trajLoadingMore||self.trajectories.length>=self.trajTotal)return;if(listEl.scrollTop+listEl.clientHeight>=listEl.scrollHeight-60){self.loadMoreTrajectories()}})}
+}})
+</script>
+{% endblock %}

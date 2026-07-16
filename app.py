@@ -46,6 +46,7 @@ from utils.backup_routes import register_backup_routes
 from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 from utils.debug_logs import write_debug, debug_filename, register_debug_routes
+from src.thinking_reflection import register_reflection_routes
 from utils.req_index import (
     append_index_anthropic, append_index_openai, append_index_responses,
     load_index, get_index_counts,
@@ -75,6 +76,7 @@ MONITOR_AUTH_EXACT_PATHS = {
     "/failures",
     "/sessions",
     "/keys",
+    "/thinking",
     "/channels",
     "/users",
     "/backup",
@@ -96,6 +98,7 @@ MONITOR_AUTH_PREFIX_PATHS = (
     "/api/channels/",
     "/api/export/",
     "/api/backup/",
+    "/api/reflection/",
 )
 MONITOR_AUTH_PUBLIC_PATHS = {
     "/hi",
@@ -122,6 +125,8 @@ _PERM_PREFIX_MAP = (
     ("/channels/", "channels"),
     ("/api/channels/", "channels"),
     ("/api/backup/", "backup"),
+    ("/thinking", "thinking"),
+    ("/api/reflection/", "thinking"),
 )
 
 LOGS_DIR = get_log_dir("logs_all")
@@ -237,12 +242,19 @@ def _required_permission(path: str) -> str:
 
 
 def _ctx(request: Request, active_page: str, **extra) -> dict:
-    perms_raw = request.session.get("monitor_permissions") or ""
-    perms_list = [p.strip() for p in perms_raw.split(",") if p.strip()]
+    if _is_monitor_auth_enabled():
+        perms_raw = request.session.get("monitor_permissions") or ""
+        perms_list = [p.strip() for p in perms_raw.split(",") if p.strip()]
+        role = request.session.get("monitor_role", "user")
+        user_name = request.session.get("monitor_user", "")
+    else:
+        perms_list = []
+        role = "admin"
+        user_name = ""
     ctx = {
         "active_page": active_page,
-        "user_role": request.session.get("monitor_role", "user"),
-        "user_name": request.session.get("monitor_user", ""),
+        "user_role": role,
+        "user_name": user_name,
         "user_permissions": perms_list,
     }
     ctx.update(extra)
@@ -1624,6 +1636,7 @@ register_export_routes(app, LOGS_DIR)
 register_backup_routes(app, LOGS_DIR, port=os.getenv("PROXY_PORT", "4000"))
 register_user_routes(app, templates)
 register_debug_routes(app, LOGS_DEBUG, STARTUP_DATE_TAG)
+register_reflection_routes(app, templates)
 
 
 if __name__ == "__main__":

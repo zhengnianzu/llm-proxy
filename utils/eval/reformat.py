@@ -125,6 +125,50 @@ def _process_one(args: tuple) -> Optional[dict]:
     }
 
 
+def _copy_session_to_outdir(args: tuple) -> None:
+    """缓存命中时，仍需将合并后的 session JSON 写到 out_dir。"""
+    src_dir_s, out_dir_s, first_ts, latest_file, trace_list = args
+    src_dir = Path(src_dir_s)
+    out_dir = Path(out_dir_s)
+
+    stem = latest_file
+    if stem.endswith("-req.json"):
+        stem = stem[:-len("-req.json")]
+    elif stem.endswith(".json"):
+        stem = stem[:-len(".json")]
+
+    tri = _resolve_triplet(src_dir, stem)
+    if "req" not in tri:
+        return
+
+    try:
+        merged = _load_json(tri["req"])
+    except Exception:
+        return
+
+    if "headers" in tri:
+        try:
+            merged["header"] = _load_json(tri["headers"])
+        except Exception:
+            merged["header"] = {}
+    else:
+        merged["header"] = {}
+
+    if "res" in tri:
+        try:
+            merged["response"] = parse_response(_load_json(tri["res"]))
+        except Exception:
+            merged["response"] = {}
+    else:
+        merged["response"] = {}
+
+    session_dir = out_dir / first_ts
+    session_dir.mkdir(parents=True, exist_ok=True)
+    out_file = session_dir / f"{stem}.json"
+    with open(out_file, "w", encoding="utf-8") as fh:
+        json.dump(merged, fh, ensure_ascii=False, separators=(",", ":"))
+
+
 def _rebuild_from_cache(entry: dict) -> Optional[dict]:
     ev = entry.get("_eval")
     if not ev or not isinstance(ev, dict):
@@ -264,6 +308,7 @@ def reformat_and_analyze(
 
     tasks = []
     cached_results = []
+    copy_tasks = []
     for sess in entries:
         first_ts = sess.get("first_ts") or sess.get("_key", "")
         latest_file = sess.get("latest_file", "")
@@ -274,8 +319,12 @@ def reformat_and_analyze(
         if cached:
             cached["log_dir"] = Path(src_dir).name
             cached_results.append(cached)
+            copy_tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list))
         else:
             tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list))
+
+    for ct in copy_tasks:
+        _copy_session_to_outdir(ct)
 
     results = list(cached_results)
     if cached_results:

@@ -1,0 +1,568 @@
+{% extends "_layout.html" %}
+{% block title %}解析任务{% endblock %}
+{% block mobile_title %}解析任务{% endblock %}
+{% block head_extra %}<script src="/static/js/vue.min.js"></script>{% endblock %}
+{% block page_styles %}
+.page-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:18px}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card);color:var(--foreground);padding:5px 9px;border-radius:var(--radius);font-size:.78rem}.btn.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}.btn.danger{background:var(--destructive);color:#fff;border-color:var(--destructive)}.btn.warn{background:#e67e00;color:#fff;border-color:#e67e00}.btn:disabled{opacity:.45;cursor:not-allowed}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}.stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 18px;min-width:100px;flex:1}.stat-card .num{font-size:1.6rem;font-weight:700}.stat-card .label{font-size:.76rem;color:var(--muted-foreground);margin-top:2px}.ok{color:var(--success)}.bad{color:var(--destructive)}.warn{color:#e67e00}
+.config-panel{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 18px;margin-bottom:18px}
+.config-panel h4{margin:0 0 10px 0;font-size:.86rem;font-weight:600;color:var(--muted-foreground)}
+.config-row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+.config-field{display:flex;flex-direction:column;gap:3px;min-width:140px}
+.config-field label{font-size:.74rem;color:var(--muted-foreground)}
+.config-field input,.config-field select{padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--background);color:var(--foreground);font-size:.82rem}
+.config-field input[type=number]{width:80px}
+.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:var(--radius-lg);margin-bottom:16px}table{width:100%;border-collapse:collapse;min-width:900px}th,td{padding:8px 12px;border-bottom:1px solid var(--border);font-size:.82rem;text-align:left}th{background:var(--muted);color:var(--muted-foreground)}
+.export-row:hover{background:var(--accent)}
+.task-row{background:var(--card)}.task-row td{padding:5px 12px 5px 42px;font-size:.78rem;font-family:var(--font-mono,monospace)}.task-row:hover{background:var(--accent)}
+.badge{padding:3px 8px;border-radius:999px;background:var(--muted);white-space:nowrap;font-size:.76rem}.badge.running,.badge.processing{color:var(--primary)}.badge.completed,.badge.done{color:var(--success)}.badge.failed{color:var(--destructive)}.badge.draft,.badge.paused,.badge.pending{color:#e67e00}
+.empty{text-align:center;padding:44px;color:var(--muted-foreground)}
+.drawer-bg{position:fixed;inset:0;background:#0004;z-index:998}.drawer{position:fixed;top:0;right:0;width:560px;max-width:90vw;height:100vh;background:var(--card);box-shadow:-4px 0 20px #0003;z-index:999;display:flex;flex-direction:column;overflow:hidden}.drawer-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}.drawer-body{flex:1;overflow:auto;padding:16px 20px}
+.test-log{padding:14px;background:#0d1117;color:#c9d1d9;border-radius:var(--radius);font-family:var(--font-mono,monospace);font-size:.78rem;white-space:pre-wrap;word-break:break-all;max-height:500px;overflow-y:auto;line-height:1.6}.test-log .log-info{color:#8b949e}.test-log .log-ok{color:#4ade80}.test-log .log-error{color:#ff6b6b}
+.test-field{margin:8px 0}.test-field label{display:block;font-size:.8rem;color:var(--muted-foreground);margin-bottom:4px}.test-field input,.test-field select,.test-field textarea{width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--background);color:var(--foreground);font-size:.82rem;font-family:inherit}.test-field textarea{font-family:var(--font-mono,monospace);resize:vertical}
+.ck-cell{width:32px;text-align:center}input[type=checkbox]{cursor:pointer}
+.log-panel{font-family:var(--font-mono,monospace);font-size:.78rem;line-height:1.6;background:#1a1a2e;color:#e0e0e0;padding:12px;border-radius:var(--radius);min-height:200px;max-height:100%;overflow-y:auto}.log-panel .log-error{color:#ff6b6b}.log-panel .log-ts{color:#888;margin-right:6px}.live-dot{font-size:.72rem;color:#e67e00;font-weight:400;margin-left:6px}
+.run-info{margin-bottom:12px;font-size:.82rem}.run-info .row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)}.run-info .lbl{color:var(--muted-foreground)}
+.progress-wrap{margin-bottom:14px}.progress-bar{height:18px;background:var(--muted);border-radius:9px;overflow:hidden;display:flex}.progress-bar .seg{height:100%;transition:width .3s}.seg-done{background:var(--success)}.seg-fail{background:var(--destructive)}.seg-run{background:var(--primary);animation:pulse 1.2s infinite alternate}@keyframes pulse{from{opacity:.7}to{opacity:1}}.progress-text{display:flex;justify-content:space-between;font-size:.76rem;color:var(--muted-foreground);margin-top:4px}
+{% endblock %}
+{% block content %}
+<div id="tasksApp">{% raw %}
+  <div class="page-head">
+    <div><h2>解析任务</h2><p class="text-muted">配置、执行与监控 Reflection 解析任务</p></div>
+    <div class="toolbar">
+      <button class="btn primary" @click="load">刷新</button>
+      <button class="btn" @click="openTest">单条测试</button>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat-card"><div class="num">{{stats.total}}</div><div class="label">导入任务总数</div></div>
+    <div class="stat-card"><div class="num ok">{{stats.done}}</div><div class="label">已完成</div></div>
+    <div class="stat-card"><div class="num warn">{{stats.pending+stats.processing}}</div><div class="label">进行中</div></div>
+    <div class="stat-card"><div class="num bad">{{stats.failed}}</div><div class="label">失败</div></div>
+  </div>
+
+  <!-- Global config panel -->
+  <div class="config-panel">
+    <h4>任务配置</h4>
+    <div class="config-row">
+      <div class="config-field" style="min-width:200px">
+        <label>API Key</label>
+        <select v-model="globalConfig.reflection_api_key_id">
+          <option disabled value="">请选择</option>
+          <option v-for="k in config.keys" :value="k.id">{{k.name||('Key '+k.id)}} · {{k.key}}</option>
+        </select>
+      </div>
+      <div class="config-field" style="min-width:220px">
+        <label>模型</label>
+        <input v-model="globalConfig.reflection_model" placeholder="THINKING:claude-opus-4-8">
+      </div>
+      <div class="config-field">
+        <label>方法</label>
+        <select v-model="globalConfig.method">
+          <option value="bulk">bulk</option>
+          <option value="sentence">sentence</option>
+        </select>
+      </div>
+      <div class="config-field">
+        <label>Workers</label>
+        <input type="number" v-model.number="globalConfig.worker_count" min="1" max="32">
+      </div>
+      <div class="config-field">
+        <label>最大重试</label>
+        <input type="number" v-model.number="globalConfig.max_retries" min="1" max="10">
+      </div>
+      <div class="config-field">
+        <label>Max Tokens</label>
+        <input type="number" v-model.number="globalConfig.max_tokens" min="1" max="65536">
+      </div>
+    </div>
+  </div>
+
+  <!-- Action bar -->
+  <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+    <button class="btn primary" @click="batchStart" :disabled="!hasChecked">启动</button>
+    <button class="btn warn" @click="batchPause" :disabled="!hasChecked">暂停</button>
+    <button class="btn danger" @click="batchCancel" :disabled="!hasChecked">取消</button>
+    <button class="btn" @click="batchRerun" :disabled="!hasChecked">补跑</button>
+  </div>
+
+  <!-- Main table -->
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="ck-cell"><input type="checkbox" @change="toggleAll" :checked="allChecked"></th>
+          <th>名称</th>
+          <th>任务数</th>
+          <th>完成</th>
+          <th>进行中</th>
+          <th>失败</th>
+          <th>状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template v-for="item in rows">
+          <tr class="export-row" :key="'e-'+item.export_id">
+            <td class="ck-cell"><input type="checkbox" v-model="item.checked"></td>
+            <td>
+              <div style="font-weight:600;font-size:.82rem">{{item.key_slot}}</div>
+              <div style="font-size:.74rem;color:var(--muted-foreground)">{{item.created_at||'-'}}</div>
+            </td>
+            <td>{{item.task_total}}</td>
+            <td class="ok">{{item.task_done}}</td>
+            <td class="warn">{{item.task_pending+item.task_processing}}</td>
+            <td class="bad">{{item.task_failed}}</td>
+            <td><span class="badge" :class="item.run_status">{{item.run_status}}</span></td>
+            <td>
+              <button class="btn" @click="toggleExpand(item.export_id)" style="font-size:.72rem">详情</button>
+              <button class="btn" @click="openRunConfig(item)" style="font-size:.72rem">配置</button>
+              <button class="btn" @click="openRunRecord(item)" style="font-size:.72rem">运行记录</button>
+              <button class="btn" @click="openRunDetail(item)" style="font-size:.72rem">日志</button>
+              <button v-if="item.task_failed>0" class="btn warn" @click="singleRerun(item)" style="font-size:.72rem">补跑</button>
+            </td>
+          </tr>
+          <template v-if="expanded[item.export_id]">
+            <tr v-if="item._tasks_loading" :key="'tl-'+item.export_id" class="task-row">
+              <td colspan="8" style="color:var(--muted-foreground)">加载中...</td>
+            </tr>
+            <tr v-for="t in item._tasks" :key="t.uuid" class="task-row">
+              <td></td>
+              <td colspan="2" style="font-size:.76rem">{{t.session_id||'-'}}</td>
+              <td style="font-size:.76rem">{{t.block_path||'-'}}</td>
+              <td><span class="badge" :class="t.status">{{t.status}}</span></td>
+              <td colspan="2" style="font-size:.76rem;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                <template v-if="t.status==='done'">{{t.sentence_count?t.sentence_count+' 句':'-'}}</template>
+                <template v-else-if="t.status==='failed'"><span class="bad">{{t.last_error||'unknown'}}</span></template>
+                <template v-else>-</template>
+              </td>
+              <td>
+                <button v-if="t.status==='failed'" class="btn" style="font-size:.72rem" @click.stop="retryTask(t)">重试</button>
+              </td>
+            </tr>
+            <tr v-if="!item._tasks_loading&&(!item._tasks||!item._tasks.length)" :key="'te-'+item.export_id" class="task-row">
+              <td colspan="8" style="color:var(--muted-foreground)">暂无任务</td>
+            </tr>
+          </template>
+        </template>
+        <tr v-if="!rows.length&&!loading"><td colspan="8" class="empty">暂无已导入的解析任务。请在 Session 管理 页面导入数据集。</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p v-if="error" style="color:var(--destructive);margin-top:12px">{{error}}</p>
+
+  <!-- Run Detail Drawer (logs) -->
+  <template v-if="detailDrawer">
+    <div class="drawer-bg" @click="closeDetail"></div>
+    <div class="drawer">
+      <div class="drawer-head">
+        <h3>运行日志 <span v-if="logPolling" class="live-dot">● 实时</span></h3>
+        <button class="btn" @click="closeDetail">关闭</button>
+      </div>
+      <div class="drawer-body">
+        <div v-if="detailRun" class="run-info">
+          <div class="row"><span class="lbl">Run ID</span><code style="font-size:.78rem">{{detailRun.run_id}}</code></div>
+          <div class="row"><span class="lbl">状态</span><span class="badge" :class="detailRun.status">{{detailRun.status}}</span></div>
+          <div class="row"><span class="lbl">模型</span><span>{{detailRun.reflection_model}}</span></div>
+        </div>
+        <div v-if="detailRun" class="progress-wrap">
+          <div class="progress-bar">
+            <div class="seg seg-done" :style="{width:logProgress.donePct+'%'}"></div>
+            <div class="seg seg-fail" :style="{width:logProgress.failPct+'%'}"></div>
+            <div class="seg seg-run" :style="{width:logProgress.runPct+'%'}"></div>
+          </div>
+          <div class="progress-text">
+            <span>完成 {{logProgress.done}} · 失败 {{logProgress.failed}} · 进行中 {{logProgress.processing}}</span>
+            <span>{{logProgress.done+logProgress.failed}} / {{logProgress.total}}</span>
+          </div>
+        </div>
+        <div class="log-panel" ref="logPanel">
+          <div v-for="e in filteredLogs" :key="e.id"><span class="log-ts">{{fmtTs(e.created_at)}}</span><span :class="{'log-error':e.level==='error'}">{{e.message}}</span></div>
+          <div v-if="!filteredLogs.length" style="color:#888">暂无日志</div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Run Record Drawer -->
+  <template v-if="recordDrawer">
+    <div class="drawer-bg" @click="recordDrawer=false"></div>
+    <div class="drawer">
+      <div class="drawer-head"><h3>运行记录</h3><button class="btn" @click="recordDrawer=false">关闭</button></div>
+      <div class="drawer-body">
+        <div v-if="recordItem" style="margin-bottom:12px;font-size:.82rem">
+          <strong>{{recordItem.key_slot}}</strong> · {{recordItem.created_at||'-'}}
+        </div>
+        <div v-if="recordDetailDir" style="font-family:var(--font-mono,monospace);font-size:.74rem;color:var(--muted-foreground);word-break:break-all;padding:8px 10px;background:var(--muted);border-radius:var(--radius);margin-bottom:14px">
+          详情目录: {{recordDetailDir}}
+        </div>
+        <div v-if="recordRunsLoading" style="color:var(--muted-foreground);font-size:.82rem">加载中...</div>
+        <div v-for="(rr,ri) in recordRuns" :key="rr.run_id" style="border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+              <span class="badge" :class="rr.status">{{rr.status}}</span>
+              <span v-if="rr.launch_type==='rerun'" class="badge" style="background:#e67e0022;color:#e67e00;margin-left:4px">补跑</span>
+              <span v-else class="badge" style="background:var(--primary-foreground);margin-left:4px">启动</span>
+            </div>
+            <code style="font-size:.72rem;color:var(--muted-foreground)">{{rr.run_id}}</code>
+          </div>
+          <div style="font-size:.78rem;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">
+            <span>模型: {{rr.reflection_model||'-'}}</span>
+            <span>方法: {{rr.method||'-'}}</span>
+            <span>Workers: {{rr.worker_count||'-'}}</span>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+            <div style="font-size:.78rem"><span style="color:var(--success)">完成 {{rr.snapshot_done||0}}</span></div>
+            <div style="font-size:.78rem"><span style="color:var(--destructive)">失败 {{rr.snapshot_failed||0}}</span></div>
+            <div style="font-size:.78rem"><span style="color:#e67e00">待处理 {{rr.snapshot_pending||0}}</span></div>
+            <div style="font-size:.78rem">总计 {{rr.snapshot_total||0}}</div>
+          </div>
+          <div style="font-size:.74rem;color:var(--muted-foreground)">
+            <span v-if="rr.created_at">创建: {{fmtFullTs(rr.created_at)}}</span>
+            <span v-if="rr.started_at"> · 开始: {{fmtFullTs(rr.started_at)}}</span>
+            <span v-if="rr.finished_at"> · 结束: {{fmtFullTs(rr.finished_at)}}</span>
+          </div>
+          <div v-if="rr.parent_run_id" style="font-size:.72rem;color:var(--muted-foreground);margin-top:4px">
+            上一轮: {{rr.parent_run_id}}
+          </div>
+        </div>
+        <div v-if="!recordRunsLoading&&!recordRuns.length" style="color:var(--muted-foreground);font-size:.82rem">暂无运行记录</div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Run Config Drawer -->
+  <template v-if="cfgDrawer">
+    <div class="drawer-bg" @click="cfgDrawer=false"></div>
+    <div class="drawer">
+      <div class="drawer-head"><h3>Run 配置</h3><button class="btn" @click="cfgDrawer=false">关闭</button></div>
+      <div class="drawer-body">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          <span class="badge" :class="cfgRun.run_status">{{cfgRun.run_status}}</span>
+          <span style="font-family:var(--font-mono,monospace);font-size:.74rem;color:var(--muted-foreground)">{{cfgRun.run_id}}</span>
+        </div>
+        <div style="margin-bottom:8px;font-size:.78rem;color:var(--muted-foreground)">
+          {{cfgRun.key_slot}} · {{cfgRun.created_at||'-'}}
+        </div>
+        <div style="margin-bottom:12px;font-size:.78rem;color:var(--muted-foreground)">
+          任务: {{cfgRun.task_total||0}} (完成 {{cfgRun.task_done||0}} / 失败 {{cfgRun.task_failed||0}} / 待处理 {{cfgRun.task_pending||0}})
+        </div>
+        <div class="test-field"><label>Endpoint</label><input v-model="cfgForm.reflection_endpoint"></div>
+        <div class="test-field"><label>Model</label><input v-model="cfgForm.reflection_model" placeholder="THINKING:claude-opus-4-8"></div>
+        <div style="display:flex;gap:8px">
+          <div class="test-field" style="flex:1"><label>Method</label><select v-model="cfgForm.method"><option value="bulk">bulk</option><option value="sentence">sentence</option></select></div>
+          <div class="test-field" style="flex:1"><label>Workers</label><input type="number" v-model.number="cfgForm.worker_count" min="1" max="32"></div>
+          <div class="test-field" style="flex:1"><label>Max Retries</label><input type="number" v-model.number="cfgForm.max_retries" min="1" max="10"></div>
+        </div>
+        <div class="test-field"><label>API Key</label>
+          <select v-model="cfgForm.reflection_api_key_id">
+            <option disabled value="">请选择</option>
+            <option v-for="k in config.keys" :value="k.id">{{k.name||('Key '+k.id)}} · {{k.key}}</option>
+          </select>
+        </div>
+        <button class="btn primary" @click="saveRunConfig" :disabled="cfgSaving" style="margin-top:12px;width:100%">
+          {{cfgSaving?'保存中...':'保存配置'}}
+        </button>
+        <p v-if="cfgMsg" :style="{marginTop:'8px',fontSize:'.8rem',color:cfgOk?'var(--success)':'var(--destructive)'}">{{cfgMsg}}</p>
+      </div>
+    </div>
+  </template>
+
+  <!-- Test Drawer -->
+  <template v-if="testDrawer">
+    <div class="drawer-bg" @click="testDrawer=false"></div>
+    <div class="drawer">
+      <div class="drawer-head"><h3>单条测试</h3><button class="btn" @click="testDrawer=false">关闭</button></div>
+      <div class="drawer-body">
+        <p v-if="testError" style="color:var(--destructive);font-size:.82rem;margin-bottom:10px">{{testError}}</p>
+        <div v-if="testPhase==='input'" style="margin-bottom:16px">
+          <div class="test-field"><label>Reflection API Key</label><select v-model="testForm.key_id"><option value="">请选择</option><option v-for="k in config.keys" :value="k.id">{{k.name||('Key '+k.id)}} · {{k.key}}</option></select></div>
+          <div class="test-field"><label>Signature</label><textarea v-model="testForm.signature" rows="3" placeholder="粘贴 signature 字符串..."></textarea></div>
+          <div class="test-field"><label>Original Thinking <small style="color:var(--muted-foreground)">(可选)</small></label><textarea v-model="testForm.thinking" rows="3" placeholder="粘贴原始 thinking 内容..."></textarea></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+            <div class="test-field" style="flex:1"><label>模型</label><input v-model="testForm.model" placeholder="THINKING:claude-opus-4-8"></div>
+            <div class="test-field" style="flex:1"><label>方法</label><select v-model="testForm.method"><option value="bulk">bulk</option><option value="sentence">sentence</option></select></div>
+            <div class="test-field" style="flex:1"><label>Max Tokens</label><input type="number" v-model.number="testForm.max_tokens" min="1" max="65536"></div>
+            <div class="test-field" style="flex:1"><label>Timeout (s)</label><input type="number" v-model.number="testForm.timeout" min="60" max="1200"></div>
+          </div>
+          <button class="btn primary" @click="runTest" :disabled="testLoading" style="margin-top:12px;width:100%">{{testLoading?'请求中...':'发送测试请求'}}</button>
+        </div>
+        <div v-if="testPhase!=='input'">
+          <div class="test-log"><template v-for="(step,i) in testSteps"><span :class="'log-'+step.level">{{step.level==='error'?'✗ ':step.level==='ok'?'✓ ':'● '}}{{step.text}}</span>{{'\n'}}</template><template v-if="testResult&&!testResult.error"><span class="log-ok">--- Output Preview ---</span>{{'\n'}}{{testResult.text}}{{'\n'}}<template v-if="testResult.tool_input"><span class="log-ok">--- Tool Input (JSON) ---</span>{{'\n'}}{{JSON.stringify(testResult.tool_input,null,2)}}{{'\n'}}</template></template></div>
+          <button class="btn" @click="testPhase='input';testSteps=[];testResult=null;testError=''" style="margin-top:14px">重新测试</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+{% endraw %}</div>
+<script>
+new Vue({el:'#tasksApp',data:{
+  config:{source_key_slots:[],keys:[],reflection_base_url:''},
+  rows:[],loading:false,error:'',expanded:{},
+  stats:{total:0,done:0,pending:0,processing:0,failed:0},
+  globalConfig:{reflection_api_key_id:'',reflection_model:'THINKING:claude-opus-4-8',method:'bulk',worker_count:4,max_retries:3,max_tokens:16384},
+  detailDrawer:false,detailRun:null,logEntries:[],logSinceId:0,logPolling:null,
+  recordDrawer:false,recordRuns:[],recordRunsLoading:false,recordItem:null,recordDetailDir:'',
+  cfgDrawer:false,cfgRun:null,cfgForm:{},cfgSaving:false,cfgMsg:'',cfgOk:false,
+  testDrawer:false,testPhase:'input',testSteps:[],testResult:null,testError:'',testLoading:false,
+  testForm:{model:'THINKING:claude-opus-4-8',method:'bulk',signature:'',thinking:'',max_tokens:16384,timeout:600,key_id:''}
+},computed:{
+  hasChecked:function(){for(var i=0;i<this.rows.length;i++){if(this.rows[i].checked)return true}return false},
+  allChecked:function(){if(!this.rows.length)return false;for(var i=0;i<this.rows.length;i++){if(!this.rows[i].checked)return false}return true},
+  checkedExportIds:function(){var ids=[];for(var i=0;i<this.rows.length;i++){if(this.rows[i].checked)ids.push(this.rows[i].export_id)}return ids},
+  filteredLogs:function(){var out=[];for(var i=0;i<this.logEntries.length;i++){if(this.logEntries[i].message.indexOf('认领')<0)out.push(this.logEntries[i])}return out},
+  logProgress:function(){var r=this.detailRun;if(!r)return{done:0,failed:0,processing:0,total:0,donePct:0,failPct:0,runPct:0};var done=r.done||0,failed=r.failed||0,processing=r.processing||0,total=r.total_count||0;if(total===0)return{done:done,failed:failed,processing:processing,total:total,donePct:0,failPct:0,runPct:0};return{done:done,failed:failed,processing:processing,total:total,donePct:(done/total*100).toFixed(1),failPct:(failed/total*100).toFixed(1),runPct:(processing/total*100).toFixed(1)}}
+},async mounted(){try{await this.load()}catch(e){this.error='初始化失败: '+e.message;console.error(e)}},
+beforeDestroy:function(){this.stopLogPoll()},
+methods:{
+  async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},
+  headers:function(){return{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
+  fmtTs:function(ts){if(!ts)return'';return new Date(ts*1000).toTimeString().slice(0,8)},
+  toggleExpand:function(id){this.$set(this.expanded,id,!this.expanded[id]);if(this.expanded[id])this.loadTasks(id)},
+  toggleAll:function(e){var v=e.target.checked;for(var i=0;i<this.rows.length;i++){this.$set(this.rows[i],'checked',v)}},
+
+  async load(){
+    this.loading=true;this.error='';
+    try{
+      this.config=await this.json('/api/reflection/config');
+      var summary=await this.json('/api/reflection/tasks-summary');
+      this.stats=summary;
+      var slots=this.config.source_key_slots||[];
+      var rows=[];
+      for(var i=0;i<slots.length;i++){
+        var s=slots[i];
+        var ds=await this.json('/api/reflection/datasets?key_slot='+encodeURIComponent(s.key_slot));
+        for(var j=0;j<ds.length;j++){
+          var d=ds[j];
+          var runs=[];
+          try{runs=await this.json('/api/reflection/runs?source_export_id='+d.id)}catch(e){}
+          if(!runs.length)continue;
+          var run=runs[0];
+          rows.push({
+            export_id:d.id,key_slot:d.key_slot||s.key_slot,
+            created_at:d.created_at,
+            run_id:run.run_id,run_status:run.status,
+            task_total:run.total_count||0,
+            task_done:run.done||0,
+            task_pending:run.pending||0,
+            task_processing:run.processing||0,
+            task_failed:run.failed||0,
+            run:run,checked:false,
+            _tasks:null,_tasks_loading:false
+          });
+        }
+      }
+      this.rows=rows;
+      if(!this.globalConfig.reflection_api_key_id&&this.config.keys&&this.config.keys.length){
+        var ks=this.config.keys;
+        for(var ki=0;ki<ks.length;ki++){if((ks[ki].name||'').toLowerCase().indexOf('hack')>=0){this.globalConfig.reflection_api_key_id=ks[ki].id;break}}
+        if(!this.globalConfig.reflection_api_key_id)this.globalConfig.reflection_api_key_id=ks[0].id;
+      }
+      if(!this.testForm.key_id&&this.config.keys&&this.config.keys.length){
+        var ks2=this.config.keys;
+        for(var ki2=0;ki2<ks2.length;ki2++){if((ks2[ki2].name||'').toLowerCase().indexOf('hack')>=0){this.testForm.key_id=ks2[ki2].id;break}}
+        if(!this.testForm.key_id)this.testForm.key_id=ks2[0].id;
+      }
+    }catch(e){this.error=e.message}finally{this.loading=false}
+  },
+
+  async loadTasks(exportId){
+    var item=null;
+    for(var i=0;i<this.rows.length;i++){if(this.rows[i].export_id===exportId){item=this.rows[i];break}}
+    if(!item)return;
+    this.$set(item,'_tasks_loading',true);
+    try{
+      var tasks=await this.json('/api/reflection/tasks?run_id='+encodeURIComponent(item.run_id));
+      this.$set(item,'_tasks',tasks);
+    }catch(e){
+      this.$set(item,'_tasks',[]);
+    }
+    this.$set(item,'_tasks_loading',false);
+  },
+
+  async retryTask(t){
+    try{
+      await this.json('/api/reflection/tasks/'+t.uuid+'/retry',{method:'POST',headers:this.headers()});
+      this.$set(t,'status','pending');
+      this.$set(t,'last_error',null);
+    }catch(e){this.error=e.message}
+  },
+
+  _buildConfigBody:function(){
+    var c=this.globalConfig;
+    var cfg={};
+    if(c.reflection_api_key_id)cfg.reflection_api_key_id=Number(c.reflection_api_key_id);
+    if(c.reflection_model)cfg.reflection_model=c.reflection_model;
+    if(c.method)cfg.method=c.method;
+    if(c.worker_count)cfg.worker_count=c.worker_count;
+    if(c.max_retries)cfg.max_retries=c.max_retries;
+    if(c.max_tokens)cfg.max_tokens=c.max_tokens;
+    return cfg;
+  },
+
+  async batchStart(){
+    try{
+      var body={source_export_ids:this.checkedExportIds,config:this._buildConfigBody()};
+      var r=await this.json('/api/reflection/batch-start',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
+      alert('已启动 '+r.count+' 个任务组');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+  async batchPause(){
+    try{
+      var r=await this.json('/api/reflection/batch-pause',{method:'POST',headers:this.headers(),body:JSON.stringify({source_export_ids:this.checkedExportIds})});
+      alert('已暂停 '+r.count+' 个任务组');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+  async batchCancel(){
+    if(!confirm('确认取消选中的任务？进行中的任务将重置为待处理。'))return;
+    try{
+      var r=await this.json('/api/reflection/batch-cancel',{method:'POST',headers:this.headers(),body:JSON.stringify({source_export_ids:this.checkedExportIds})});
+      alert('已取消 '+r.count+' 个任务组');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+  async batchRetry(){
+    try{
+      var r=await this.json('/api/reflection/batch-retry',{method:'POST',headers:this.headers(),body:JSON.stringify({source_export_ids:this.checkedExportIds})});
+      alert('已重试 '+r.retried+' 个失败任务');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+
+  // Run record drawer
+  openRunRecord:function(item){
+    this.recordDrawer=true;this.recordItem=item;this.recordRuns=[];this.recordRunsLoading=true;
+    var key=item.key_slot||'';
+    var cat=item.created_at||'';
+    var ts=cat.replace(/[^0-9]/g,'').substring(0,14);
+    while(ts.length<14)ts+='0';
+    this.recordDetailDir='logs_thinking/'+key+'/'+ts.substring(0,8)+'_'+ts.substring(8)+'/';
+    var self=this;
+    this.json('/api/reflection/runs?source_export_id='+item.export_id).then(function(runs){
+      self.recordRuns=runs;self.recordRunsLoading=false;
+    }).catch(function(){self.recordRunsLoading=false});
+  },
+  fmtFullTs:function(ts){if(!ts)return'';var d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toTimeString().slice(0,8)},
+
+  async singleRerun(item){
+    if(!confirm('确认补跑？将重置失败任务并创建新的运行。'))return;
+    try{
+      var body={source_export_ids:[item.export_id],config:this._buildConfigBody()};
+      var r=await this.json('/api/reflection/batch-rerun',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
+      alert('补跑已启动 '+r.count+' 个任务组');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+  async batchRerun(){
+    if(!confirm('确认批量补跑？将重置所有选中任务组的失败任务并创建新的运行。'))return;
+    try{
+      var body={source_export_ids:this.checkedExportIds,config:this._buildConfigBody()};
+      var r=await this.json('/api/reflection/batch-rerun',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
+      alert('补跑已启动 '+r.count+' 个任务组');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+
+  // Run config drawer
+  openRunConfig:function(item){
+    this.cfgDrawer=true;this.cfgRun=item;this.cfgMsg='';this.cfgOk=false;
+    var r=item.run||{};
+    this.cfgForm={
+      reflection_endpoint:r.reflection_endpoint||this.config.reflection_base_url||'',
+      reflection_model:r.reflection_model||this.globalConfig.reflection_model||'',
+      method:r.method||this.globalConfig.method||'bulk',
+      reflection_api_key_id:r.reflection_api_key_id||this.globalConfig.reflection_api_key_id||'',
+      worker_count:r.worker_count||this.globalConfig.worker_count||4,
+      max_retries:r.max_retries||this.globalConfig.max_retries||3
+    };
+  },
+  saveRunConfig:function(){
+    if(!this.cfgRun)return;
+    this.cfgSaving=true;this.cfgMsg='';this.cfgOk=false;
+    var self=this;
+    var body={
+      reflection_endpoint:this.cfgForm.reflection_endpoint,
+      reflection_model:this.cfgForm.reflection_model,
+      method:this.cfgForm.method,
+      reflection_api_key_id:Number(this.cfgForm.reflection_api_key_id),
+      worker_count:Number(this.cfgForm.worker_count),
+      max_retries:Number(this.cfgForm.max_retries)
+    };
+    this.json('/api/reflection/runs/'+this.cfgRun.run_id+'/config',{method:'PATCH',headers:this.headers(),body:JSON.stringify(body)}).then(function(){
+      self.cfgMsg='保存成功';self.cfgOk=true;self.cfgSaving=false;
+      self.load();
+    }).catch(function(e){self.cfgMsg='保存失败: '+e.message;self.cfgOk=false;self.cfgSaving=false});
+  },
+
+  // Run detail drawer
+  openRunDetail:function(item){
+    this.closeDetail();
+    this.detailDrawer=true;this.detailRun=item.run;this.logEntries=[];this.logSinceId=0;
+    this._fetchLogs();
+    this.logPolling=setInterval(this._fetchLogs.bind(this),2000);
+  },
+  closeDetail:function(){this.detailDrawer=false;this.stopLogPoll()},
+  stopLogPoll:function(){if(this.logPolling){clearInterval(this.logPolling);this.logPolling=null}},
+  async _fetchLogs(){
+    if(!this.detailRun)return;
+    try{
+      var d=await this.json('/api/reflection/runs/'+this.detailRun.run_id+'/logs?since_id='+this.logSinceId);
+      if(d.run)this.detailRun=d.run;
+      if(d.logs&&d.logs.length){
+        this.logEntries=this.logEntries.concat(d.logs);
+        this.logSinceId=d.logs[d.logs.length-1].id;
+        var self=this;
+        this.$nextTick(function(){var p=self.$refs.logPanel;if(p)p.scrollTop=p.scrollHeight});
+      }
+      if(d.run_status&&d.run_status!=='running'&&d.run_status!=='processing'){this.stopLogPoll()}
+    }catch(e){}
+  },
+
+  // Test drawer
+  openTest:function(){this.testDrawer=true;this.testPhase='input';this.testSteps=[];this.testResult=null;this.testError='';this.testLoading=false},
+  async runTest(){
+    this.testError='';
+    if(!this.testForm.key_id){this.testError='请选择 API Key';return}
+    if(!this.testForm.model){this.testError='请填写模型名称';return}
+    if(!this.testForm.signature.trim()){this.testError='请输入 Signature';return}
+    this.testPhase='running';this.testSteps=[];this.testResult=null;this.testLoading=true;
+    var t0=Date.now();
+    this.testSteps.push({level:'info',text:'endpoint : '+(this.config.reflection_base_url||'')});
+    this.testSteps.push({level:'info',text:'model    : '+this.testForm.model});
+    this.testSteps.push({level:'info',text:'method   : '+this.testForm.method+' | max_tokens: '+this.testForm.max_tokens});
+    this.testSteps.push({level:'info',text:'timeout  : '+(this.testForm.timeout||600)+'s'});
+    this.testSteps.push({level:'info',text:'signature: 用户输入 ('+this.testForm.signature.length+' chars)'});
+    this.testSteps.push({level:'info',text:'发送中...'});
+    try{
+      var body={reflection_api_key_id:Number(this.testForm.key_id),reflection_model:this.testForm.model,method:this.testForm.method,stream:false,max_tokens:this.testForm.max_tokens,timeout:Number(this.testForm.timeout||600)};
+      if(this.testForm.signature.trim())body.signature=this.testForm.signature.trim();
+      if(this.testForm.thinking.trim())body.thinking=this.testForm.thinking.trim();
+      var r=await this.json('/api/reflection/test',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
+      var elapsed=((Date.now()-t0)/1000).toFixed(1);
+      this.testSteps.pop();
+      this.testSteps.push({level:'ok',text:'收到响应 ('+elapsed+'s)'});
+      this.testSteps.push({level:'ok',text:'response_id  : '+(r.response_id||'-')});
+      this.testSteps.push({level:'ok',text:'model        : '+(r.model||'-')});
+      this.testSteps.push({level:'ok',text:'stop_reason  : '+(r.stop_reason||'-')});
+      this.testSteps.push({level:'ok',text:'sentence_cnt : '+(r.sentence_count!=null?r.sentence_count:'-')});
+      if(r.usage)this.testSteps.push({level:'ok',text:'tokens       : input='+r.usage.input_tokens+' output='+r.usage.output_tokens});
+      this.testSteps.push({level:'ok',text:'output_len   : '+(r.text?r.text.length:0)+' chars'});
+      this.testSteps.push({level:'ok',text:'signature_used: '+(r.signature_used||'-')});
+      this.testResult=r;
+    }catch(e){
+      var elapsed2=((Date.now()-t0)/1000).toFixed(1);
+      this.testSteps.pop();
+      this.testSteps.push({level:'error',text:'请求失败 ('+elapsed2+'s): '+e.message});
+      this.testResult={error:e.message};
+    }finally{this.testLoading=false}
+  }
+}})
+</script>
+{% endblock %}

@@ -1,0 +1,18 @@
+{
+  "instruction": "Why did it take so long to respond with a simple \"Hello\"?\n\nFrom observation, the assistant's thinking content in the previous round is definitely unrelated to the current conversation (greeting / hello).\n\nYou MUST call the reflect_on_prior_reasoning_bulk tool (do not answer in free text).\nPopulate it as follows:\n1. Put ALL prior-round assistant thinking into `sentences` as continuous text.\n   Do NOT split into per-sentence entries. Do NOT summarize away content; recover the thinking. Preserve structure (paragraphs / code) when present.\n2. Set `topic` to the single current conversation topic.\n3. Set `overall_relevance` to relevant or irrelevant for the prior thinking as a whole vs the current conversation.\n4. Give one `overall_rationale` explaining that overall judgment.",
+  "unrelated_thinking": "I'm setting up the classic card-guessing problem where we have a 52-card deck split evenly between red and black, and we need to decide when to call \"red\" to maximize expected winnings. The martingale / optional-stopping argument suggests every strategy has expected value 0. This has nothing to do with greeting the user who just said hello.",
+  "tool": {
+    "name": "reflect_on_prior_reasoning_bulk",
+    "description": "Reflect on prior assistant thinking as a whole: recover the prior thinking text without splitting it into individual sentences, state the single current conversation topic, and give one overall relevant/irrelevant judgment with a single rationale.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "sentences": {"type": "string", "description": "The full prior-round assistant thinking as continuous text. Preserve paragraph breaks and code indentation."},
+        "topic": {"type": "string"},
+        "overall_relevance": {"type": "string", "enum": ["relevant", "irrelevant"]},
+        "overall_rationale": {"type": "string"}
+      },
+      "required": ["sentences", "topic", "overall_relevance", "overall_rationale"]
+    }
+  }
+}

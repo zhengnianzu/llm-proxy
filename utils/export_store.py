@@ -91,6 +91,7 @@ def init_db(db_dir: str):
             "eval_report_path TEXT NOT NULL DEFAULT ''",
             "mode TEXT NOT NULL DEFAULT 'export'",
             "analysis_json TEXT NOT NULL DEFAULT ''",
+            "source_export_id INTEGER",
         ]:
             try:
                 _conn.execute(f"ALTER TABLE export_records ADD COLUMN {col_def}")
@@ -112,13 +113,15 @@ def create_record(
     obs_dst: str = "",
     local_copy_dir: str = "",
     mode: str = "export",
+    source_export_id: int | None = None,
 ) -> int:
     conn = _get_conn()
     with _lock:
         cur = conn.execute(
-            """INSERT INTO export_records (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode),
+            """INSERT INTO export_records
+               (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode, source_export_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode, source_export_id),
         )
         conn.commit()
     return cur.lastrowid
@@ -176,6 +179,17 @@ def list_records_by_key(key_slot: str, limit: int = 50) -> list:
         (key_slot, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def latest_quality_record(source_export_id: int) -> Optional[dict]:
+    with _lock:
+        row = _get_conn().execute(
+            """SELECT * FROM export_records
+               WHERE mode='eval' AND source_export_id=?
+               ORDER BY id DESC LIMIT 1""",
+            (source_export_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 _SLIM_COLS = "id, key_slot, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message"

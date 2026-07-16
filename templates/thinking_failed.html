@@ -1,0 +1,49 @@
+{% extends "_layout.html" %}
+{% block title %}失败任务{% endblock %}
+{% block mobile_title %}失败任务{% endblock %}
+{% block head_extra %}<script src="/static/js/vue.min.js"></script>{% endblock %}
+{% block page_styles %}
+.failed-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:18px}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.toolbar select{padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground)}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}.stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px 20px;min-width:140px}.stat-card .num{font-size:1.8rem;font-weight:700;color:var(--destructive)}.stat-card .label{font-size:.78rem;color:var(--muted-foreground);margin-top:4px}
+.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:var(--radius-lg)}table{width:100%;border-collapse:collapse;min-width:1000px}th,td{padding:9px 12px;border-bottom:1px solid var(--border);font-size:.82rem;text-align:left}th{background:var(--muted);color:var(--muted-foreground)}
+.expand-row{background:var(--muted)}.expand-row td{padding:6px 12px 6px 40px;font-size:.78rem}
+.error-text{color:var(--destructive);font-size:.78rem;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.error-text:hover{white-space:normal}
+button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card);color:var(--foreground);padding:5px 9px;border-radius:var(--radius);font-size:.78rem}.btn.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}.btn.danger{background:var(--destructive);color:#fff;border-color:var(--destructive)}.btn:disabled{opacity:.45;cursor:not-allowed}
+.empty{text-align:center;padding:44px;color:var(--muted-foreground)}.badge{padding:3px 8px;border-radius:999px;background:var(--muted);font-size:.76rem;white-space:nowrap}
+{% endblock %}
+{% block content %}
+<div id="failedApp">{% raw %}
+  <div class="failed-head"><div><h2>失败任务</h2><p class="text-muted">查看失败任务详情、尝试历史、重试操作。</p></div><div class="toolbar"><select v-model="keySlot" @change="changeKey"><option v-for="s in config.source_key_slots" :value="s.key_slot">{{s.key_slot}}（{{s.record_count}}）</option></select><select v-model="selectedRunId" @change="loadFailed"><option value="">全部 Run</option><option v-for="r in runs" :value="r.run_id">{{r.run_id}} (失败{{r.failed}})</option></select><button class="btn primary" @click="loadAll">刷新</button><button class="btn danger" @click="retryAll" :disabled="!failedTasks.length">重试全部失败</button></div></div>
+
+  <div class="stats"><div class="stat-card"><div class="num">{{failedTasks.length}}</div><div class="label">失败任务总数</div></div></div>
+
+  <div class="table-wrap"><table><thead><tr><th>Run ID</th><th>Session</th><th>Block Path</th><th>错误信息</th><th>重试次数</th><th>最后尝试</th><th>操作</th></tr></thead><tbody>
+    <template v-for="t in failedTasks">
+      <tr :key="t.uuid">
+        <td><small>{{t.run_id}}</small></td>
+        <td>{{t.session_id}}</td>
+        <td><small>{{t.block_path}}</small></td>
+        <td><span class="error-text" @click="toggleExpand(t.uuid)">{{t.last_error||'-'}}</span></td>
+        <td>{{t.retry_count}}/{{t.max_retries}}</td>
+        <td><small>{{fmtTime(t.last_attempt_at)}}</small></td>
+        <td><button class="btn" @click="retryTask(t.uuid)">重试</button> <button class="btn" @click="toggleExpand(t.uuid)">{{expandedTask===t.uuid?'收起':'详情'}}</button></td>
+      </tr>
+      <template v-if="expandedTask===t.uuid&&attempts[t.uuid]">
+        <tr v-for="a in attempts[t.uuid]" :key="a.attempt_id" class="expand-row">
+          <td colspan="2">尝试 #{{a.attempt_no}}</td>
+          <td><span class="badge">{{a.status}}</span></td>
+          <td colspan="2"><small v-if="a.error" style="color:var(--destructive)">{{a.error}}</small><small v-else>-</small></td>
+          <td><small>{{fmtTime(a.started_at)}} → {{fmtTime(a.finished_at)}}</small></td>
+          <td><small v-if="a.response_id">resp: {{a.response_id}}</small></td>
+        </tr>
+      </template>
+    </template>
+    <tr v-if="!failedTasks.length"><td colspan="7" class="empty">暂无失败任务</td></tr>
+  </tbody></table></div>
+
+  <p v-if="error" class="bad" style="margin-top:12px">{{error}}</p>
+{% endraw %}</div>
+<script>
+new Vue({el:'#failedApp',data:{keySlot:new URLSearchParams(location.search).get('key_slot')||'',config:{source_key_slots:[]},runs:[],selectedRunId:new URLSearchParams(location.search).get('run_id')||'',failedTasks:[],expandedTask:null,attempts:{},error:''},async mounted(){try{this.config=await this.json('/api/reflection/config');var slots=this.config.source_key_slots;if(!this.keySlot&&slots&&slots.length)this.keySlot=slots[0].key_slot;await this.loadAll()}catch(e){this.error='初始化失败: '+e.message}},methods:{async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},headers:function(){return{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},async changeKey(){this.selectedRunId='';await this.loadAll()},async loadAll(){if(!this.keySlot)return;try{var ds=await this.json('/api/reflection/datasets?key_slot='+encodeURIComponent(this.keySlot));var allRuns=[];for(var i=0;i<ds.length;i++){try{var rs=await this.json('/api/reflection/runs?source_export_id='+ds[i].id);allRuns.push.apply(allRuns,rs)}catch(e){console.warn(e)}}this.runs=allRuns.filter(function(r){return(r.failed||0)>0});await this.loadFailed();this.error=''}catch(e){this.error=e.message}},async loadFailed(){try{var all=[];if(this.selectedRunId){all=await this.json('/api/reflection/tasks?run_id='+this.selectedRunId+'&status=failed')}else{for(var i=0;i<this.runs.length;i++){var tasks=await this.json('/api/reflection/tasks?run_id='+this.runs[i].run_id+'&status=failed');all.push.apply(all,tasks)}}this.failedTasks=all}catch(e){this.error=e.message}},async toggleExpand(uuid){if(this.expandedTask===uuid){this.expandedTask=null;return}try{var atts=await this.json('/api/reflection/tasks/'+uuid+'/attempts');this.$set(this.attempts,uuid,atts);this.expandedTask=uuid}catch(e){this.error=e.message}},async retryTask(uuid){try{await this.json('/api/reflection/tasks/'+uuid+'/retry',{method:'POST',headers:this.headers()});await this.loadFailed()}catch(e){this.error=e.message}},async retryAll(){if(!confirm('确认重试全部失败任务？'))return;try{var seen={};var runIds=[];this.failedTasks.forEach(function(t){if(!seen[t.run_id]){seen[t.run_id]=true;runIds.push(t.run_id)}});var total=0;for(var i=0;i<runIds.length;i++){var r=await this.json('/api/reflection/tasks/retry-failed',{method:'POST',headers:this.headers(),body:JSON.stringify({run_id:runIds[i]})});total+=(r.retried||0)}alert('已重置 '+total+' 个失败任务');await this.loadFailed()}catch(e){this.error=e.message}},fmtTime:function(ts){if(!ts)return'-';return new Date(ts*1000).toLocaleString('zh-CN')}}})
+</script>
+{% endblock %}

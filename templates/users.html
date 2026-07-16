@@ -84,6 +84,7 @@
                         <label><input type="checkbox" value="keys" v-model="newPerms"> Key 管理</label>
                         <label><input type="checkbox" value="channels" v-model="newPerms"> 渠道管理</label>
                         <label><input type="checkbox" value="export" v-model="newPerms"> Session 导出</label>
+                        <label><input type="checkbox" value="thinking" v-model="newPerms"> Thinking 解析</label>
                     </div>
                 </div>
                 <div class="form-actions">
@@ -146,6 +147,7 @@
                                     <label><input type="checkbox" value="keys" v-model="editPerms"> Key 管理</label>
                                     <label><input type="checkbox" value="channels" v-model="editPerms"> 渠道管理</label>
                                     <label><input type="checkbox" value="export" v-model="editPerms"> Session 导出</label>
+                                    <label><input type="checkbox" value="thinking" v-model="editPerms"> Thinking 解析</label>
                                 </div>
                             </div>
                             <div style="display:flex;gap:6px;align-self:end;">
@@ -178,7 +180,7 @@ new Vue({
     methods: {
         _h(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
         permLabel(p) {
-            var m = { keys: 'Key 管理', channels: '渠道管理', export: 'Session 导出' };
+            var m = { keys: 'Key 管理', channels: '渠道管理', export: 'Session 导出', thinking: 'Thinking 解析' };
             return m[p] || p;
         },
         fetchUsers() {

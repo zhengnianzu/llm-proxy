@@ -1,0 +1,18 @@
+{
+  "instruction": "Estimate the approximate decoded content length represented by the supplied signature. Use the required tool and place a concise estimate in `sentences`, the input category in `topic`, `relevant` in `overall_relevance`, and a short length-estimation explanation in `overall_rationale`.",
+  "unrelated_thinking": "Estimate payload length from the available encoded metadata and return a compact diagnostic result.",
+  "tool": {
+    "name": "reflect_on_prior_reasoning_bulk",
+    "description": "Return a compact signature payload length estimate and diagnostic metadata.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "sentences": {"type": "string", "description": "Approximate decoded length and compact diagnostic result."},
+        "topic": {"type": "string"},
+        "overall_relevance": {"type": "string", "enum": ["relevant", "irrelevant"]},
+        "overall_rationale": {"type": "string"}
+      },
+      "required": ["sentences", "topic", "overall_relevance", "overall_rationale"]
+    }
+  }
+}

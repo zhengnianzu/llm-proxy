@@ -1,0 +1,311 @@
+{% extends "_layout.html" %}
+{% block title %}Session 管理{% endblock %}
+{% block mobile_title %}Session 管理{% endblock %}
+{% block head_extra %}<script src="/static/js/vue.min.js"></script>{% endblock %}
+{% block page_styles %}
+.page-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:18px}
+button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card);color:var(--foreground);padding:6px 10px;border-radius:var(--radius);font-size:.8rem}.btn.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}.btn:disabled{opacity:.45;cursor:not-allowed}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}.stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 18px;min-width:100px;flex:1}.stat-card .num{font-size:1.6rem;font-weight:700}.stat-card .label{font-size:.76rem;color:var(--muted-foreground);margin-top:2px}
+.ok{color:var(--success)}.bad{color:var(--destructive)}.warn{color:#e67e00}
+.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:var(--radius-lg);margin-bottom:16px}table{width:100%;border-collapse:collapse;min-width:850px}th,td{padding:9px 12px;border-bottom:1px solid var(--border);font-size:.82rem;text-align:left}th{background:var(--muted);color:var(--muted-foreground)}
+.badge{padding:3px 8px;border-radius:999px;background:var(--muted);white-space:nowrap;font-size:.76rem}.badge.ok{color:var(--success)}.badge.bad{color:var(--destructive)}.badge.warn{color:#e67e00}
+.badge.imported{background:#dbeafe;color:#1e40af}
+.obs-link{color:var(--primary);cursor:pointer;font-size:.78rem}
+.key-mask{font-family:var(--font-mono,monospace);font-size:.76rem;color:var(--muted-foreground)}
+.empty{text-align:center;padding:44px;color:var(--muted-foreground)}
+.drawer-bg{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:900}
+.drawer{position:fixed;top:0;right:0;width:560px;max-width:90vw;height:100vh;background:var(--card);border-left:1px solid var(--border);z-index:901;display:flex;flex-direction:column;overflow:hidden}
+.drawer-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.drawer-body{padding:18px;overflow-y:auto;flex:1;font-size:.82rem}
+.file-item{padding:6px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between}.file-name{font-family:var(--font-mono,monospace);color:var(--primary);font-size:.8rem}.file-size{color:var(--muted-foreground);font-size:.76rem}
+.action-cell{display:flex;gap:4px;align-items:center;position:relative}
+.dropdown{position:relative;display:inline-block}
+.dropdown-menu{display:none;position:absolute;right:0;top:100%;min-width:120px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:50;padding:4px 0}
+.dropdown.open .dropdown-menu{display:block}
+.dropdown-item{display:block;width:100%;padding:6px 12px;border:none;background:none;color:var(--foreground);font-size:.78rem;text-align:left;cursor:pointer;white-space:nowrap}
+.dropdown-item:hover{background:var(--accent)}
+.dropdown-item:disabled{opacity:.45;cursor:not-allowed}
+.export-log{background:var(--muted);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;max-height:300px;overflow-y:auto;font-family:var(--font-mono,monospace);font-size:.74rem;line-height:1.6;white-space:pre-wrap;word-break:break-all;margin:12px 0}
+.export-log .log-line{padding:1px 0}
+.export-log .log-error{color:var(--destructive)}
+.path-display{word-break:break-all;font-family:var(--font-mono,monospace);font-size:.78rem;padding:8px 10px;background:var(--muted);border-radius:var(--radius);margin-bottom:12px}
+{% endblock %}
+{% block content %}
+<div id="thinkingApp">{% raw %}
+  <div class="page-head">
+    <div><h2>Session 管理</h2><p class="text-muted">已完成质检的数据集概览</p></div>
+    <button class="btn primary" @click="load">刷新</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat-card"><div class="num">{{stats.exports}}</div><div class="label">Export 总数</div></div>
+    <div class="stat-card"><div class="num">{{stats.keys}}</div><div class="label">Key 个数</div></div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>名称</th><th>Session 数</th><th>解析状态</th><th>OBS</th><th>解析OBS</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="d in allDatasets" :key="d.id">
+          <td>
+            <div style="font-weight:600;font-size:.82rem">{{d.key_slot}}</div>
+            <div style="font-size:.74rem;color:var(--muted-foreground)">{{d.created_at||'-'}}</div>
+          </td>
+          <td>{{d.total_sessions}}</td>
+          <td>
+            <span v-if="!d.latest_run" style="color:var(--muted-foreground)">-</span>
+            <span v-else class="badge" :class="runClass(d.latest_run)">{{runLabel(d.latest_run)}}</span>
+          </td>
+          <td><span v-if="d.obs_dst" class="obs-link" @click="openObsDrawer(d)">[OBS]</span><span v-else>-</span></td>
+          <td>
+            <span v-if="!d.latest_run" style="color:var(--muted-foreground)">-</span>
+            <span v-else-if="d.latest_run.obs_root&&d.latest_run.obs_root.indexOf('error:')!==0" class="obs-link" @click="openObsDrawer({obs_dst:d.latest_run.obs_root})">[OBS]</span>
+            <span v-else-if="d.latest_run.obs_root&&d.latest_run.obs_root.indexOf('error:')===0" class="badge bad">上传失败</span>
+            <span v-else style="color:var(--muted-foreground)">未上传</span>
+          </td>
+          <td>
+            <div class="action-cell">
+              <a class="btn" :href="'/thinking/dataset/'+d.id">查看</a>
+              <div class="dropdown" :class="{open:openDropdown===d.id}">
+                <button class="btn" @click.stop="toggleDropdown(d.id)" style="padding:6px 6px;font-size:.72rem">▼</button>
+                <div class="dropdown-menu">
+                  <button class="dropdown-item" @click="doImport(d)" :disabled="!!d.latest_run||d._importing">
+                    {{d._importing?'导入中...':d.latest_run?'已导入':'导入任务库'}}
+                  </button>
+                  <button class="dropdown-item" @click="doExport(d)" :disabled="!d.latest_run">导出结果</button>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+        <tr v-if="!allDatasets.length&&!loading"><td colspan="6" class="empty">暂无数据</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p v-if="error" style="color:var(--destructive);margin-top:12px">{{error}}</p>
+
+  <!-- OBS 文件浏览 Drawer -->
+  <template v-if="obsDrawer">
+    <div class="drawer-bg" @click="obsDrawer=false"></div>
+    <div class="drawer">
+      <div class="drawer-head"><h3>OBS 文件浏览</h3><button class="btn" @click="obsDrawer=false">关闭</button></div>
+      <div class="drawer-body">
+        <p style="margin-bottom:12px;word-break:break-all;font-family:var(--font-mono,monospace);font-size:.78rem;color:var(--muted-foreground)">{{obsPath}}</p>
+        <p v-if="obsLoading" style="color:var(--muted-foreground)">加载中...</p>
+        <p v-if="obsError" style="color:var(--destructive)">{{obsError}}</p>
+        <div v-for="f in obsFiles" :key="f.path" class="file-item">
+          <span class="file-name">{{f.is_dir?'📁 ':''}}{{f.name}}</span>
+          <span class="file-size">{{f.size||''}}</span>
+        </div>
+        <p v-if="!obsLoading&&!obsError&&!obsFiles.length" style="color:var(--muted-foreground)">无文件</p>
+      </div>
+    </div>
+  </template>
+
+  <!-- 导出结果 Drawer -->
+  <template v-if="exportDrawer">
+    <div class="drawer-bg" @click="closeExportDrawer"></div>
+    <div class="drawer">
+      <div class="drawer-head"><h3>导出结果</h3><button class="btn" @click="closeExportDrawer">关闭</button></div>
+      <div class="drawer-body">
+        <div style="margin-bottom:14px">
+          <p style="font-size:.76rem;color:var(--muted-foreground);margin-bottom:4px">本地导出路径</p>
+          <div class="path-display">{{exportLocalPath}}</div>
+        </div>
+        <div style="margin-bottom:14px">
+          <p style="font-size:.76rem;color:var(--muted-foreground);margin-bottom:4px">OBS 目标路径</p>
+          <div class="path-display">{{exportObsDst||'OBS 未配置'}}</div>
+        </div>
+
+        <div v-if="exportStep==='config'" style="text-align:center;margin-top:18px">
+          <button class="btn primary" @click="startExport" :disabled="exportBusy" style="min-width:140px">
+            {{exportBusy?'导出中...':'开始导出'}}
+          </button>
+        </div>
+
+        <div v-if="exportStep==='progress'||exportStep==='done'">
+          <p v-if="exportFileCount>=0" style="margin-bottom:8px;font-size:.82rem">已生成 <b>{{exportFileCount}}</b> 个文件</p>
+          <p style="font-size:.76rem;color:var(--muted-foreground);margin-bottom:4px">OBS 上传日志</p>
+          <div class="export-log" ref="exportLogEl">
+            <div v-for="(log,i) in exportLogs" :key="i" class="log-line" :class="{'log-error':log.level==='error'}">{{log.message}}</div>
+            <div v-if="exportStep==='progress'" style="color:var(--muted-foreground)">上传中...</div>
+          </div>
+          <div v-if="exportStep==='done'&&!exportError" style="margin-top:12px">
+            <p class="ok" style="font-size:.82rem;margin-bottom:8px">上传成功</p>
+            <button class="btn primary" @click="browseExportObs" style="width:100%">浏览 OBS 文件</button>
+          </div>
+          <div v-if="exportStep==='done'&&exportError" style="margin-top:12px">
+            <p class="bad" style="font-size:.82rem">{{exportError}}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+{% endraw %}</div>
+<script>
+new Vue({el:'#thinkingApp',data:{
+  allDatasets:[],loading:false,error:'',config:null,
+  stats:{exports:0,keys:0},
+  openDropdown:null,
+  obsDrawer:false,obsPath:'',obsFiles:[],obsLoading:false,obsError:'',
+  exportDrawer:false,exportRunId:'',exportLocalPath:'',exportObsDst:'',exportStep:'config',
+  exportBusy:false,exportFileCount:-1,exportLogs:[],exportLogSinceId:0,exportLogTimer:null,
+  exportObsRoot:'',exportError:''
+},async mounted(){
+  var self=this;
+  document.addEventListener('click',function(){self.openDropdown=null});
+  try{await this.load()}catch(e){this.error='初始化失败: '+e.message}
+},
+methods:{
+  async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},
+  headers:function(){return{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
+  maskKey:function(k){if(!k)return'';if(k.length<=10)return k;return k.substring(0,6)+'...'+k.substring(k.length-4)},
+  toggleDropdown:function(id){this.openDropdown=this.openDropdown===id?null:id},
+  runLabel:function(r){
+    if(!r)return'-';
+    var s=r.status;
+    if(s==='completed'||s==='completed_with_failures')return'完成 '+r.done+'/'+(r.total_count||0);
+    if(s==='running'||s==='queued')return'进行中 '+r.done+'/'+(r.total_count||0);
+    if(s==='paused')return'已暂停 '+r.done+'/'+(r.total_count||0);
+    if(s==='draft')return'待启动';
+    if(s==='cancelled')return'已取消';
+    if(s==='failed')return'失败';
+    return s;
+  },
+  runClass:function(r){
+    if(!r)return{};
+    var s=r.status;
+    return{ok:s==='completed',warn:s==='running'||s==='queued'||s==='paused'||s==='draft',bad:s==='failed'||s==='cancelled'||s==='completed_with_failures'};
+  },
+
+  async load(){
+    this.loading=true;this.error='';
+    try{
+      this.config=await this.json('/api/reflection/config');
+      var slots=this.config.source_key_slots||[];
+      var all=[];var keySet={};
+      for(var i=0;i<slots.length;i++){
+        var s=slots[i];
+        var ds=await this.json('/api/reflection/datasets?key_slot='+encodeURIComponent(s.key_slot));
+        keySet[s.key_slot]=true;
+        for(var j=0;j<ds.length;j++){
+          var d=ds[j];
+          this.$set(d,'_importing',false);
+          all.push(d);
+        }
+      }
+      this.allDatasets=all;
+      var keyCount=0;for(var k in keySet){if(keySet.hasOwnProperty(k))keyCount++}
+      this.stats={exports:all.length,keys:keyCount};
+    }catch(e){this.error=e.message}finally{this.loading=false}
+  },
+
+  async doImport(d){
+    if(d.latest_run||d._importing)return;
+    this.openDropdown=null;
+    this.$set(d,'_importing',true);
+    try{
+      var body={source_export_id:d.id};
+      var r=await this.json('/api/reflection/import-tasks',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
+      if(r.status==='already_imported'){alert('该数据集已导入')}
+      else{alert('导入成功，共 '+(r.tasks||0)+' 个任务')}
+      await this.load();
+    }catch(e){alert('导入失败: '+e.message);this.$set(d,'_importing',false)}
+  },
+
+  async doExport(d){
+    if(!d.latest_run)return;
+    this.openDropdown=null;
+    var run=d.latest_run;
+    var obsBase=(this.config&&this.config.obs_base)||'';
+    this.exportRunId=run.run_id;
+    this.exportLocalPath=(this.config&&this.config.export_root||'')+'/'+run.run_id;
+    this.exportObsDst=obsBase?obsBase.replace(/\/$/,'')+'/reflection/'+(run.source_key||'unknown')+'/'+run.run_id+'/':'';
+    this.exportStep='config';
+    this.exportBusy=false;
+    this.exportFileCount=-1;
+    this.exportLogs=[];
+    this.exportLogSinceId=0;
+    this.exportError='';
+    this.exportObsRoot='';
+    if(this.exportLogTimer){clearInterval(this.exportLogTimer);this.exportLogTimer=null}
+    this.exportDrawer=true;
+  },
+
+  async startExport(){
+    this.exportBusy=true;
+    try{
+      var r=await this.json('/api/reflection/runs/'+this.exportRunId+'/export',{method:'POST',headers:this.headers()});
+      this.exportFileCount=r.count||0;
+      this.exportStep='progress';
+      this._startExportLogPoll();
+    }catch(e){
+      this.exportError='导出失败: '+e.message;
+      this.exportStep='done';
+    }
+    this.exportBusy=false;
+  },
+
+  _startExportLogPoll:function(){
+    var self=this;
+    this.exportLogTimer=setInterval(function(){self._fetchExportLogs()},2000);
+    this._fetchExportLogs();
+  },
+
+  _fetchExportLogs:function(){
+    var self=this;
+    this.json('/api/reflection/runs/'+this.exportRunId+'/logs?since_id='+this.exportLogSinceId).then(function(r){
+      var logs=r.logs||[];
+      for(var i=0;i<logs.length;i++){
+        self.exportLogs.push(logs[i]);
+        if(logs[i].id>self.exportLogSinceId)self.exportLogSinceId=logs[i].id;
+      }
+      if(logs.length){
+        self.$nextTick(function(){
+          var el=self.$refs.exportLogEl;
+          if(el)el.scrollTop=el.scrollHeight;
+        });
+      }
+      self.json('/api/reflection/runs/'+self.exportRunId).then(function(run){
+        var obs=run.obs_root||'';
+        if(obs){
+          self.exportObsRoot=obs;
+          if(obs.indexOf('error:')===0){
+            self.exportError='OBS 上传失败: '+obs.substring(6);
+          }
+          self.exportStep='done';
+          if(self.exportLogTimer){clearInterval(self.exportLogTimer);self.exportLogTimer=null}
+          self._fetchExportLogs();
+        }
+      }).catch(function(){});
+    }).catch(function(){});
+  },
+
+  closeExportDrawer:function(){
+    this.exportDrawer=false;
+    if(this.exportLogTimer){clearInterval(this.exportLogTimer);this.exportLogTimer=null}
+    if(this.exportStep==='done')this.load();
+  },
+
+  browseExportObs:function(){
+    if(this.exportObsRoot&&this.exportObsRoot.indexOf('error:')!==0){
+      this.exportDrawer=false;
+      if(this.exportLogTimer){clearInterval(this.exportLogTimer);this.exportLogTimer=null}
+      this.openObsDrawer({obs_dst:this.exportObsRoot});
+    }
+  },
+
+  openObsDrawer:function(d){
+    this.obsDrawer=true;this.obsPath=d.obs_dst;this.obsFiles=[];this.obsLoading=true;this.obsError='';
+    var self=this;
+    this.json('/api/export/obs/ls?path='+encodeURIComponent(d.obs_dst),{headers:this.headers()}).then(function(r){
+      self.obsFiles=(r&&r.items)||[];self.obsLoading=false;
+    }).catch(function(e){self.obsError=e.message;self.obsLoading=false});
+  }
+}})
+</script>
+{% endblock %}
