@@ -55,11 +55,10 @@ class ReflectionService:
             artifacts_valid = record["status"] == "success"
             quality_error = ""
             if artifacts_valid:
-                try:
-                    validate_quality_dir(Path(record["local_copy_dir"]))
-                except ValueError as exc:
+                d = Path(record["local_copy_dir"])
+                if not d.is_dir():
                     artifacts_valid = False
-                    quality_error = str(exc)
+                    quality_error = f"质检目录不存在: {d}"
             runs = db.list_runs(self.config.db_path, record["id"])
             latest = runs[0] if runs else None
             result.append({
