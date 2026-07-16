@@ -4,8 +4,10 @@
 """
 
 import json
+import logging
 import os
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -158,6 +160,7 @@ def _build_state(root_dir: str) -> Dict[str, Any]:
         "known_keys": set(),
         "sessions": OrderedDict(),  # key=first_ts, value={q1, model, ...}
         "_chain_map": {},  # chain_key -> first_ts (内存映射，不持久化)
+        "_last_refresh_ts": 0.0,
     }
 
 
@@ -361,8 +364,15 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     return True
 
 
-def _refresh_state(kind: str, root_dir: str) -> None:
+_REFRESH_TTL = 10  # 秒：已初始化的目录在此时间内跳过重复刷新
+
+
+def _refresh_state(kind: str, root_dir: str, force: bool = False) -> None:
     state = _state(kind, root_dir)
+
+    if not force and state["initialized"] and time.time() - state["_last_refresh_ts"] < _REFRESH_TTL:
+        return
+
     root = Path(root_dir)
     index_path = Path(state["index_path"])
 
@@ -401,13 +411,13 @@ def _refresh_state(kind: str, root_dir: str) -> None:
                 _process_req_row(kind, state, req_path)
 
     state["initialized"] = True
+    state["_last_refresh_ts"] = time.time()
 
 
 def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         current_state = _state(kind, root_dir)
-        if refresh or not current_state["initialized"]:
-            _refresh_state(kind, root_dir)
+        _refresh_state(kind, root_dir, force=refresh)
         items = []
         known_models: set = set()
         for session in current_state["sessions"].values():
@@ -435,7 +445,7 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
         items.sort(key=lambda x: x["filename"], reverse=True)
         total = len(items)
         paged = items[offset:offset + limit] if limit > 0 else items[offset:]
-        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models)}
+        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models), "last_refresh_ts": current_state.get("_last_refresh_ts", 0)}
 
 
 def _content_contains_keyword(content, kw: str) -> bool:
@@ -480,8 +490,7 @@ def _match_messages_content(root_dir: str, filename: str, keyword: str) -> bool:
 def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
     with _CACHE_LOCK:
         current_state = _state(kind, root_dir)
-        if refresh or not current_state["initialized"]:
-            _refresh_state(kind, root_dir)
+        _refresh_state(kind, root_dir, force=refresh)
         sessions = []
         known_models: set = set()
         for session in current_state["sessions"].values():
@@ -496,6 +505,7 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
                 continue
             sessions.append(session)
         saved_known_keys = sorted(current_state["known_keys"])
+        last_refresh_ts = current_state.get("_last_refresh_ts", 0)
 
     if search:
         search = search.strip()
@@ -526,7 +536,7 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
             payload["has_failure"] = True
         items.append(payload)
 
-    return {"items": items, "total": total, "known_keys": saved_known_keys, "known_models": sorted(known_models)}
+    return {"items": items, "total": total, "known_keys": saved_known_keys, "known_models": sorted(known_models), "last_refresh_ts": last_refresh_ts}
 
 
 def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
@@ -547,8 +557,7 @@ def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: i
         for sub in sub_dirs:
             root_dir = str(sub)
             current_state = _state(kind, root_dir)
-            if refresh or not current_state["initialized"]:
-                _refresh_state(kind, root_dir)
+            _refresh_state(kind, root_dir, force=refresh)
             for session in current_state["sessions"].values():
                 if api_key and (session.get("api_key", "") or "") != api_key:
                     continue
@@ -603,6 +612,52 @@ def _find_file_in_all_dirs(env_dir: str, filename: str) -> Optional[str]:
             if candidate.is_file():
                 return str(candidate)
     return None
+
+
+# ---------------------------------------------------------------------------
+# 后台预热线程 — 进程启动后自动预热所有 mtime 目录的 session 缓存
+# ---------------------------------------------------------------------------
+
+_warmer_thread = None
+_warmer_stop = threading.Event()
+
+_logger = logging.getLogger("session-warmer")
+
+
+def _warmer_loop(env_dir: str, current_log_dir: str, interval: float = 30.0) -> None:
+    env_path = Path(env_dir)
+    if env_path.is_dir():
+        subs = sorted(env_path.iterdir())
+        _logger.info("session-warmer: 开始预热 %d 个目录", len(subs))
+        for sub in subs:
+            if _warmer_stop.is_set():
+                return
+            if not sub.is_dir():
+                continue
+            with _CACHE_LOCK:
+                _refresh_state("anthropic", str(sub), force=True)
+        _logger.info("session-warmer: 预热完成")
+
+    while not _warmer_stop.is_set():
+        _warmer_stop.wait(interval)
+        if _warmer_stop.is_set():
+            break
+        with _CACHE_LOCK:
+            _refresh_state("anthropic", current_log_dir, force=True)
+
+
+def start_session_cache_warmer(env_dir: str, current_log_dir: str) -> None:
+    global _warmer_thread
+    if _warmer_thread is not None and _warmer_thread.is_alive():
+        return
+    _warmer_stop.clear()
+    _warmer_thread = threading.Thread(
+        target=_warmer_loop,
+        args=(env_dir, current_log_dir),
+        daemon=True,
+        name="session-cache-warmer",
+    )
+    _warmer_thread.start()
 
 
 def register_log_routes(app: FastAPI) -> None:
@@ -827,3 +882,5 @@ def register_log_routes(app: FastAPI) -> None:
         if err:
             return err
         return logs_file_raw(filename, log_dir=log_dir or "__ALL__")
+
+    start_session_cache_warmer(_env_dir, _current_log_dir)

@@ -472,6 +472,7 @@
             <option value="">全部</option>
         </select>
         <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
+        <span id="lastRefreshTime" style="font-size:.74rem;color:var(--muted-foreground);margin-left:6px"></span>
     </div>
 </div>
 
@@ -830,6 +831,7 @@ async function loadFileList(refresh = false) {
                 fileListEl.appendChild(el);
             });
             updateLoadStatus();
+            _updateRefreshTime(data.last_refresh_ts);
             isLoadingMore = false;
         } catch(e) {
             if (offset === 0) fileListEl.innerHTML = `<div class="cv-sidebar-tip">加载失败：${e.message}</div>`;
@@ -864,6 +866,7 @@ async function loadFileList(refresh = false) {
                 fileListEl.appendChild(el);
             });
             updateLoadStatus();
+            _updateRefreshTime(data.last_refresh_ts);
             isLoadingMore = false;
         } catch(e) {
             if (offset === 0) fileListEl.innerHTML = `<div class="cv-sidebar-tip">加载失败：${e.message}</div>`;
@@ -877,6 +880,18 @@ function updateLoadStatus() {
     document.getElementById('loadStatus').textContent = _deepSearchActive
         ? `深度搜索: ${totalItems} 条匹配`
         : `已加载 ${loaded} / 共 ${totalItems} 条`;
+}
+
+function _updateRefreshTime(ts) {
+    var el = document.getElementById('lastRefreshTime');
+    if (!el || !ts) return;
+    var d = new Date(ts * 1000);
+    var m = d.getMonth() + 1;
+    var day = d.getDate();
+    var h = d.getHours();
+    var min = d.getMinutes();
+    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+    el.textContent = d.getFullYear() + '/' + pad(m) + '/' + pad(day) + ' ' + pad(h) + ':' + pad(min);
 }
 
 function loadMore() {
