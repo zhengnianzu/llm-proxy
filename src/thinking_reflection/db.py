@@ -82,6 +82,9 @@ def init(path: Path) -> None:
         ):
             if definition.split()[0] not in run_columns:
                 conn.execute(f"ALTER TABLE reflection_runs ADD COLUMN {definition}")
+        traj_columns = {row["name"] for row in conn.execute("PRAGMA table_info(run_trajectories)")}
+        if "source_root" not in traj_columns:
+            conn.execute("ALTER TABLE run_trajectories ADD COLUMN source_root TEXT DEFAULT ''")
 
 
 def task_detail_dir(source_key: str, export_created_at: str) -> Path:
@@ -199,6 +202,17 @@ def retry_all_failed(path: Path, task_group_id: str) -> int:
         cursor = conn.execute(
             "UPDATE thinking_tasks SET status='pending',last_error=NULL,retry_count=0,updated_at=? WHERE run_id=? AND status='failed'",
             (now, task_group_id),
+        )
+        return cursor.rowcount
+
+
+def reset_all_done(path: Path, run_id: str) -> int:
+    now = time.time()
+    with connect(path) as conn:
+        cursor = conn.execute(
+            "UPDATE thinking_tasks SET status='pending',processed_text=NULL,last_error=NULL,"
+            "retry_count=0,updated_at=? WHERE run_id=? AND status='done'",
+            (now, run_id),
         )
         return cursor.rowcount
 

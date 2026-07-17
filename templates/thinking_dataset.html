@@ -4,6 +4,7 @@
 {% block head_extra %}
 <script src="/static/js/vue.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="/static/js/chat-render.js"></script>
 {% endblock %}
 {% block page_styles %}
 .ds-wrap{display:flex;height:calc(100vh - 60px);overflow:hidden}
@@ -122,6 +123,36 @@
 
 .load-more-status{padding:8px 14px;font-size:11px;color:var(--muted-foreground);text-align:center;border-top:1px solid var(--border);flex-shrink:0}
 
+/* Tool mode bar */
+.tool-mode-bar{display:flex;gap:0;margin-bottom:10px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.tool-mode-bar .mode-btn{padding:5px 12px;border:none;background:var(--card);color:var(--foreground);font-size:.78rem;cursor:pointer}
+.tool-mode-bar .mode-btn.active{background:var(--primary);color:var(--primary-foreground)}
+.tool-filter-chips{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
+.tool-filter-chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--muted-foreground)}
+.tool-filter-chip.active{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
+.tool-badge-row{display:flex;flex-wrap:wrap;gap:4px;padding:6px 12px}
+.tool-badge-chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:600;background:#fed7aa;color:#92400e}
+.dark .tool-badge-chip{background:rgba(251,146,60,0.25);color:#fbbf24}
+/* System prompt (from chat-render.js) */
+.block.system-prompt{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:var(--radius-lg);overflow:hidden;margin-bottom:12px}
+.dark .block.system-prompt{background:rgba(34,197,94,0.08);border-color:rgba(74,222,128,0.25)}
+.system-summary{display:flex;align-items:center;gap:8px;padding:8px 14px;cursor:pointer;user-select:none;font-size:13px;color:#15803d;font-weight:500;background:rgba(0,0,0,.02)}
+.dark .system-summary{color:#4ade80;background:rgba(255,255,255,.02)}
+.system-chevron{font-size:10px;transition:transform .15s}
+.system-chevron.collapsed{transform:rotate(-90deg)}
+.system-body{padding:10px 14px;font-size:12px;color:#166534;white-space:pre-wrap;border-top:1px solid #bbf7d0;max-height:300px;overflow-y:auto}
+.system-body.collapsed{display:none}
+.dark .system-body{color:#86efac;border-top-color:rgba(74,222,128,0.25)}
+/* OAI tool_role block (from chat-render.js) */
+.block.tool-role{background:#fff7ed;border:1px solid #fed7aa;border-radius:var(--radius-lg);overflow:hidden}
+.dark .block.tool-role{background:rgba(180,83,9,0.12);border-color:rgba(251,146,60,0.3)}
+.tool-role-hdr{color:#92400e;background:rgba(0,0,0,.03)}
+.dark .tool-role-hdr{color:#fbbf24;background:rgba(255,255,255,.03)}
+.badge-tool-role{background:#ea580c;color:#fff}
+/* HTML preview button */
+.html-preview-btn{display:inline-block;margin-top:6px;padding:4px 10px;border-radius:4px;background:#3b82f6;color:#fff;font-size:12px;text-decoration:none;cursor:pointer}
+.html-preview-btn:hover{background:#2563eb}
+
 .btn{border:1px solid var(--border);background:var(--card);color:var(--foreground);padding:5px 10px;border-radius:var(--radius);cursor:pointer;font-size:.78rem}
 .btn.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
 .btn.sm{padding:3px 7px;font-size:.72rem}
@@ -137,9 +168,9 @@
 {% block content %}
 <div id="datasetApp">{% raw %}
   <div class="ds-wrap">
-    <!-- Left panel: trajectory list -->
+    <!-- Left panel: trajectory / session list -->
     <div class="ds-left">
-      <div class="filter-bar">
+      <div v-if="!sessionMode" class="filter-bar">
         <select v-model="trajFilter">
           <option value="all">全部</option>
           <option value="has_failed">有失败</option>
@@ -148,30 +179,49 @@
         </select>
         <button class="btn sm" @click="loadTrajectories">刷新</button>
       </div>
-      <div class="traj-list">
-        <div v-for="t in filteredTrajectories" :key="t.trajectory_id" class="traj-item" :class="{active:selectedTrajId===t.trajectory_id}" @click="selectTrajectory(t)">
-          <div class="name">{{t.session_id}}</div>
-          <div class="meta">{{shortPath(t.trajectory_path)}}</div>
-          <div class="counts">
-            <span class="ok">✓ {{t.done||0}}</span>
-            <span class="bad">✗ {{t.failed||0}}</span>
-            <span class="warn">⏳ {{t.pending||0}}</span>
-            <span>📊 {{t.total_tasks||0}}</span>
-          </div>
-        </div>
-        <div v-if="trajLoadingMore" style="padding:12px;text-align:center;color:var(--muted-foreground);font-size:.78rem">加载中...</div>
-        <div v-if="!filteredTrajectories.length&&!trajLoading" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">{{trajectories.length?'无匹配项':'暂无轨迹'}}</div>
-        <div v-if="trajLoading&&!trajectories.length" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">加载中...</div>
+      <div v-if="sessionMode" class="filter-bar">
+        <span style="font-size:.78rem;color:var(--muted-foreground)">Session 列表</span>
+        <button class="btn sm" @click="loadSessions(true)">刷新</button>
       </div>
-      <div v-if="trajTotal>0" class="load-more-status">已加载 {{trajectories.length}} / 共 {{trajTotal}}</div>
+      <div class="traj-list">
+        <template v-if="!sessionMode">
+          <div v-for="t in filteredTrajectories" :key="t.trajectory_id" class="traj-item" :class="{active:selectedTrajId===t.trajectory_id}" @click="selectTrajectory(t)">
+            <div class="name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px" :title="q1Map[t.session_id]||t.session_id">{{q1Map[t.session_id]||t.session_id}}</div>
+            <div class="meta">{{t.session_id}}</div>
+            <div class="counts">
+              <span class="ok">✓ {{t.done||0}}</span>
+              <span class="bad">✗ {{t.failed||0}}</span>
+              <span class="warn">⏳ {{t.pending||0}}</span>
+              <span>📊 {{t.total_tasks||0}}</span>
+            </div>
+          </div>
+        </template>
+        <template v-if="sessionMode">
+          <div v-for="s in sessionItems" :key="s.session_id" class="traj-item" :class="{active:selectedSessionId===s.session_id}" @click="selectSession(s)">
+            <div class="name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px" :title="s.q1">{{s.q1||s.session_id}}</div>
+            <div class="counts">
+              <span>{{s.model||'-'}}</span>
+              <span v-if="s.duration_s">{{Math.round(s.duration_s)}}s</span>
+              <span>{{s.api_call_count||0}} calls</span>
+            </div>
+          </div>
+        </template>
+        <div v-if="sessionMode&&sessionLoadingMore||!sessionMode&&trajLoadingMore" style="padding:12px;text-align:center;color:var(--muted-foreground);font-size:.78rem">加载中...</div>
+        <div v-if="!sessionMode&&!filteredTrajectories.length&&!trajLoading" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">{{trajectories.length?'无匹配项':'暂无轨迹'}}</div>
+        <div v-if="!sessionMode&&trajLoading&&!trajectories.length" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">加载中...</div>
+        <div v-if="sessionMode&&!sessionItems.length&&!sessionLoading" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">暂无 Session</div>
+        <div v-if="sessionMode&&sessionLoading&&!sessionItems.length" style="padding:20px;text-align:center;color:var(--muted-foreground);font-size:.82rem">加载中...</div>
+      </div>
+      <div v-if="!sessionMode&&trajTotal>0" class="load-more-status">已加载 {{trajectories.length}} / 共 {{trajTotal}}</div>
+      <div v-if="sessionMode&&sessionTotal>0" class="load-more-status">已加载 {{sessionItems.length}} / 共 {{sessionTotal}}</div>
     </div>
 
     <!-- Center panel: chat-view conversation rendering -->
     <div class="ds-center" ref="centerPanel">
-      <div v-if="selectedTrajId" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+      <div v-if="selectedTrajId||selectedSessionId" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
         <div>
-          <b>{{currentTrajSessionId}}</b>
-          <small style="margin-left:8px;color:var(--muted-foreground)">{{currentTrajPath}}</small>
+          <b>{{sessionMode?selectedSessionId:currentTrajSessionId}}</b>
+          <small v-if="!sessionMode" style="margin-left:8px;color:var(--muted-foreground)">{{currentTrajPath}}</small>
         </div>
         <div class="mode-toggle">
           <button :class="{active:viewMode==='reflect'}" @click="viewMode='reflect'">Reflect</button>
@@ -179,8 +229,8 @@
         </div>
       </div>
       <div v-if="mergedData" ref="messagesContainer" id="chatMessages"></div>
-      <div v-else-if="selectedTrajId" style="padding:40px;text-align:center;color:var(--muted-foreground)">加载对话内容中...</div>
-      <div v-else style="padding:60px;text-align:center;color:var(--muted-foreground)">← 请从左侧选择一个 Trajectory</div>
+      <div v-else-if="selectedTrajId||selectedSessionId" style="padding:40px;text-align:center;color:var(--muted-foreground)">加载对话内容中...</div>
+      <div v-else style="padding:60px;text-align:center;color:var(--muted-foreground)">← 请从左侧选择一个 Session</div>
     </div>
 
     <!-- Right panel: status + issues -->
@@ -258,111 +308,7 @@ if (typeof marked !== 'undefined') {
     marked.setOptions({ breaks: true, gfm: true });
 }
 
-function _esc(s) {
-    if (s === null || s === undefined) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-function _looksLikeMarkdown(text) {
-    return /^#{1,6}\s|^\s*[-*+]\s|\*\*|__|\[.*\]\(.*\)|```|^\s*>\s|^\|.*\|/m.test(text);
-}
-
-function _renderTextBlock(text) {
-    var el = document.createElement('div');
-    el.className = 'block text';
-    if (typeof marked !== 'undefined' && _looksLikeMarkdown(text)) {
-        el.classList.add('md-rendered');
-        el.innerHTML = marked.parse(text);
-    } else {
-        el.textContent = text;
-    }
-    if (text.length > 1500) {
-        var wrapper = document.createElement('div');
-        wrapper.style.cssText = 'display:flex;flex-direction:column;min-width:0;max-width:100%';
-        el.classList.add('collapsible', 'collapsed');
-        wrapper.appendChild(el);
-        var btn = document.createElement('button');
-        btn.className = 'text-toggle-btn';
-        btn.textContent = '展开全部';
-        btn.onclick = function() {
-            var c = el.classList.toggle('collapsed');
-            btn.textContent = c ? '展开全部' : '收起';
-        };
-        wrapper.appendChild(btn);
-        return wrapper;
-    }
-    return el;
-}
-
-function _renderToolUseBlock(block) {
-    var el = document.createElement('div');
-    el.className = 'block tool-use';
-    var hdr = document.createElement('div');
-    hdr.className = 'block-hdr';
-    hdr.innerHTML = '<span class="badge badge-tool-use">tool_use</span>' +
-        '<span class="tool-name">' + _esc(block.name || '') + '</span>' +
-        '<span class="tool-id">' + _esc(block.id || '') + '</span>';
-    el.appendChild(hdr);
-    var body = document.createElement('div');
-    body.className = 'block-body';
-    var input = block.input || {};
-    if (input.command !== undefined) {
-        var lbl = document.createElement('div');
-        lbl.className = 'cmd-label';
-        lbl.textContent = '$ command';
-        var pre = document.createElement('pre');
-        pre.className = 'cmd-pre';
-        pre.textContent = input.command;
-        body.appendChild(lbl);
-        body.appendChild(pre);
-    } else if (typeof input === 'object') {
-        var keys = Object.keys(input);
-        if (keys.length) {
-            var kv = document.createElement('div');
-            kv.className = 'input-kv';
-            for (var ki = 0; ki < keys.length; ki++) {
-                var row = document.createElement('div');
-                row.className = 'kv-row';
-                var keyEl = document.createElement('span');
-                keyEl.className = 'kv-key';
-                keyEl.textContent = keys[ki] + ':';
-                var valEl = document.createElement('span');
-                valEl.className = 'kv-val';
-                var v = input[keys[ki]];
-                valEl.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
-                row.appendChild(keyEl);
-                row.appendChild(valEl);
-                kv.appendChild(row);
-            }
-            body.appendChild(kv);
-        }
-    }
-    el.appendChild(body);
-    return el;
-}
-
-function _renderToolResultBlock(block) {
-    var isError = block.is_error;
-    var el = document.createElement('div');
-    el.className = 'block tool-result' + (isError ? ' is-error' : '');
-    var hdr = document.createElement('div');
-    hdr.className = 'block-hdr';
-    hdr.innerHTML = '<span class="badge ' + (isError ? 'badge-error' : 'badge-tool-result') + '">' + (isError ? 'error' : 'tool_result') + '</span>' +
-        '<span class="tool-id">' + _esc(block.tool_use_id || '') + '</span>';
-    el.appendChild(hdr);
-    var body = document.createElement('div');
-    body.className = 'block-body';
-    var rawContent = block.content;
-    var text = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent, null, 2);
-    var pre = document.createElement('pre');
-    pre.className = 'result-pre' + (isError ? ' is-error' : '');
-    pre.textContent = text || '(no output)';
-    body.appendChild(pre);
-    el.appendChild(body);
-    return el;
-}
-
-function _renderThinkingBlock(block, viewMode, tasks) {
+function _renderThinkingWithReflect(block, viewMode, tasks) {
     var el = document.createElement('div');
     el.className = 'block reasoning' + (block.reflect && block.reflect.status === 'failed' ? ' has-error' : '');
     if (block.signature) {
@@ -392,7 +338,7 @@ function _renderThinkingBlock(block, viewMode, tasks) {
         var reflectText = block.reflect.text || '';
         var statusCls = block.reflect.status || '';
         var statusMap = {done:'完成',failed:'失败',pending:'等待',processing:'处理中'};
-        summary.innerHTML = '<span class="reasoning-chevron collapsed">&#9660;</span><span>Reflect 思考 (' + reflectText.length + ' 字)<span class="reflect-tag ' + _esc(statusCls) + '">' + _esc(statusMap[statusCls] || statusCls) + '</span></span>';
+        summary.innerHTML = '<span class="reasoning-chevron collapsed">&#9660;</span><span>Reflect 思考 (' + reflectText.length + ' 字)<span class="reflect-tag ' + esc(statusCls) + '">' + esc(statusMap[statusCls] || statusCls) + '</span></span>';
     } else {
         var thinkingText = block.thinking || '';
         summary.innerHTML = '<span class="reasoning-chevron collapsed">&#9660;</span><span>思考过程 (' + thinkingText.length + ' 字)</span>';
@@ -419,67 +365,14 @@ function _renderThinkingBlock(block, viewMode, tasks) {
     return el;
 }
 
-function renderChatMessages(container, mergedData, viewMode, tasks) {
-    container.innerHTML = '';
-    var msgs = (mergedData && mergedData.messages) || [];
-    if (!msgs.length && mergedData && mergedData.request) msgs = mergedData.request.messages || [];
-    for (var mi = 0; mi < msgs.length; mi++) {
-        var m = msgs[mi];
-        var role = m.role || 'unknown';
-        var blocks = [];
-        if (typeof m.content === 'string') {
-            blocks = [{type: 'text', text: m.content}];
-        } else if (Array.isArray(m.content)) {
-            blocks = m.content;
-        } else if (m.content) {
-            blocks = [{type: 'text', text: JSON.stringify(m.content)}];
-        }
-        var displayRole = role === 'tool' ? 'user' : role;
-        var row = document.createElement('div');
-        row.className = 'msg-row ' + displayRole;
-        row.id = 'msg-' + mi;
-        var avatar = document.createElement('div');
-        avatar.className = 'avatar ' + displayRole;
-        avatar.textContent = displayRole === 'user' ? '👤' : '🤖';
-        var col = document.createElement('div');
-        col.className = 'msg-bubble-col';
-        for (var bi = 0; bi < blocks.length; bi++) {
-            var b = blocks[bi];
-            var blockEl = null;
-            if (b.type === 'text') {
-                blockEl = _renderTextBlock(b.text || '');
-            } else if (b.type === 'thinking') {
-                blockEl = _renderThinkingBlock(b, viewMode, tasks);
-            } else if (b.type === 'tool_use') {
-                blockEl = _renderToolUseBlock(b);
-            } else if (b.type === 'tool_result') {
-                blockEl = _renderToolResultBlock(b);
-            } else {
-                blockEl = document.createElement('div');
-                blockEl.className = 'block text';
-                blockEl.style.fontSize = '12px';
-                blockEl.style.color = 'var(--muted-foreground)';
-                blockEl.textContent = JSON.stringify(b, null, 2);
-            }
-            if (blockEl) col.appendChild(blockEl);
-        }
-        if (displayRole === 'user') {
-            row.appendChild(avatar);
-            row.appendChild(col);
-        } else {
-            row.appendChild(col);
-            row.appendChild(avatar);
-        }
-        container.appendChild(row);
-    }
-}
-
 new Vue({el:'#datasetApp',data:{
     recordId:{{ record_id }},
     runId:new URLSearchParams(location.search).get('run_id')||'',
     trajectories:[],selectedTrajId:'',mergedData:null,currentTasks:[],runInfo:null,failedTasks:[],
     viewMode:'reflect',trajFilter:'all',rightTab:'issues',timer:null,
-    trajOffset:0,trajTotal:0,trajLoading:false,trajLoadingMore:false,TRAJ_PAGE:50
+    trajOffset:0,trajTotal:0,trajLoading:false,trajLoadingMore:false,TRAJ_PAGE:50,
+    sessionMode:false,sessionItems:[],sessionTotal:0,sessionOffset:0,selectedSessionId:'',sessionLoading:false,sessionLoadingMore:false,
+    q1Map:{}
 },computed:{
     filteredTrajectories:function(){var self=this;return this.trajectories.filter(function(t){if(self.trajFilter==='all')return true;if(self.trajFilter==='has_failed')return(t.failed||0)>0;if(self.trajFilter==='done')return(t.pending||0)===0&&(t.processing||0)===0;if(self.trajFilter==='processing')return(t.processing||0)>0||(t.pending||0)>0;return true})},
     currentTrajSessionId:function(){var t=this._findCurrentTraj();return t?t.session_id:''},
@@ -492,20 +385,41 @@ new Vue({el:'#datasetApp',data:{
     mergedData:function(){var self=this;this.$nextTick(function(){self._renderChat()})},
     trajFilter:function(){this.loadTrajectories()}
 },async mounted(){
-    if(!this.runId&&this.recordId){try{var runs=await this.json('/api/reflection/runs?source_export_id='+this.recordId);if(runs.length)this.runId=runs[0].run_id}catch(e){}}
-    if(this.runId){await this.loadRun();await this.loadTrajectories();if(this.trajectories.length)this.selectTrajectory(this.trajectories[0])}
+    if(!this.runId&&this.recordId){try{var runs=await this.json('/api/reflection/runs?source_export_id='+this.recordId);if(runs.length){this.runId=runs[0].task_group_id||runs[0].run_id}}catch(e){}}
+    if(this.runId){await this.loadRun();await this.loadTrajectories();await this._loadQ1Map();if(this.trajectories.length)this.selectTrajectory(this.trajectories[0])}
+    else if(this.recordId){this.sessionMode=true;await this.loadSessions()}
     this.setupTimer();
 },beforeDestroy:function(){clearInterval(this.timer)},
 methods:{
     headers:function(){return{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
     async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},
     _findCurrentTraj:function(){var id=this.selectedTrajId;for(var i=0;i<this.trajectories.length;i++){if(this.trajectories[i].trajectory_id===id)return this.trajectories[i]}return null},
-    _renderChat:function(){var el=document.getElementById('chatMessages');if(el&&this.mergedData){renderChatMessages(el,this.mergedData,this.viewMode,this.currentTasks)}},
+    _renderChat:function(){
+        var el=document.getElementById('chatMessages');
+        if(!el||!this.mergedData)return;
+        el.innerHTML='';
+        var msgs=(this.mergedData&&this.mergedData.messages)||[];
+        if(!msgs.length&&this.mergedData&&this.mergedData.request)msgs=this.mergedData.request.messages||[];
+        var self=this;
+        renderChatMessages(el,msgs,{
+            showToolMode:true,
+            onThinkingBlock:function(block){return _renderThinkingWithReflect(block,self.viewMode,self.currentTasks)}
+        });
+    },
     setupTimer:function(){clearInterval(this.timer);if(this.runInfo&&this.runInfo.status==='running'){var self=this;this.timer=setInterval(function(){self.refreshAll()},5000)}},
     async loadRun(){try{this.runInfo=await this.json('/api/reflection/runs/'+this.runId);this.setupTimer()}catch(e){}},
+    async _loadQ1Map(){
+        try{
+            var r=await this.json('/api/reflection/datasets/'+this.recordId+'/sessions?offset=0&limit=9999');
+            var items=r.items||[];
+            var map={};
+            for(var i=0;i<items.length;i++){map[items[i].session_id]=items[i].q1||''}
+            this.q1Map=map;
+        }catch(e){}
+    },
     async loadTrajectories(){if(!this.runId)return;try{this.trajLoading=true;this.trajOffset=0;var raw=await this.json('/api/reflection/runs/'+this.runId+'/trajectories?offset=0&limit='+this.TRAJ_PAGE);if(Array.isArray(raw)){this.trajectories=raw;this.trajTotal=raw.length}else{this.trajectories=raw.items||[];this.trajTotal=raw.total||0}this.trajLoading=false;this.$nextTick(this._bindTrajScroll)}catch(e){this.trajLoading=false}},
     async loadMoreTrajectories(){if(this.trajLoadingMore||this.trajectories.length>=this.trajTotal)return;this.trajLoadingMore=true;try{var raw=await this.json('/api/reflection/runs/'+this.runId+'/trajectories?offset='+this.trajectories.length+'&limit='+this.TRAJ_PAGE);var items=Array.isArray(raw)?raw:(raw.items||[]);for(var i=0;i<items.length;i++){this.trajectories.push(items[i])}if(!Array.isArray(raw))this.trajTotal=raw.total||this.trajTotal;this.trajLoadingMore=false}catch(e){this.trajLoadingMore=false}},
-    async loadFailedTasks(){if(!this.runId)return;try{this.failedTasks=await this.json('/api/reflection/tasks?run_id='+this.runId+'&status=failed')}catch(e){}},
+    async loadFailedTasks(){if(!this.runId)return;try{var r=await this.json('/api/reflection/tasks?run_id='+this.runId+'&status=failed&limit=1000');this.failedTasks=r.items||[]}catch(e){}},
     async selectTrajectory(t){
         this.selectedTrajId=t.trajectory_id;
         try{
@@ -522,6 +436,38 @@ methods:{
     async retryAllFailed(){if(!confirm('确认重试全部 '+this.failedTasks.length+' 个失败任务？'))return;try{var r=await this.json('/api/reflection/tasks/retry-failed',{method:'POST',headers:this.headers(),body:JSON.stringify({run_id:this.runId})});alert('已重置 '+r.retried+' 个失败任务');await this.refreshAll()}catch(e){alert(e.message)}},
     async exportRun(){try{var r=await this.json('/api/reflection/runs/'+this.runId+'/export',{method:'POST',headers:this.headers()});alert('已导出 '+r.count+' 个文件到 '+r.root);await this.loadTrajectories()}catch(e){alert(e.message)}},
     async uploadObs(){try{var r=await this.json('/api/reflection/runs/'+this.runId+'/upload-obs',{method:'POST',headers:this.headers()});alert('开始上传到 '+(r.dst||'OBS'))}catch(e){alert(e.message)}},
+    async loadSessions(force){
+        this.sessionLoading=true;this.sessionOffset=0;
+        var forceParam=force?'&force=true':'';
+        try{
+            var r=await this.json('/api/reflection/datasets/'+this.recordId+'/sessions?offset=0&limit='+this.TRAJ_PAGE+forceParam);
+            this.sessionItems=r.items||[];this.sessionTotal=r.total||0;
+            this.sessionLoading=false;
+            this.$nextTick(this._bindSessionScroll);
+        }catch(e){this.sessionLoading=false}
+    },
+    async loadMoreSessions(){
+        if(this.sessionLoadingMore||this.sessionItems.length>=this.sessionTotal)return;
+        this.sessionLoadingMore=true;
+        try{
+            var r=await this.json('/api/reflection/datasets/'+this.recordId+'/sessions?offset='+this.sessionItems.length+'&limit='+this.TRAJ_PAGE);
+            var items=r.items||[];
+            for(var i=0;i<items.length;i++){this.sessionItems.push(items[i])}
+            this.sessionTotal=r.total||this.sessionTotal;
+            this.sessionLoadingMore=false;
+        }catch(e){this.sessionLoadingMore=false}
+    },
+    async selectSession(s){
+        this.selectedSessionId=s.session_id;this.selectedTrajId='';
+        var files=s.trajectory_files||[];
+        if(!files.length){this.mergedData=null;this.currentTasks=[];return}
+        var fname=files[0];
+        try{
+            var data=await this.json('/api/reflection/datasets/'+this.recordId+'/session-trajectory?session_id='+encodeURIComponent(s.session_id)+'&file_name='+encodeURIComponent(fname));
+            this.mergedData=data.merged;this.currentTasks=data.tasks||[];
+        }catch(e){this.mergedData=null;this.currentTasks=[]}
+    },
+    _bindSessionScroll:function(){var listEl=this.$el.querySelector('.traj-list');if(!listEl||listEl._sessBound)return;listEl._sessBound=true;var self=this;listEl.addEventListener('scroll',function(){if(self.sessionLoadingMore||self.sessionItems.length>=self.sessionTotal)return;if(listEl.scrollTop+listEl.clientHeight>=listEl.scrollHeight-60){self.loadMoreSessions()}})},
     _bindTrajScroll:function(){var listEl=this.$el.querySelector('.traj-list');if(!listEl||listEl._trajBound)return;listEl._trajBound=true;var self=this;listEl.addEventListener('scroll',function(){if(self.trajLoadingMore||self.trajectories.length>=self.trajTotal)return;if(listEl.scrollTop+listEl.clientHeight>=listEl.scrollHeight-60){self.loadMoreTrajectories()}})}
 }})
 </script>

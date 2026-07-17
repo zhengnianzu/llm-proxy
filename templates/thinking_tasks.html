@@ -16,6 +16,7 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
 .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:var(--radius-lg);margin-bottom:16px}table{width:100%;border-collapse:collapse;min-width:900px}th,td{padding:8px 12px;border-bottom:1px solid var(--border);font-size:.82rem;text-align:left}th{background:var(--muted);color:var(--muted-foreground)}
 .export-row:hover{background:var(--accent)}
 .task-row{background:var(--card)}.task-row td{padding:5px 12px 5px 42px;font-size:.78rem;font-family:var(--font-mono,monospace)}.task-row:hover{background:var(--accent)}
+.runs-row td{padding:0 12px 0 42px}.runs-sub-table{width:100%;border-collapse:collapse;margin:6px 0;font-size:.78rem}.runs-sub-table th{background:var(--muted);padding:5px 8px;font-size:.74rem;color:var(--muted-foreground);text-align:left;border-bottom:1px solid var(--border)}.runs-sub-table td{padding:5px 8px;border-bottom:1px solid var(--border)}.runs-sub-table tr:last-child td{border-bottom:none}
 .badge{padding:3px 8px;border-radius:999px;background:var(--muted);white-space:nowrap;font-size:.76rem}.badge.running,.badge.processing{color:var(--primary)}.badge.completed,.badge.done{color:var(--success)}.badge.failed{color:var(--destructive)}.badge.draft,.badge.paused,.badge.pending{color:#e67e00}
 .empty{text-align:center;padding:44px;color:var(--muted-foreground)}
 .drawer-bg{position:fixed;inset:0;background:#0004;z-index:998}.drawer{position:fixed;top:0;right:0;width:560px;max-width:90vw;height:100vh;background:var(--card);box-shadow:-4px 0 20px #0003;z-index:999;display:flex;flex-direction:column;overflow:hidden}.drawer-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}.drawer-body{flex:1;overflow:auto;padding:16px 20px}
@@ -48,6 +49,10 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
   <div class="config-panel">
     <h4>任务配置</h4>
     <div class="config-row">
+      <div class="config-field" style="min-width:280px">
+        <label>Endpoint</label>
+        <input v-model="globalConfig.reflection_endpoint" placeholder="http://127.0.0.1:8084">
+      </div>
       <div class="config-field" style="min-width:200px">
         <label>API Key</label>
         <select v-model="globalConfig.reflection_api_key_id">
@@ -87,6 +92,7 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
     <button class="btn warn" @click="batchPause" :disabled="!hasChecked">暂停</button>
     <button class="btn danger" @click="batchCancel" :disabled="!hasChecked">取消</button>
     <button class="btn" @click="batchRerun" :disabled="!hasChecked">补跑</button>
+    <button class="btn danger" @click="batchRerunDone" :disabled="!hasChecked">重跑</button>
   </div>
 
   <!-- Main table -->
@@ -119,10 +125,32 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
             <td><span class="badge" :class="item.run_status">{{item.run_status}}</span></td>
             <td>
               <button class="btn" @click="toggleExpand(item.export_id)" style="font-size:.72rem">详情</button>
-              <button class="btn" @click="openRunConfig(item)" style="font-size:.72rem">配置</button>
-              <button class="btn" @click="openRunRecord(item)" style="font-size:.72rem">运行记录</button>
-              <button class="btn" @click="openRunDetail(item)" style="font-size:.72rem">日志</button>
+              <button class="btn" @click="toggleRunRecords(item)" style="font-size:.72rem">{{item._runs_expanded?'收起记录':'运行记录'}}</button>
               <button v-if="item.task_failed>0" class="btn warn" @click="singleRerun(item)" style="font-size:.72rem">补跑</button>
+            </td>
+          </tr>
+          <!-- Inline run records sub-table -->
+          <tr v-if="item._runs_expanded" :key="'rr-'+item.export_id" class="runs-row">
+            <td colspan="8">
+              <div v-if="item._runs_loading" style="color:var(--muted-foreground);font-size:.78rem;padding:8px 0">加载中...</div>
+              <table v-else-if="item._runs&&item._runs.length" class="runs-sub-table">
+                <thead><tr><th>Run ID</th><th>类型</th><th>状态</th><th>模型</th><th>完成/失败/总计</th><th>创建时间</th><th>操作</th></tr></thead>
+                <tbody>
+                  <tr v-for="rr in item._runs" :key="rr.run_id">
+                    <td><code style="font-size:.72rem">{{rr.run_id}}</code></td>
+                    <td><span v-if="rr.launch_type==='rerun'" class="badge" style="background:#e67e0022;color:#e67e00">补跑</span><span v-else class="badge">启动</span></td>
+                    <td><span class="badge" :class="rr.status">{{rr.status}}</span></td>
+                    <td style="font-size:.74rem">{{rr.reflection_model||'-'}}</td>
+                    <td style="font-size:.74rem"><span class="ok">{{rr.snapshot_done||0}}</span> / <span class="bad">{{rr.snapshot_failed||0}}</span> / {{rr.snapshot_total||0}}</td>
+                    <td style="font-size:.74rem">{{fmtFullTs(rr.created_at)}}</td>
+                    <td>
+                      <button class="btn" style="font-size:.70rem" @click="viewRunLog(rr)">日志</button>
+                      <button class="btn" style="font-size:.70rem" @click="viewRunSnapshot(rr)">详情</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else style="color:var(--muted-foreground);font-size:.78rem;padding:8px 0">暂无运行记录</div>
             </td>
           </tr>
           <template v-if="expanded[item.export_id]">
@@ -141,6 +169,13 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
               </td>
               <td>
                 <button v-if="t.status==='failed'" class="btn" style="font-size:.72rem" @click.stop="retryTask(t)">重试</button>
+              </td>
+            </tr>
+            <tr v-if="item._tasks&&item._tasks.length<item._tasks_total" :key="'tm-'+item.export_id" class="task-row">
+              <td colspan="8" style="text-align:center;padding:8px">
+                <button class="btn" style="font-size:.72rem" @click="loadMoreTasks(item.export_id)" :disabled="item._tasks_loading_more">
+                  {{item._tasks_loading_more?'加载中...':'加载更多 ('+item._tasks.length+'/'+item._tasks_total+')'}}
+                </button>
               </td>
             </tr>
             <tr v-if="!item._tasks_loading&&(!item._tasks||!item._tasks.length)" :key="'te-'+item.export_id" class="task-row">
@@ -188,86 +223,29 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
     </div>
   </template>
 
-  <!-- Run Record Drawer -->
-  <template v-if="recordDrawer">
-    <div class="drawer-bg" @click="recordDrawer=false"></div>
+  <!-- Run Record Snapshot Drawer -->
+  <template v-if="snapshotDrawer">
+    <div class="drawer-bg" @click="snapshotDrawer=false"></div>
     <div class="drawer">
-      <div class="drawer-head"><h3>运行记录</h3><button class="btn" @click="recordDrawer=false">关闭</button></div>
+      <div class="drawer-head"><h3>Run 详情</h3><button class="btn" @click="snapshotDrawer=false">关闭</button></div>
       <div class="drawer-body">
-        <div v-if="recordItem" style="margin-bottom:12px;font-size:.82rem">
-          <strong>{{recordItem.key_slot}}</strong> · {{recordItem.created_at||'-'}}
+        <div v-if="snapshotRun" class="run-info">
+          <div class="row"><span class="lbl">Run ID</span><code style="font-size:.78rem">{{snapshotRun.run_id}}</code></div>
+          <div class="row"><span class="lbl">状态</span><span class="badge" :class="snapshotRun.status">{{snapshotRun.status}}</span></div>
+          <div class="row"><span class="lbl">模型</span><span>{{snapshotRun.reflection_model}}</span></div>
+          <div class="row"><span class="lbl">方法</span><span>{{snapshotRun.method}}</span></div>
+          <div class="row"><span class="lbl">Workers</span><span>{{snapshotRun.worker_count}}</span></div>
+          <div class="row"><span class="lbl">创建</span><span>{{fmtFullTs(snapshotRun.created_at)}}</span></div>
+          <div class="row" v-if="snapshotRun.started_at"><span class="lbl">开始</span><span>{{fmtFullTs(snapshotRun.started_at)}}</span></div>
+          <div class="row" v-if="snapshotRun.finished_at"><span class="lbl">结束</span><span>{{fmtFullTs(snapshotRun.finished_at)}}</span></div>
+          <div class="row" v-if="snapshotRun.parent_run_id"><span class="lbl">上一轮</span><span>{{snapshotRun.parent_run_id}}</span></div>
         </div>
-        <div v-if="recordDetailDir" style="font-family:var(--font-mono,monospace);font-size:.74rem;color:var(--muted-foreground);word-break:break-all;padding:8px 10px;background:var(--muted);border-radius:var(--radius);margin-bottom:14px">
-          详情目录: {{recordDetailDir}}
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+          <div style="font-size:.82rem"><span class="ok">完成 {{snapshotRun?snapshotRun.snapshot_done||0:0}}</span></div>
+          <div style="font-size:.82rem"><span class="bad">失败 {{snapshotRun?snapshotRun.snapshot_failed||0:0}}</span></div>
+          <div style="font-size:.82rem"><span class="warn">待处理 {{snapshotRun?snapshotRun.snapshot_pending||0:0}}</span></div>
+          <div style="font-size:.82rem">总计 {{snapshotRun?snapshotRun.snapshot_total||0:0}}</div>
         </div>
-        <div v-if="recordRunsLoading" style="color:var(--muted-foreground);font-size:.82rem">加载中...</div>
-        <div v-for="(rr,ri) in recordRuns" :key="rr.run_id" style="border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;margin-bottom:10px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <div>
-              <span class="badge" :class="rr.status">{{rr.status}}</span>
-              <span v-if="rr.launch_type==='rerun'" class="badge" style="background:#e67e0022;color:#e67e00;margin-left:4px">补跑</span>
-              <span v-else class="badge" style="background:var(--primary-foreground);margin-left:4px">启动</span>
-            </div>
-            <code style="font-size:.72rem;color:var(--muted-foreground)">{{rr.run_id}}</code>
-          </div>
-          <div style="font-size:.78rem;display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">
-            <span>模型: {{rr.reflection_model||'-'}}</span>
-            <span>方法: {{rr.method||'-'}}</span>
-            <span>Workers: {{rr.worker_count||'-'}}</span>
-          </div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">
-            <div style="font-size:.78rem"><span style="color:var(--success)">完成 {{rr.snapshot_done||0}}</span></div>
-            <div style="font-size:.78rem"><span style="color:var(--destructive)">失败 {{rr.snapshot_failed||0}}</span></div>
-            <div style="font-size:.78rem"><span style="color:#e67e00">待处理 {{rr.snapshot_pending||0}}</span></div>
-            <div style="font-size:.78rem">总计 {{rr.snapshot_total||0}}</div>
-          </div>
-          <div style="font-size:.74rem;color:var(--muted-foreground)">
-            <span v-if="rr.created_at">创建: {{fmtFullTs(rr.created_at)}}</span>
-            <span v-if="rr.started_at"> · 开始: {{fmtFullTs(rr.started_at)}}</span>
-            <span v-if="rr.finished_at"> · 结束: {{fmtFullTs(rr.finished_at)}}</span>
-          </div>
-          <div v-if="rr.parent_run_id" style="font-size:.72rem;color:var(--muted-foreground);margin-top:4px">
-            上一轮: {{rr.parent_run_id}}
-          </div>
-        </div>
-        <div v-if="!recordRunsLoading&&!recordRuns.length" style="color:var(--muted-foreground);font-size:.82rem">暂无运行记录</div>
-      </div>
-    </div>
-  </template>
-
-  <!-- Run Config Drawer -->
-  <template v-if="cfgDrawer">
-    <div class="drawer-bg" @click="cfgDrawer=false"></div>
-    <div class="drawer">
-      <div class="drawer-head"><h3>Run 配置</h3><button class="btn" @click="cfgDrawer=false">关闭</button></div>
-      <div class="drawer-body">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-          <span class="badge" :class="cfgRun.run_status">{{cfgRun.run_status}}</span>
-          <span style="font-family:var(--font-mono,monospace);font-size:.74rem;color:var(--muted-foreground)">{{cfgRun.run_id}}</span>
-        </div>
-        <div style="margin-bottom:8px;font-size:.78rem;color:var(--muted-foreground)">
-          {{cfgRun.key_slot}} · {{cfgRun.created_at||'-'}}
-        </div>
-        <div style="margin-bottom:12px;font-size:.78rem;color:var(--muted-foreground)">
-          任务: {{cfgRun.task_total||0}} (完成 {{cfgRun.task_done||0}} / 失败 {{cfgRun.task_failed||0}} / 待处理 {{cfgRun.task_pending||0}})
-        </div>
-        <div class="test-field"><label>Endpoint</label><input v-model="cfgForm.reflection_endpoint"></div>
-        <div class="test-field"><label>Model</label><input v-model="cfgForm.reflection_model" placeholder="THINKING:claude-opus-4-8"></div>
-        <div style="display:flex;gap:8px">
-          <div class="test-field" style="flex:1"><label>Method</label><select v-model="cfgForm.method"><option value="bulk">bulk</option><option value="sentence">sentence</option></select></div>
-          <div class="test-field" style="flex:1"><label>Workers</label><input type="number" v-model.number="cfgForm.worker_count" min="1" max="32"></div>
-          <div class="test-field" style="flex:1"><label>Max Retries</label><input type="number" v-model.number="cfgForm.max_retries" min="1" max="10"></div>
-        </div>
-        <div class="test-field"><label>API Key</label>
-          <select v-model="cfgForm.reflection_api_key_id">
-            <option disabled value="">请选择</option>
-            <option v-for="k in config.keys" :value="k.id">{{k.name||('Key '+k.id)}} · {{k.key}}</option>
-          </select>
-        </div>
-        <button class="btn primary" @click="saveRunConfig" :disabled="cfgSaving" style="margin-top:12px;width:100%">
-          {{cfgSaving?'保存中...':'保存配置'}}
-        </button>
-        <p v-if="cfgMsg" :style="{marginTop:'8px',fontSize:'.8rem',color:cfgOk?'var(--success)':'var(--destructive)'}">{{cfgMsg}}</p>
       </div>
     </div>
   </template>
@@ -305,10 +283,9 @@ new Vue({el:'#tasksApp',data:{
   config:{source_key_slots:[],keys:[],reflection_base_url:''},
   rows:[],loading:false,error:'',expanded:{},
   stats:{total:0,done:0,pending:0,processing:0,failed:0},
-  globalConfig:{reflection_api_key_id:'',reflection_model:'THINKING:claude-opus-4-8',method:'bulk',worker_count:4,max_retries:3,max_tokens:16384},
+  globalConfig:{reflection_endpoint:'',reflection_api_key_id:'',reflection_model:'THINKING:claude-opus-4-8',method:'bulk',worker_count:4,max_retries:3,max_tokens:16384},
   detailDrawer:false,detailRun:null,logEntries:[],logSinceId:0,logPolling:null,
-  recordDrawer:false,recordRuns:[],recordRunsLoading:false,recordItem:null,recordDetailDir:'',
-  cfgDrawer:false,cfgRun:null,cfgForm:{},cfgSaving:false,cfgMsg:'',cfgOk:false,
+  snapshotDrawer:false,snapshotRun:null,
   testDrawer:false,testPhase:'input',testSteps:[],testResult:null,testError:'',testLoading:false,
   testForm:{model:'THINKING:claude-opus-4-8',method:'bulk',signature:'',thinking:'',max_tokens:16384,timeout:600,key_id:''}
 },computed:{
@@ -330,6 +307,9 @@ methods:{
     this.loading=true;this.error='';
     try{
       this.config=await this.json('/api/reflection/config');
+      if(!this.globalConfig.reflection_endpoint&&this.config.reflection_base_url){
+        this.globalConfig.reflection_endpoint=this.config.reflection_base_url;
+      }
       var summary=await this.json('/api/reflection/tasks-summary');
       this.stats=summary;
       var allDs=await this.json('/api/reflection/datasets-all');
@@ -341,14 +321,17 @@ methods:{
         rows.push({
           export_id:d.id,key_slot:d.key_slot,
           created_at:d.created_at,
-          run_id:run.run_id,run_status:run.status,
+          run_id:run.run_id,
+          task_group_id:run.task_group_id||run.run_id,
+          run_status:run.status,
           task_total:run.total_count||0,
           task_done:run.done||0,
           task_pending:run.pending||0,
           task_processing:run.processing||0,
           task_failed:run.failed||0,
           run:run,checked:false,
-          _tasks:null,_tasks_loading:false
+          _tasks:null,_tasks_loading:false,_tasks_total:0,_tasks_loading_more:false,
+          _runs:null,_runs_expanded:false,_runs_loading:false
         });
       }
       this.rows=rows;
@@ -371,12 +354,29 @@ methods:{
     if(!item)return;
     this.$set(item,'_tasks_loading',true);
     try{
-      var tasks=await this.json('/api/reflection/tasks?run_id='+encodeURIComponent(item.run_id));
-      this.$set(item,'_tasks',tasks);
+      var r=await this.json('/api/reflection/tasks?run_id='+encodeURIComponent(item.task_group_id)+'&offset=0&limit=50');
+      this.$set(item,'_tasks',r.items||[]);
+      this.$set(item,'_tasks_total',r.total||0);
     }catch(e){
       this.$set(item,'_tasks',[]);
+      this.$set(item,'_tasks_total',0);
     }
     this.$set(item,'_tasks_loading',false);
+  },
+
+  async loadMoreTasks(exportId){
+    var item=null;
+    for(var i=0;i<this.rows.length;i++){if(this.rows[i].export_id===exportId){item=this.rows[i];break}}
+    if(!item||!item._tasks||item._tasks_loading_more)return;
+    if(item._tasks.length>=item._tasks_total)return;
+    this.$set(item,'_tasks_loading_more',true);
+    try{
+      var r=await this.json('/api/reflection/tasks?run_id='+encodeURIComponent(item.task_group_id)+'&offset='+item._tasks.length+'&limit=50');
+      var items=r.items||[];
+      for(var j=0;j<items.length;j++){item._tasks.push(items[j])}
+      this.$set(item,'_tasks_total',r.total||item._tasks_total);
+    }catch(e){}
+    this.$set(item,'_tasks_loading_more',false);
   },
 
   async retryTask(t){
@@ -390,6 +390,7 @@ methods:{
   _buildConfigBody:function(){
     var c=this.globalConfig;
     var cfg={};
+    if(c.reflection_endpoint)cfg.reflection_endpoint=c.reflection_endpoint;
     if(c.reflection_api_key_id)cfg.reflection_api_key_id=Number(c.reflection_api_key_id);
     if(c.reflection_model)cfg.reflection_model=c.reflection_model;
     if(c.method)cfg.method=c.method;
@@ -430,18 +431,20 @@ methods:{
     }catch(e){this.error=e.message}
   },
 
-  // Run record drawer
-  openRunRecord:function(item){
-    this.recordDrawer=true;this.recordItem=item;this.recordRuns=[];this.recordRunsLoading=true;
-    var key=item.key_slot||'';
-    var cat=item.created_at||'';
-    var ts=cat.replace(/[^0-9]/g,'').substring(0,14);
-    while(ts.length<14)ts+='0';
-    this.recordDetailDir='logs_thinking/'+key+'/'+ts.substring(0,8)+'_'+ts.substring(8)+'/';
-    var self=this;
-    this.json('/api/reflection/runs?source_export_id='+item.export_id).then(function(runs){
-      self.recordRuns=runs;self.recordRunsLoading=false;
-    }).catch(function(){self.recordRunsLoading=false});
+  // Inline run records toggle
+  toggleRunRecords:function(item){
+    var val=!item._runs_expanded;
+    this.$set(item,'_runs_expanded',val);
+    if(val&&!item._runs){
+      this.$set(item,'_runs_loading',true);
+      var self=this;
+      this.json('/api/reflection/runs?source_export_id='+item.export_id).then(function(runs){
+        self.$set(item,'_runs',runs);self.$set(item,'_runs_loading',false);
+      }).catch(function(){self.$set(item,'_runs',[]);self.$set(item,'_runs_loading',false)});
+    }
+  },
+  viewRunSnapshot:function(run){
+    this.snapshotRun=run;this.snapshotDrawer=true;
   },
   fmtFullTs:function(ts){if(!ts)return'';var d=new Date(ts*1000);return d.toLocaleDateString()+' '+d.toTimeString().slice(0,8)},
 
@@ -451,6 +454,28 @@ methods:{
       var body={source_export_ids:[item.export_id],config:this._buildConfigBody()};
       var r=await this.json('/api/reflection/batch-rerun',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
       alert('补跑已启动 '+r.count+' 个任务组');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+  async rerunDone(item){
+    if(!confirm('确认重跑？将把 '+item.task_done+' 个已完成任务重置为待处理，解析结果将重新生成。'))return;
+    try{
+      var r=await this.json('/api/reflection/tasks/rerun-done',{method:'POST',headers:this.headers(),body:JSON.stringify({run_id:item.task_group_id})});
+      alert('已重置 '+r.reset+' 个已完成任务');
+      await this.load();
+    }catch(e){this.error=e.message}
+  },
+  async batchRerunDone(){
+    if(!confirm('确认批量重跑？将把所有选中任务组的已完成任务重置为待处理，解析结果将重新生成。'))return;
+    try{
+      var total=0;
+      for(var i=0;i<this.rows.length;i++){
+        var item=this.rows[i];
+        if(!item.checked||!item.task_done)continue;
+        var r=await this.json('/api/reflection/tasks/rerun-done',{method:'POST',headers:this.headers(),body:JSON.stringify({run_id:item.task_group_id})});
+        total+=(r.reset||0);
+      }
+      alert('已重置 '+total+' 个已完成任务');
       await this.load();
     }catch(e){this.error=e.message}
   },
@@ -464,43 +489,15 @@ methods:{
     }catch(e){this.error=e.message}
   },
 
-  // Run config drawer
-  openRunConfig:function(item){
-    this.cfgDrawer=true;this.cfgRun=item;this.cfgMsg='';this.cfgOk=false;
-    var r=item.run||{};
-    this.cfgForm={
-      reflection_endpoint:r.reflection_endpoint||this.config.reflection_base_url||'',
-      reflection_model:r.reflection_model||this.globalConfig.reflection_model||'',
-      method:r.method||this.globalConfig.method||'bulk',
-      reflection_api_key_id:r.reflection_api_key_id||this.globalConfig.reflection_api_key_id||'',
-      worker_count:r.worker_count||this.globalConfig.worker_count||4,
-      max_retries:r.max_retries||this.globalConfig.max_retries||3
-    };
-  },
-  saveRunConfig:function(){
-    if(!this.cfgRun)return;
-    this.cfgSaving=true;this.cfgMsg='';this.cfgOk=false;
-    var self=this;
-    var body={
-      reflection_endpoint:this.cfgForm.reflection_endpoint,
-      reflection_model:this.cfgForm.reflection_model,
-      method:this.cfgForm.method,
-      reflection_api_key_id:Number(this.cfgForm.reflection_api_key_id),
-      worker_count:Number(this.cfgForm.worker_count),
-      max_retries:Number(this.cfgForm.max_retries)
-    };
-    this.json('/api/reflection/runs/'+this.cfgRun.run_id+'/config',{method:'PATCH',headers:this.headers(),body:JSON.stringify(body)}).then(function(){
-      self.cfgMsg='保存成功';self.cfgOk=true;self.cfgSaving=false;
-      self.load();
-    }).catch(function(e){self.cfgMsg='保存失败: '+e.message;self.cfgOk=false;self.cfgSaving=false});
-  },
-
   // Run detail drawer
-  openRunDetail:function(item){
+  viewRunLog:function(run){
     this.closeDetail();
-    this.detailDrawer=true;this.detailRun=item.run;this.logEntries=[];this.logSinceId=0;
+    this.detailDrawer=true;this.detailRun=run;this.logEntries=[];this.logSinceId=0;
     this._fetchLogs();
-    this.logPolling=setInterval(this._fetchLogs.bind(this),2000);
+    var status=run.status||'';
+    if(status==='running'||status==='processing'){
+      this.logPolling=setInterval(this._fetchLogs.bind(this),2000);
+    }
   },
   closeDetail:function(){this.detailDrawer=false;this.stopLogPoll()},
   stopLogPoll:function(){if(this.logPolling){clearInterval(this.logPolling);this.logPolling=null}},

@@ -61,6 +61,14 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     @app.get("/api/reflection/datasets/{record_id}/analysis")
     def analysis(record_id: int): return call(service.analysis, record_id)
 
+    @app.get("/api/reflection/datasets/{record_id}/sessions")
+    def dataset_sessions(record_id: int, offset: int = 0, limit: int = 50, force: bool = False):
+        return call(service.dataset_sessions, record_id, offset, limit, force)
+
+    @app.get("/api/reflection/datasets/{record_id}/session-trajectory")
+    def session_trajectory(record_id: int, session_id: str, file_name: str):
+        return call(service.session_trajectory, record_id, session_id, file_name)
+
     @app.get("/api/reflection/config")
     def config():
         from utils.obs_utils import load_obs_base
@@ -122,7 +130,8 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
         return call(upload_run_to_obs, service.config.db_path, run_id)
 
     @app.get("/api/reflection/tasks")
-    def tasks(run_id: str, status: str | None = None): return service.tasks(run_id, status)
+    def tasks(run_id: str, status: str | None = None, offset: int = 0, limit: int = 50):
+        return service.tasks(run_id, status, offset, limit)
 
     @app.get("/api/reflection/tasks/{task_uuid}")
     def task_detail(task_uuid: str): return call(service.get_task, task_uuid)
@@ -137,6 +146,11 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     async def retry_failed(request: Request):
         body = await request.json()
         return call(service.retry_all_failed, body.get("run_id", ""))
+
+    @app.post("/api/reflection/tasks/rerun-done")
+    async def rerun_done(request: Request):
+        body = await request.json()
+        return call(service.rerun_all_done, body.get("run_id", ""))
 
     @app.post("/api/reflection/test")
     async def test(request: Request):

@@ -86,8 +86,8 @@ def import_run(db_path: Path, run_id: str, root: Path, max_retries: int, detail_
             relative = source.relative_to(root).as_posix()
             trajectory_id = str(uuid.uuid5(uuid.NAMESPACE_URL, relative))
             conn.execute("""INSERT OR IGNORE INTO run_trajectories
-              (run_id,trajectory_id,session_id,trajectory_path,raw_json) VALUES(?,?,?,?,?)""",
-              (run_id, trajectory_id, sid, relative, json.dumps(raw, ensure_ascii=False)))
+              (run_id,trajectory_id,session_id,trajectory_path,raw_json,source_root) VALUES(?,?,?,?,?,?)""",
+              (run_id, trajectory_id, sid, relative, '', root.as_posix()))
             trajectories += 1
             for item in extract_signatures(raw):
                 task_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{relative}:{item['block_path']}"))

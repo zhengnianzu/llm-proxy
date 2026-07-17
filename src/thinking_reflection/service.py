@@ -139,6 +139,19 @@ class ReflectionService:
         return {**db.get_run(self.config.db_path, run_id), **imported}
 
     @staticmethod
+    def _load_raw_json(row) -> dict:
+        source_root = (row["source_root"] or "").strip()
+        if source_root:
+            p = Path(source_root) / row["trajectory_path"]
+            if not p.is_file():
+                raise ValueError(f"轨迹文件不存在: {p}")
+            return json.loads(p.read_text(encoding="utf-8"))
+        raw_text = row["raw_json"] or ""
+        if raw_text:
+            return json.loads(raw_text)
+        raise ValueError(f"无法加载轨迹数据: source_root 和 raw_json 均为空 (trajectory_path={row['trajectory_path']})")
+
+    @staticmethod
     def _load_task_detail(task: dict) -> dict:
         dp = task.get("detail_path") or ""
         if dp:
@@ -153,18 +166,26 @@ class ReflectionService:
             "tool_input": json.loads(task["tool_input_json"]) if task.get("tool_input_json") else None,
         }
 
-    def tasks(self, run_id: str, status: str | None = None) -> list[dict]:
+    def tasks(self, run_id: str, status: str | None = None,
+              offset: int = 0, limit: int = 50) -> dict:
         with db.connect(self.config.db_path) as conn:
-            sql, params = "SELECT * FROM thinking_tasks WHERE run_id=?", [run_id]
-            if status: sql, params = sql + " AND status=?", [run_id, status]
-            rows = conn.execute(sql + " ORDER BY updated_at DESC LIMIT 1000", params).fetchall()
+            base_sql = "FROM thinking_tasks WHERE run_id=?"
+            params: list = [run_id]
+            if status:
+                base_sql += " AND status=?"
+                params.append(status)
+            total = conn.execute("SELECT COUNT(*) " + base_sql, params).fetchone()[0]
+            rows = conn.execute(
+                "SELECT * " + base_sql + " ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
             result = []
             for row in rows:
                 item = dict(row)
                 for k in ("signature", "original_thinking", "processed_text", "tool_input_json"):
                     item.pop(k, None)
                 result.append(item)
-            return result
+            return {"items": result, "total": total}
 
     def retry(self, task_uuid: str) -> None:
         with db.connect(self.config.db_path) as conn:
@@ -181,8 +202,9 @@ class ReflectionService:
         for task in tasks:
             detail = self._load_task_detail(task)
             task["processed_text"] = detail.get("processed_text")
+        raw = self._load_raw_json(row)
         return {"trajectory": {k: row[k] for k in ("trajectory_id", "session_id", "trajectory_path", "output_path")},
-                "merged": merge(json.loads(row["raw_json"]), tasks, run_id),
+                "merged": merge(raw, tasks, run_id),
                 "tasks": [{k: v for k, v in task.items() if k not in {"signature", "original_thinking"}} for task in tasks]}
 
     def export(self, run_id: str) -> dict:
@@ -199,7 +221,8 @@ class ReflectionService:
                     task["processed_text"] = detail.get("processed_text")
                 out = root / row["session_id"] / (Path(row["trajectory_path"]).stem + "--thinking.json")
                 out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(json.dumps(merge(json.loads(row["raw_json"]), tasks, run_id), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                raw = self._load_raw_json(row)
+                out.write_text(json.dumps(merge(raw, tasks, run_id), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 conn.execute("UPDATE run_trajectories SET output_path=?,exported_at=? WHERE id=?", (out.as_posix(), time.time(), row["id"]))
                 outputs.append(out.as_posix())
         from .result_exporter import upload_run_to_obs
@@ -229,7 +252,13 @@ class ReflectionService:
 
     def retry_all_failed(self, run_id: str) -> dict:
         count = db.retry_all_failed(self.config.db_path, run_id)
+        self._ds_cache = None
         return {"run_id": run_id, "retried": count}
+
+    def rerun_all_done(self, run_id: str) -> dict:
+        count = db.reset_all_done(self.config.db_path, run_id)
+        self._ds_cache = None
+        return {"run_id": run_id, "reset": count}
 
     def delete_run(self, run_id: str) -> None:
         self.workers.stop(run_id)
@@ -320,6 +349,159 @@ class ReflectionService:
             "eval_status": {"success": "已质检", "failed": "质检失败"}.get(eval_rec["status"], "质检中"),
             "eval_record_id": eval_rec["id"],
             "sessions": data.get("sessions", []) if isinstance(data, dict) else [],
+        }
+
+    _EXCLUDED_FILES = {"session_analysis.json", "session_index.json", "session_index.jsonl",
+                       "failure_report.json", "manifest.json",
+                       ".session_cache.json", ".session_cache.jsonl",
+                       "session_report.html", "session_report.md", "session_report.xlsx"}
+
+    def dataset_sessions(self, record_id: int, offset: int = 0, limit: int = 50,
+                         force: bool = False) -> dict:
+        record = get_record(record_id)
+        if not record:
+            raise ValueError("记录不存在")
+        root = Path(record["local_copy_dir"])
+        cache_path = root / ".session_cache.json"
+
+        analysis_path = root / "session_analysis.json"
+        if analysis_path.is_file():
+            source, source_mtime = "session_analysis", analysis_path.stat().st_mtime
+        else:
+            source, source_mtime = "filesystem", root.stat().st_mtime if root.is_dir() else 0
+
+        if not force and cache_path.is_file():
+            try:
+                cache = json.loads(cache_path.read_text(encoding="utf-8"))
+                meta = cache.get("_meta", {})
+                if meta.get("source_mtime") == source_mtime:
+                    sessions = cache.get("sessions", [])
+                    total = len(sessions)
+                    return {"items": sessions[offset:offset + limit], "total": total}
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        if source == "session_analysis":
+            sessions = self._build_sessions_from_analysis(root, analysis_path)
+        else:
+            sessions = self._build_sessions_from_filesystem(root)
+
+        from datetime import datetime
+        cache_data = {
+            "_meta": {
+                "source": source,
+                "source_mtime": source_mtime,
+                "generated_at": datetime.now().isoformat(),
+                "total": len(sessions),
+            },
+            "sessions": sessions,
+        }
+        try:
+            tmp = cache_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cache_data, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(cache_path)
+        except OSError:
+            pass
+
+        total = len(sessions)
+        return {"items": sessions[offset:offset + limit], "total": total}
+
+    def _build_sessions_from_analysis(self, root: Path, analysis_path: Path) -> list:
+        payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+        raw_sessions = payload.get("sessions", []) if isinstance(payload, dict) else payload
+        if not isinstance(raw_sessions, list):
+            raw_sessions = []
+        items = []
+        for s in raw_sessions:
+            sid = s.get("session", "")
+            session_dir = root / sid
+            traj_files = sorted(session_dir.glob("*.json")) if session_dir.is_dir() else []
+            traj_files = [f for f in traj_files
+                          if f.name not in self._EXCLUDED_FILES and not f.name.endswith("--thinking.json")]
+            items.append({
+                "session_id": sid,
+                "q1": s.get("q1", ""),
+                "model": s.get("model", ""),
+                "start_time": s.get("start_time", ""),
+                "duration_s": s.get("duration_s", 0),
+                "api_call_count": s.get("api_call_count", 0),
+                "completed": s.get("completed", 0),
+                "completed_note": s.get("completed_note", ""),
+                "trajectory_count": len(traj_files),
+                "trajectory_files": [f.name for f in traj_files],
+            })
+        return items
+
+    def _build_sessions_from_filesystem(self, root: Path) -> list:
+        if not root.is_dir():
+            return []
+        items = []
+        for session_dir in sorted(root.iterdir()):
+            if not session_dir.is_dir() or session_dir.name.startswith("."):
+                continue
+            traj_files = sorted(session_dir.glob("*.json"))
+            traj_files = [f for f in traj_files
+                          if f.name not in self._EXCLUDED_FILES and not f.name.endswith("--thinking.json")]
+            if not traj_files:
+                continue
+            q1 = ""
+            try:
+                first = json.loads(traj_files[0].read_text(encoding="utf-8"))
+                msgs = first.get("messages") or (first.get("request", {}) or {}).get("messages") or []
+                for m in msgs:
+                    if m.get("role") == "user":
+                        c = m.get("content", "")
+                        if isinstance(c, str):
+                            q1 = c[:200]
+                        elif isinstance(c, list):
+                            for part in c:
+                                if isinstance(part, dict) and part.get("type") == "text":
+                                    q1 = (part.get("text") or "")[:200]
+                                    break
+                        break
+            except (json.JSONDecodeError, OSError):
+                pass
+            items.append({
+                "session_id": session_dir.name,
+                "q1": q1,
+                "model": "",
+                "start_time": "",
+                "duration_s": 0,
+                "api_call_count": 0,
+                "completed": 0,
+                "completed_note": "",
+                "trajectory_count": len(traj_files),
+                "trajectory_files": [f.name for f in traj_files],
+            })
+        return items
+
+    def session_trajectory(self, record_id: int, session_id: str, file_name: str) -> dict:
+        record = get_record(record_id)
+        if not record:
+            raise ValueError("记录不存在")
+        root = Path(record["local_copy_dir"])
+        traj_path = root / session_id / file_name
+        if not traj_path.is_file():
+            raise ValueError(f"文件不存在: {traj_path}")
+        raw = json.loads(traj_path.read_text(encoding="utf-8"))
+        relative = f"{session_id}/{file_name}"
+        tasks = []
+        with db.connect(self.config.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM thinking_tasks WHERE trajectory_path=? AND status='done' ORDER BY block_path",
+                (relative,),
+            ).fetchall()
+            for row in rows:
+                task = dict(row)
+                detail = self._load_task_detail(task)
+                task["processed_text"] = detail.get("processed_text")
+                tasks.append(task)
+        run_id = tasks[0]["run_id"] if tasks else ""
+        merged = merge(raw, tasks, run_id) if tasks else raw
+        return {
+            "merged": merged,
+            "tasks": [{k: v for k, v in t.items() if k not in {"signature", "original_thinking"}} for t in tasks],
+            "has_reflect": len(tasks) > 0,
         }
 
     # ------------------------------------------------------------------
@@ -488,6 +670,8 @@ class ReflectionService:
                         key = get_key_full(int(config["reflection_api_key_id"]))
                         if key:
                             run_values["reflection_key_mask"] = mask_key(key["key"])
+                if not run_values.get("reflection_endpoint"):
+                    run_values["reflection_endpoint"] = self.config.reflection_base_url
                 new_run_id = db.create_run(self.config.db_path, run_values)
                 self.workers.start(new_run_id, task_group_id)
                 started.append(new_run_id)
@@ -586,6 +770,8 @@ class ReflectionService:
                         key = get_key_full(int(config["reflection_api_key_id"]))
                         if key:
                             run_values["reflection_key_mask"] = mask_key(key["key"])
+                if not run_values.get("reflection_endpoint"):
+                    run_values["reflection_endpoint"] = self.config.reflection_base_url
                 new_run_id = db.create_run(self.config.db_path, run_values)
                 self.workers.start(new_run_id, task_group_id)
                 started.append(new_run_id)
