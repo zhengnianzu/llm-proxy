@@ -12,3 +12,12 @@ models:
         display: summarized
       output_config:
         effort: high
+
+  THINKING:claude-fable-5:
+    model: claude-fable-5
+    params:
+      thinking:
+        type: adaptive
+        display: summarized
+      output_config:
+        effort: high
