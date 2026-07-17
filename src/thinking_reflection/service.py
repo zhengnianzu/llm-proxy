@@ -134,22 +134,19 @@ class ReflectionService:
             "export_root": (self.config.export_root / source["key_slot"]).as_posix(), "snapshot": snapshot,
             "prompt_name": prompt.name, "prompt_sha256": prompt.sha256, "prompt_loaded_at": prompt.loaded_at,
         })
-        imported = import_run(self.config.db_path, run_id, quality_root, max_retries,
+        imported = import_run(self.config.db_path, source_id, quality_root, max_retries,
                               db.task_detail_dir(source["key_slot"], source.get("created_at", "")))
         return {**db.get_run(self.config.db_path, run_id), **imported}
 
     @staticmethod
     def _load_raw_json(row) -> dict:
         source_root = (row["source_root"] or "").strip()
-        if source_root:
-            p = Path(source_root) / row["trajectory_path"]
-            if not p.is_file():
-                raise ValueError(f"轨迹文件不存在: {p}")
-            return json.loads(p.read_text(encoding="utf-8"))
-        raw_text = row["raw_json"] or ""
-        if raw_text:
-            return json.loads(raw_text)
-        raise ValueError(f"无法加载轨迹数据: source_root 和 raw_json 均为空 (trajectory_path={row['trajectory_path']})")
+        if not source_root:
+            raise ValueError(f"trajectory 缺少 source_root: {row['trajectory_path']}")
+        p = Path(source_root) / row["trajectory_path"]
+        if not p.is_file():
+            raise ValueError(f"轨迹文件不存在: {p}")
+        return json.loads(p.read_text(encoding="utf-8"))
 
     @staticmethod
     def _load_task_detail(task: dict) -> dict:
@@ -162,17 +159,20 @@ class ReflectionService:
         return {
             "original_thinking": task.get("original_thinking"),
             "signature": task.get("signature"),
-            "processed_text": task.get("processed_text"),
+            "processed_text": task.get("latest_processed_text") or task.get("processed_text"),
             "tool_input": json.loads(task["tool_input_json"]) if task.get("tool_input_json") else None,
         }
 
     def tasks(self, run_id: str, status: str | None = None,
               offset: int = 0, limit: int = 50) -> dict:
+        export_id = db.resolve_export_id(self.config.db_path, run_id)
+        if export_id is None:
+            return {"items": [], "total": 0}
         with db.connect(self.config.db_path) as conn:
-            base_sql = "FROM thinking_tasks WHERE run_id=?"
-            params: list = [run_id]
+            base_sql = "FROM dataset_tasks WHERE export_id=?"
+            params: list = [export_id]
             if status:
-                base_sql += " AND status=?"
+                base_sql += " AND latest_status=?"
                 params.append(status)
             total = conn.execute("SELECT COUNT(*) " + base_sql, params).fetchone()[0]
             rows = conn.execute(
@@ -182,40 +182,63 @@ class ReflectionService:
             result = []
             for row in rows:
                 item = dict(row)
-                for k in ("signature", "original_thinking", "processed_text", "tool_input_json"):
+                for k in ("signature", "original_thinking", "latest_processed_text"):
                     item.pop(k, None)
+                # UI-compat aliases
+                item["status"] = item.get("latest_status")
+                item["run_id"] = item.get("latest_run_id") or ""
+                item["model"] = item.get("latest_model")
+                item["response_id"] = item.get("latest_response_id")
+                item["stop_reason"] = item.get("latest_stop_reason")
+                item["sentence_count"] = item.get("latest_sentence_count")
+                item["usage_json"] = item.get("latest_usage_json")
                 result.append(item)
             return {"items": result, "total": total}
 
     def retry(self, task_uuid: str) -> None:
         with db.connect(self.config.db_path) as conn:
-            row = conn.execute("SELECT run_id FROM thinking_tasks WHERE uuid=?", (task_uuid,)).fetchone()
+            row = conn.execute("SELECT export_id FROM dataset_tasks WHERE uuid=?", (task_uuid,)).fetchone()
             if not row: raise ValueError("Task 不存在")
-            conn.execute("UPDATE thinking_tasks SET status='pending',last_error=NULL,updated_at=? WHERE uuid=?", (time.time(), task_uuid))
-            conn.execute("UPDATE reflection_runs SET status='paused',updated_at=? WHERE run_id=?", (time.time(), row["run_id"]))
+            conn.execute(
+                "UPDATE dataset_tasks SET latest_status='pending',last_error=NULL,updated_at=? WHERE uuid=?",
+                (time.time(), task_uuid),
+            )
 
     def trajectory(self, run_id: str, trajectory_id: str) -> dict:
+        export_id = db.resolve_export_id(self.config.db_path, run_id)
+        if export_id is None:
+            raise ValueError("Run 不存在")
         with db.connect(self.config.db_path) as conn:
-            row = conn.execute("SELECT * FROM run_trajectories WHERE run_id=? AND trajectory_id=?", (run_id, trajectory_id)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM dataset_trajectories WHERE trajectory_id=? AND export_id=?",
+                (trajectory_id, export_id),
+            ).fetchone()
             if not row: raise ValueError("Trajectory 不存在")
-            tasks = [dict(x) for x in conn.execute("SELECT * FROM thinking_tasks WHERE run_id=? AND trajectory_id=? ORDER BY block_path", (run_id, trajectory_id))]
+            tasks = [dict(x) for x in conn.execute(
+                "SELECT * FROM dataset_tasks WHERE export_id=? AND trajectory_id=? ORDER BY block_path",
+                (export_id, trajectory_id))]
         for task in tasks:
             detail = self._load_task_detail(task)
             task["processed_text"] = detail.get("processed_text")
         raw = self._load_raw_json(row)
-        return {"trajectory": {k: row[k] for k in ("trajectory_id", "session_id", "trajectory_path", "output_path")},
+        return {"trajectory": {k: row[k] for k in ("trajectory_id", "session_id", "trajectory_path")},
                 "merged": merge(raw, tasks, run_id),
                 "tasks": [{k: v for k, v in task.items() if k not in {"signature", "original_thinking"}} for task in tasks]}
 
     def export(self, run_id: str) -> dict:
         run = db.get_run(self.config.db_path, run_id)
         if not run: raise ValueError("Run 不存在")
+        export_id = int(run["source_export_id"])
         root = Path(run["export_root"]) / run_id
         outputs = []
         with db.connect(self.config.db_path) as conn:
-            trajectories = conn.execute("SELECT * FROM run_trajectories WHERE run_id=?", (run_id,)).fetchall()
+            trajectories = conn.execute(
+                "SELECT * FROM dataset_trajectories WHERE export_id=?", (export_id,),
+            ).fetchall()
             for row in trajectories:
-                tasks = [dict(x) for x in conn.execute("SELECT * FROM thinking_tasks WHERE run_id=? AND trajectory_id=?", (run_id, row["trajectory_id"]))]
+                tasks = [dict(x) for x in conn.execute(
+                    "SELECT * FROM dataset_tasks WHERE export_id=? AND trajectory_id=?",
+                    (export_id, row["trajectory_id"]))]
                 for task in tasks:
                     detail = self._load_task_detail(task)
                     task["processed_text"] = detail.get("processed_text")
@@ -223,7 +246,8 @@ class ReflectionService:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 raw = self._load_raw_json(row)
                 out.write_text(json.dumps(merge(raw, tasks, run_id), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                conn.execute("UPDATE run_trajectories SET output_path=?,exported_at=? WHERE id=?", (out.as_posix(), time.time(), row["id"]))
+                db.record_run_output(self.config.db_path, run_id, export_id,
+                                     row["trajectory_id"], out.as_posix())
                 outputs.append(out.as_posix())
         from .result_exporter import upload_run_to_obs
         try:
@@ -251,12 +275,18 @@ class ReflectionService:
         return db.list_attempts(self.config.db_path, task_uuid)
 
     def retry_all_failed(self, run_id: str) -> dict:
-        count = db.retry_all_failed(self.config.db_path, run_id)
+        export_id = db.resolve_export_id(self.config.db_path, run_id)
+        if export_id is None:
+            return {"run_id": run_id, "retried": 0}
+        count = db.retry_all_failed(self.config.db_path, export_id)
         self._ds_cache = None
         return {"run_id": run_id, "retried": count}
 
     def rerun_all_done(self, run_id: str) -> dict:
-        count = db.reset_all_done(self.config.db_path, run_id)
+        export_id = db.resolve_export_id(self.config.db_path, run_id)
+        if export_id is None:
+            return {"run_id": run_id, "reset": 0}
+        count = db.reset_all_done(self.config.db_path, export_id)
         self._ds_cache = None
         return {"run_id": run_id, "reset": count}
 
@@ -265,8 +295,12 @@ class ReflectionService:
         db.delete_run(self.config.db_path, run_id)
 
     def trajectory_list(self, run_id: str, offset: int = 0, limit: int = 0) -> dict:
-        total = db.count_trajectories(self.config.db_path, run_id)
-        items = db.list_trajectories(self.config.db_path, run_id, offset, limit)
+        export_id = db.resolve_export_id(self.config.db_path, run_id)
+        if export_id is None:
+            return {"items": [], "total": 0}
+        total = db.count_trajectories(self.config.db_path, export_id)
+        items = db.list_trajectories(self.config.db_path, export_id, run_id=run_id,
+                                     offset=offset, limit=limit)
         return {"items": items, "total": total}
 
     def test(self, body: dict) -> dict:
@@ -488,15 +522,17 @@ class ReflectionService:
         tasks = []
         with db.connect(self.config.db_path) as conn:
             rows = conn.execute(
-                "SELECT * FROM thinking_tasks WHERE trajectory_path=? AND status='done' ORDER BY block_path",
-                (relative,),
+                "SELECT * FROM dataset_tasks "
+                "WHERE export_id=? AND trajectory_path=? AND latest_status='done' "
+                "ORDER BY block_path",
+                (record_id, relative),
             ).fetchall()
             for row in rows:
                 task = dict(row)
                 detail = self._load_task_detail(task)
                 task["processed_text"] = detail.get("processed_text")
                 tasks.append(task)
-        run_id = tasks[0]["run_id"] if tasks else ""
+        run_id = tasks[0].get("latest_run_id") or "" if tasks else ""
         merged = merge(raw, tasks, run_id) if tasks else raw
         return {
             "merged": merged,
@@ -505,7 +541,7 @@ class ReflectionService:
         }
 
     # ------------------------------------------------------------------
-    # 导入任务库：从 export record 提取 signature 写入 thinking_tasks
+    # 导入任务库：从 export record 提取 signature 写入 dataset_tasks
     # ------------------------------------------------------------------
 
     def import_tasks(self, body: dict) -> dict:
@@ -514,10 +550,16 @@ class ReflectionService:
         if not source:
             raise ValueError("记录不存在")
 
-        existing = db.list_runs(self.config.db_path, source_id)
+        with db.connect(self.config.db_path) as conn:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM dataset_tasks WHERE export_id=?", (source_id,)
+            ).fetchone()[0]
         if existing:
-            run = existing[0]
-            return {"run_id": run["run_id"], "status": "already_imported", "tasks": run.get("total_count", 0)}
+            runs = db.list_runs(self.config.db_path, source_id)
+            run = runs[0] if runs else None
+            return {"run_id": run["run_id"] if run else "",
+                    "status": "already_imported",
+                    "tasks": existing}
 
         quality_root = Path(source.get("local_copy_dir") or "")
         if not quality_root.is_dir():
@@ -541,7 +583,7 @@ class ReflectionService:
             "snapshot": {"source_key": source["key_slot"], "quality_dir": quality_root.as_posix()},
             "prompt_name": "", "prompt_sha256": "", "prompt_loaded_at": "",
         })
-        imported = import_run(self.config.db_path, run_id, quality_root, max_retries,
+        imported = import_run(self.config.db_path, source_id, quality_root, max_retries,
                               db.task_detail_dir(source["key_slot"], source.get("created_at", "")))
         return {"run_id": run_id, "status": "imported", **imported}
 
@@ -628,15 +670,12 @@ class ReflectionService:
         for eid in export_ids:
             eid = int(eid)
             try:
-                task_group_id = db.get_task_group_id(self.config.db_path, eid)
-                if not task_group_id:
-                    continue
                 runs = db.list_runs(self.config.db_path, eid)
                 latest = runs[0] if runs else None
                 if not latest:
                     continue
                 with db.connect(self.config.db_path) as conn:
-                    counts = db.run_counts(conn, task_group_id)
+                    counts = db.dataset_counts(conn, eid)
                 if counts["pending"] == 0:
                     continue
                 run_values = {
@@ -657,8 +696,8 @@ class ReflectionService:
                     "prompt_sha256": latest["prompt_sha256"],
                     "prompt_loaded_at": latest["prompt_loaded_at"],
                     "launch_type": "start",
-                    "task_group_id": task_group_id,
-                    "snapshot_total": counts["pending"] + counts["processing"] + counts["done"] + counts["failed"],
+                    "parent_run_id": latest["run_id"],
+                    "snapshot_total": sum(counts.values()),
                     "snapshot_pending": counts["pending"],
                 }
                 if config:
@@ -673,7 +712,11 @@ class ReflectionService:
                 if not run_values.get("reflection_endpoint"):
                     run_values["reflection_endpoint"] = self.config.reflection_base_url
                 new_run_id = db.create_run(self.config.db_path, run_values)
-                self.workers.start(new_run_id, task_group_id)
+                try:
+                    self.workers.start(new_run_id)
+                except ValueError:
+                    # dataset already has an active run — leave the new row in draft
+                    continue
                 started.append(new_run_id)
             except (ValueError, KeyError):
                 pass
@@ -697,12 +740,13 @@ class ReflectionService:
             try:
                 self.workers.stop(rid, cancel=True)
                 run = db.get_run(self.config.db_path, rid)
-                tg = (run.get("task_group_id") or rid) if run else rid
-                with db.connect(self.config.db_path) as conn:
-                    conn.execute(
-                        "UPDATE thinking_tasks SET status='pending',updated_at=? WHERE run_id=? AND status='processing'",
-                        (time.time(), tg),
-                    )
+                if run:
+                    with db.connect(self.config.db_path) as conn:
+                        conn.execute(
+                            "UPDATE dataset_tasks SET latest_status='pending',updated_at=? "
+                            "WHERE export_id=? AND latest_status='processing'",
+                            (time.time(), int(run["source_export_id"])),
+                        )
                 cancelled.append(rid)
             except Exception:
                 pass
@@ -712,9 +756,7 @@ class ReflectionService:
         export_ids = body.get("source_export_ids", [])
         total = 0
         for eid in export_ids:
-            tg = db.get_task_group_id(self.config.db_path, int(eid))
-            if tg:
-                total += db.retry_all_failed(self.config.db_path, tg)
+            total += db.retry_all_failed(self.config.db_path, int(eid))
         return {"retried": total}
 
     def batch_rerun(self, body: dict) -> dict:
@@ -726,10 +768,7 @@ class ReflectionService:
         for eid in export_ids:
             eid = int(eid)
             try:
-                task_group_id = db.get_task_group_id(self.config.db_path, eid)
-                if not task_group_id:
-                    continue
-                reset_count = db.retry_all_failed(self.config.db_path, task_group_id)
+                reset_count = db.retry_all_failed(self.config.db_path, eid)
                 if reset_count == 0:
                     continue
                 runs = db.list_runs(self.config.db_path, eid)
@@ -737,7 +776,7 @@ class ReflectionService:
                 if not latest:
                     continue
                 with db.connect(self.config.db_path) as conn:
-                    counts = db.run_counts(conn, task_group_id)
+                    counts = db.dataset_counts(conn, eid)
                 run_values = {
                     "source_key": latest["source_key"],
                     "source_export_id": eid,
@@ -757,8 +796,7 @@ class ReflectionService:
                     "prompt_loaded_at": latest["prompt_loaded_at"],
                     "launch_type": "rerun",
                     "parent_run_id": latest["run_id"],
-                    "task_group_id": task_group_id,
-                    "snapshot_total": counts["pending"] + counts["processing"] + counts["done"] + counts["failed"],
+                    "snapshot_total": sum(counts.values()),
                     "snapshot_pending": counts["pending"],
                 }
                 if config:
@@ -773,7 +811,10 @@ class ReflectionService:
                 if not run_values.get("reflection_endpoint"):
                     run_values["reflection_endpoint"] = self.config.reflection_base_url
                 new_run_id = db.create_run(self.config.db_path, run_values)
-                self.workers.start(new_run_id, task_group_id)
+                try:
+                    self.workers.start(new_run_id)
+                except ValueError:
+                    continue
                 started.append(new_run_id)
             except (ValueError, KeyError):
                 pass
@@ -795,11 +836,11 @@ class ReflectionService:
         """统计所有 run 的全局 task 汇总。"""
         with db.connect(self.config.db_path) as conn:
             rows = conn.execute(
-                "SELECT status, COUNT(*) as cnt FROM thinking_tasks GROUP BY status"
+                "SELECT latest_status, COUNT(*) as cnt FROM dataset_tasks GROUP BY latest_status"
             ).fetchall()
         counts = {"total": 0, "done": 0, "pending": 0, "processing": 0, "failed": 0}
         for row in rows:
-            counts[row["status"]] = row["cnt"]
+            counts[row["latest_status"]] = row["cnt"]
             counts["total"] += row["cnt"]
         return counts
 

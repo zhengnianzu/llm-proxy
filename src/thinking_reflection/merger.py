@@ -36,8 +36,12 @@ def merge(raw: dict, tasks: list[dict], run_id: str) -> dict:
         block = _resolve(out, task["block_path"])
         if block is None: continue
         block["reflect"] = {
-            "status": task["status"], "text": task.get("processed_text"), "run_id": run_id,
-            "model": task.get("model"), "error": task.get("last_error"),
-            "retry_count": task["retry_count"], "processed_at": task.get("updated_at"),
+            "status": task.get("latest_status") or task.get("status"),
+            "text": task.get("processed_text") or task.get("latest_processed_text"),
+            "run_id": task.get("latest_run_id") or run_id,
+            "model": task.get("latest_model") or task.get("model"),
+            "error": task.get("last_error"),
+            "retry_count": task["retry_count"],
+            "processed_at": task.get("updated_at"),
         }
     return out

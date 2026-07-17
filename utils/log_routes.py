@@ -883,4 +883,4 @@ def register_log_routes(app: FastAPI) -> None:
             return err
         return logs_file_raw(filename, log_dir=log_dir or "__ALL__")
 
-    start_session_cache_warmer(_env_dir, _current_log_dir)
+    # start_session_cache_warmer(_env_dir, _current_log_dir)

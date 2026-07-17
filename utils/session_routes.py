@@ -55,4 +55,4 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
 
         return JSONResponse(stats)
 
-    start_stats_warmer(str(env_dir))
+    # start_stats_warmer(str(env_dir))

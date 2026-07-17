@@ -111,8 +111,7 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     def start(run_id: str):
         run = db.get_run(service.config.db_path, run_id)
         if not run: raise HTTPException(404, "Run 不存在")
-        tg = run.get("task_group_id") or run_id
-        call(service.workers.start, run_id, tg)
+        call(service.workers.start, run_id)
         return {"status": "running"}
 
     @app.post("/api/reflection/runs/{run_id}/pause")

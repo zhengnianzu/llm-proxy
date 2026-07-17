@@ -553,4 +553,4 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             "error_message": rec.get("error_message", ""),
         })
 
-    start_stats_warmer(str(env_dir))
+    # start_stats_warmer(str(env_dir))

@@ -67,13 +67,14 @@ def validate_quality_dir(root: Path) -> None:
         raise ValueError("质检目录中没有 Session trajectory JSON")
 
 
-def import_run(db_path: Path, run_id: str, root: Path, max_retries: int, detail_dir: Path) -> dict[str, int]:
+def import_run(db_path: Path, export_id: int, root: Path, max_retries: int, detail_dir: Path) -> dict[str, int]:
     files = _collect_files(root)
     if not files:
         raise ValueError("目录中没有可导入的轨迹文件")
 
     detail_dir.mkdir(parents=True, exist_ok=True)
-    trajectories = tasks = 0
+    traj_inserted = traj_present = 0
+    task_inserted = task_present = 0
     now = time.time()
     with db.connect(db_path) as conn:
         for sid, source in files:
@@ -84,24 +85,45 @@ def import_run(db_path: Path, run_id: str, root: Path, max_retries: int, detail_
             if not isinstance(raw, dict):
                 continue
             relative = source.relative_to(root).as_posix()
-            trajectory_id = str(uuid.uuid5(uuid.NAMESPACE_URL, relative))
-            conn.execute("""INSERT OR IGNORE INTO run_trajectories
-              (run_id,trajectory_id,session_id,trajectory_path,raw_json,source_root) VALUES(?,?,?,?,?,?)""",
-              (run_id, trajectory_id, sid, relative, '', root.as_posix()))
-            trajectories += 1
+            trajectory_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{export_id}:{relative}"))
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO dataset_trajectories"
+                "(export_id,trajectory_path,trajectory_id,session_id,source_root,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (export_id, relative, trajectory_id, sid, root.as_posix(), now, now),
+            )
+            if cursor.rowcount == 1:
+                traj_inserted += 1
+            else:
+                traj_present += 1
             for item in extract_signatures(raw):
-                task_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{relative}:{item['block_path']}"))
+                task_uuid = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{export_id}:{sid}:{relative}:{item['block_path']}"))
                 detail_file = detail_dir / f"{sid}_{task_uuid}.json"
-                detail_file.write_text(json.dumps({
-                    "original_thinking": item["original_thinking"],
-                    "signature": item["signature"],
-                }, ensure_ascii=False, indent=2), encoding="utf-8")
-                cursor = conn.execute("""INSERT OR IGNORE INTO thinking_tasks(
-                  uuid,run_id,trajectory_id,session_id,trajectory_path,block_path,message_index,
-                  original_thinking,signature,signature_len,status,max_retries,detail_path,created_at,updated_at)
-                  VALUES(?,?,?,?,?,?,?,NULL,'',?,'pending',?,?,?,?)""",
-                  (task_uuid, run_id, trajectory_id, sid, relative, item["block_path"],
-                   item["message_index"], len(item["signature"]),
-                   max_retries, detail_file.as_posix(), now, now))
-                tasks += cursor.rowcount
-    return {"trajectories": trajectories, "tasks": tasks}
+                if not detail_file.exists():
+                    detail_file.write_text(json.dumps({
+                        "original_thinking": item["original_thinking"],
+                        "signature": item["signature"],
+                    }, ensure_ascii=False, indent=2), encoding="utf-8")
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO dataset_tasks("
+                    "uuid,export_id,session_id,trajectory_id,trajectory_path,block_path,"
+                    "message_index,original_thinking,signature,signature_len,detail_path,"
+                    "latest_status,retry_count,max_retries,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?,?,?,NULL,'',?,?, 'pending',0,?,?,?)",
+                    (task_uuid, export_id, sid, trajectory_id, relative, item["block_path"],
+                     item["message_index"], len(item["signature"]),
+                     detail_file.as_posix(), max_retries, now, now))
+                if cursor.rowcount == 1:
+                    task_inserted += 1
+                else:
+                    task_present += 1
+    return {
+        "trajectories": traj_inserted + traj_present,
+        "trajectories_inserted": traj_inserted,
+        "trajectories_present": traj_present,
+        "tasks": task_inserted + task_present,
+        "tasks_inserted": task_inserted,
+        "tasks_present": task_present,
+    }
