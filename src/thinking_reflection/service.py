@@ -9,7 +9,6 @@ from typing import Any
 from utils.export_store import (
     get_record,
     get_record_resolved,
-    get_records_summary,
     list_records,
     list_records_by_key,
     list_records_for_datasets,
@@ -33,11 +32,56 @@ class ReflectionService:
         db.init(config.db_path)
         db.reset_processing(config.db_path)
         self.workers = WorkerManager(config.db_path, config.prompt_dir)
-        self._ds_cache = None
-        self._ds_cache_key = None
 
     @staticmethod
-    def source_key_slots() -> list[dict]:
+    def _pick_latest_run(runs: list[dict]) -> dict | None:
+        """Pick the run that best represents current dataset progress.
+
+        Priority: running > queued > completed/completed_with_failures > paused >
+                  failed/cancelled > draft. Within a tier take the newest created_at.
+        `runs` is expected to be sorted by created_at DESC already.
+        """
+        if not runs:
+            return None
+        priority = {
+            "running": 0, "queued": 1,
+            "completed": 2, "completed_with_failures": 2,
+            "paused": 3,
+            "failed": 4, "cancelled": 4,
+            "draft": 5,
+        }
+        return min(runs, key=lambda r: (priority.get(r.get("status"), 6),
+                                        -(r.get("created_at") or 0)))
+
+    def _dataset_status(self, export_id: int, runs: list[dict]) -> tuple[str, dict[str, int]]:
+        """Return (status_enum, counts) computed from dataset_tasks + runs.
+
+        Truth is dataset_tasks.latest_status. Run status is only consulted to
+        distinguish 'running' from 'imported' when there ARE still pending tasks.
+
+        Enum:
+          - not_imported: no dataset_tasks rows for this export_id
+          - completed:    no pending, no processing, no failed
+          - has_failed:   failed > 0 (regardless of what runs report)
+          - running:      pending/processing > 0 AND some run is running/queued
+          - imported:     pending/processing > 0 AND no run is active
+        """
+        with db.connect(self.config.db_path) as conn:
+            counts = db.dataset_counts(conn, export_id)
+        total = sum(counts.values())
+        if total == 0:
+            return "not_imported", counts
+        if counts["failed"] > 0:
+            return "has_failed", counts
+        outstanding = counts["pending"] + counts["processing"]
+        if outstanding == 0:
+            return "completed", counts
+        # only trust "running" when the DB still has work to do
+        if any(r.get("status") in ("running", "queued") for r in runs):
+            return "running", counts
+        return "imported", counts
+
+    def source_key_slots(self) -> list[dict]:
         grouped: dict[str, list[dict]] = {}
         for record in list_records_for_datasets(limit=1000):
             if "analysis" not in (record.get("local_copy_dir") or "").lower():
@@ -64,7 +108,9 @@ class ReflectionService:
                     artifacts_valid = False
                     quality_error = f"质检目录不存在: {d}"
             runs = db.list_runs(self.config.db_path, record["id"])
-            latest = runs[0] if runs else None
+            latest = self._pick_latest_run(runs)
+            status, counts = self._dataset_status(record["id"], runs)
+            total = sum(counts.values())
             result.append({
                 **record,
                 "created_at": record["created_at"], "total_sessions": record["total_sessions"],
@@ -72,13 +118,13 @@ class ReflectionService:
                 "artifacts_valid": artifacts_valid,
                 "error": quality_error or record.get("error_message", ""),
                 "latest_run": latest,
+                "dataset_status": status,
+                "dataset_counts": counts,
+                "has_tasks": total > 0,
             })
         return result
 
     def datasets_all(self) -> list[dict]:
-        summary = get_records_summary()
-        if self._ds_cache is not None and self._ds_cache_key == summary:
-            return self._ds_cache
         result = []
         for record in list_records_for_datasets(limit=1000):
             if "analysis" not in (record.get("local_copy_dir") or "").lower():
@@ -92,15 +138,18 @@ class ReflectionService:
                 artifacts_valid = False
                 quality_error = f"质检目录不存在: {d}"
             runs = db.list_runs(self.config.db_path, record["id"])
-            latest = runs[0] if runs else None
+            latest = self._pick_latest_run(runs)
+            status, counts = self._dataset_status(record["id"], runs)
+            total = sum(counts.values())
             result.append({
                 **record,
                 "artifacts_valid": artifacts_valid,
                 "error": quality_error or record.get("error_message", ""),
                 "latest_run": latest,
+                "dataset_status": status,
+                "dataset_counts": counts,
+                "has_tasks": total > 0,
             })
-        self._ds_cache = result
-        self._ds_cache_key = summary
         return result
 
     def create_run(self, body: dict) -> dict:
@@ -279,7 +328,6 @@ class ReflectionService:
         if export_id is None:
             return {"run_id": run_id, "retried": 0}
         count = db.retry_all_failed(self.config.db_path, export_id)
-        self._ds_cache = None
         return {"run_id": run_id, "retried": count}
 
     def rerun_all_done(self, run_id: str) -> dict:
@@ -287,7 +335,6 @@ class ReflectionService:
         if export_id is None:
             return {"run_id": run_id, "reset": 0}
         count = db.reset_all_done(self.config.db_path, export_id)
-        self._ds_cache = None
         return {"run_id": run_id, "reset": count}
 
     def delete_run(self, run_id: str) -> None:
@@ -555,11 +602,7 @@ class ReflectionService:
                 "SELECT COUNT(*) FROM dataset_tasks WHERE export_id=?", (source_id,)
             ).fetchone()[0]
         if existing:
-            runs = db.list_runs(self.config.db_path, source_id)
-            run = runs[0] if runs else None
-            return {"run_id": run["run_id"] if run else "",
-                    "status": "already_imported",
-                    "tasks": existing}
+            return {"status": "already_imported", "tasks": existing}
 
         quality_root = Path(source.get("local_copy_dir") or "")
         if not quality_root.is_dir():
@@ -573,19 +616,9 @@ class ReflectionService:
                 raise ValueError(f"OBS 自动下载失败: {msg}")
 
         max_retries = max(1, min(int(body.get("max_retries", 3)), 10))
-        run_id = db.create_run(self.config.db_path, {
-            "source_key": source["key_slot"], "source_export_id": source_id,
-            "quality_record_id": source["id"],
-            "reflection_endpoint": "", "reflection_api_key_id": 0,
-            "reflection_key_mask": "", "reflection_model": "", "method": "",
-            "worker_count": 1, "max_retries": max_retries,
-            "export_root": (self.config.export_root / source["key_slot"]).as_posix(),
-            "snapshot": {"source_key": source["key_slot"], "quality_dir": quality_root.as_posix()},
-            "prompt_name": "", "prompt_sha256": "", "prompt_loaded_at": "",
-        })
         imported = import_run(self.config.db_path, source_id, quality_root, max_retries,
                               db.task_detail_dir(source["key_slot"], source.get("created_at", "")))
-        return {"run_id": run_id, "status": "imported", **imported}
+        return {"status": "imported", **imported}
 
     # ------------------------------------------------------------------
     # OBS 下载
@@ -661,6 +694,73 @@ class ReflectionService:
     # 批量操作（启动 / 暂停 / 取消 / 失败重试）
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_placeholder(run: dict) -> bool:
+        """A placeholder run is the empty draft row created by import-tasks."""
+        return (run.get("status") == "draft"
+                and not (run.get("reflection_endpoint") or "").strip()
+                and not (run.get("reflection_model") or "").strip()
+                and not (run.get("method") or "").strip())
+
+    def _apply_config_to_run(self, run_id: str, config: dict) -> None:
+        """Push a batch config onto an existing (placeholder) run row."""
+        body = dict(config or {})
+        if not body:
+            return
+        body.setdefault("reflection_endpoint", self.config.reflection_base_url)
+        self.update_run_config(run_id, body)
+
+    def _build_run_from_config(self, source: dict, config: dict,
+                               counts: dict[str, int], launch_type: str,
+                               parent_run_id: str | None = None) -> dict:
+        """Assemble the run_values dict for db.create_run from a bare config.
+
+        Used when there is no prior run to copy fields from (fresh dataset that
+        was just imported).
+        """
+        method = str(config.get("method", "bulk")).strip() or "bulk"
+        prompt = load_prompt(self.config.prompt_dir, method)
+        key_id = int(config.get("reflection_api_key_id") or 0)
+        key = get_key_full(key_id) if key_id else None
+        if not key or key["status"] != "active":
+            raise ValueError("Reflection Key 已禁用或不存在")
+        model = str(config.get("reflection_model", "")).strip()
+        if not model:
+            raise ValueError("Reflection 模型不能为空")
+        endpoint = (str(config.get("reflection_endpoint") or "").strip()
+                    or self.config.reflection_base_url).rstrip("/")
+        worker_count = max(1, min(int(config.get("worker_count", 4)), 32))
+        max_retries = max(1, min(int(config.get("max_retries", 3)), 10))
+        snapshot = {"source_key": source["key_slot"],
+                    "quality_dir": (source.get("local_copy_dir") or ""),
+                    "endpoint": endpoint, "model": model, "method": method,
+                    "worker_count": worker_count, "max_retries": max_retries,
+                    "stream": bool(config.get("stream", False)),
+                    "max_tokens": max(1, min(int(config.get("max_tokens", 16384)), 65536)),
+                    "prompt_name": prompt.name, "prompt_sha256": prompt.sha256}
+        return {
+            "source_key": source["key_slot"],
+            "source_export_id": int(source["id"]),
+            "quality_record_id": int(source["id"]),
+            "reflection_endpoint": endpoint,
+            "reflection_api_key_id": key_id,
+            "reflection_key_mask": mask_key(key["key"]),
+            "reflection_model": model,
+            "method": method,
+            "worker_count": worker_count,
+            "max_retries": max_retries,
+            "export_root": (self.config.export_root / source["key_slot"]).as_posix(),
+            "obs_root": "",
+            "snapshot": snapshot,
+            "prompt_name": prompt.name,
+            "prompt_sha256": prompt.sha256,
+            "prompt_loaded_at": prompt.loaded_at,
+            "launch_type": launch_type,
+            "parent_run_id": parent_run_id,
+            "snapshot_total": sum(counts.values()),
+            "snapshot_pending": counts["pending"],
+        }
+
     def batch_start(self, body: dict) -> dict:
         export_ids = body.get("source_export_ids", [])
         config = body.get("config")
@@ -670,13 +770,38 @@ class ReflectionService:
         for eid in export_ids:
             eid = int(eid)
             try:
-                runs = db.list_runs(self.config.db_path, eid)
-                latest = runs[0] if runs else None
-                if not latest:
-                    continue
                 with db.connect(self.config.db_path) as conn:
                     counts = db.dataset_counts(conn, eid)
+                if sum(counts.values()) == 0:
+                    # not imported yet — nothing to start
+                    continue
                 if counts["pending"] == 0:
+                    continue
+                runs = db.list_runs(self.config.db_path, eid)
+                # Reuse the import-time placeholder draft in-place instead of forking a new run.
+                placeholder = next((r for r in runs if self._is_placeholder(r)), None)
+                if placeholder and config:
+                    try:
+                        self._apply_config_to_run(placeholder["run_id"], config)
+                        self.workers.start(placeholder["run_id"])
+                        started.append(placeholder["run_id"])
+                        continue
+                    except ValueError:
+                        continue
+                latest = self._pick_latest_run(runs)
+                if latest is None:
+                    if not config:
+                        continue
+                    source = get_record_resolved(eid)
+                    if not source:
+                        continue
+                    run_values = self._build_run_from_config(source, config, counts, "start")
+                    new_run_id = db.create_run(self.config.db_path, run_values)
+                    try:
+                        self.workers.start(new_run_id)
+                    except ValueError:
+                        continue
+                    started.append(new_run_id)
                     continue
                 run_values = {
                     "source_key": latest["source_key"],
@@ -772,7 +897,7 @@ class ReflectionService:
                 if reset_count == 0:
                     continue
                 runs = db.list_runs(self.config.db_path, eid)
-                latest = runs[0] if runs else None
+                latest = self._pick_latest_run(runs)
                 if not latest:
                     continue
                 with db.connect(self.config.db_path) as conn:

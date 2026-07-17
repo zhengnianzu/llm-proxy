@@ -236,6 +236,23 @@ def run_dict(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     counts = dataset_counts(conn, result["source_export_id"])
     result.update(counts)
     result["total_count"] = sum(counts.values())
+    # per-run activity (from attempts). done = distinct tasks this run finished OK;
+    # failed = distinct tasks whose latest_run_id points at this run and status=failed.
+    run_done = conn.execute(
+        "SELECT COUNT(DISTINCT task_uuid) FROM task_attempts WHERE run_id=? AND status='done'",
+        (result["run_id"],),
+    ).fetchone()[0]
+    run_failed = conn.execute(
+        "SELECT COUNT(*) FROM dataset_tasks WHERE latest_run_id=? AND latest_status='failed'",
+        (result["run_id"],),
+    ).fetchone()[0]
+    run_attempts = conn.execute(
+        "SELECT COUNT(*) FROM task_attempts WHERE run_id=?",
+        (result["run_id"],),
+    ).fetchone()[0]
+    result["run_done"] = run_done
+    result["run_failed"] = run_failed
+    result["run_attempts"] = run_attempts
     # UI backward-compat: templates fall back to `task_group_id || run_id`;
     # aliasing to run_id keeps the fallback pointing at a valid handle.
     result["task_group_id"] = result["run_id"]

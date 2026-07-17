@@ -55,8 +55,8 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
           </td>
           <td>{{d.total_sessions}}</td>
           <td>
-            <span v-if="!d.latest_run" style="color:var(--muted-foreground)">-</span>
-            <span v-else class="badge" :class="runClass(d.latest_run)">{{runLabel(d.latest_run)}}</span>
+            <span v-if="!d.has_tasks" style="color:var(--muted-foreground)">-</span>
+            <span v-else class="badge" :class="datasetClass(d)">{{datasetLabel(d)}}</span>
           </td>
           <td><span v-if="d.obs_dst" class="obs-link" @click="openObsDrawer(d)">[OBS]</span><span v-else>-</span></td>
           <td>
@@ -71,10 +71,10 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
               <div class="dropdown" :class="{open:openDropdown===d.id}">
                 <button class="btn" @click.stop="toggleDropdown(d.id)" style="padding:6px 6px;font-size:.72rem">▼</button>
                 <div class="dropdown-menu">
-                  <button class="dropdown-item" @click="doImport(d)" :disabled="!!d.latest_run||d._importing">
-                    {{d._importing?'导入中...':d.latest_run?'已导入':'导入任务库'}}
+                  <button class="dropdown-item" @click="doImport(d)" :disabled="d.has_tasks||d._importing">
+                    {{d._importing?'导入中...':d.has_tasks?'已导入':'导入任务库'}}
                   </button>
-                  <button class="dropdown-item" @click="doExport(d)" :disabled="!d.latest_run">导出结果</button>
+                  <button class="dropdown-item" @click="doExport(d)" :disabled="!d.has_tasks||!(d.dataset_counts&&d.dataset_counts.done)">导出结果</button>
                 </div>
               </div>
             </div>
@@ -181,6 +181,22 @@ methods:{
     var s=r.status;
     return{ok:s==='completed',warn:s==='running'||s==='queued'||s==='paused'||s==='draft',bad:s==='failed'||s==='cancelled'||s==='completed_with_failures'};
   },
+  datasetLabel:function(d){
+    if(!d||!d.has_tasks)return'-';
+    var c=d.dataset_counts||{done:0,pending:0,failed:0,processing:0};
+    var total=(c.done||0)+(c.pending||0)+(c.failed||0)+(c.processing||0);
+    var s=d.dataset_status;
+    if(s==='running')return'进行中 '+(c.done||0)+'/'+total;
+    if(s==='completed')return'完成 '+(c.done||0)+'/'+total;
+    if(s==='has_failed')return'有失败 '+(c.failed||0)+' / 完成 '+(c.done||0)+'/'+total;
+    if(s==='imported')return'待启动 '+(c.done||0)+'/'+total;
+    return s||'-';
+  },
+  datasetClass:function(d){
+    if(!d||!d.has_tasks)return{};
+    var s=d.dataset_status;
+    return{ok:s==='completed',warn:s==='running'||s==='imported',bad:s==='has_failed'};
+  },
 
   async load(){
     this.loading=true;this.error='';
@@ -199,7 +215,7 @@ methods:{
   },
 
   async doImport(d){
-    if(d.latest_run||d._importing)return;
+    if(d.has_tasks||d._importing)return;
     this.openDropdown=null;
     this.$set(d,'_importing',true);
     try{
@@ -212,7 +228,7 @@ methods:{
   },
 
   async doExport(d){
-    if(!d.latest_run)return;
+    if(!d.latest_run){alert('尚未有可导出的运行');return}
     this.openDropdown=null;
     var run=d.latest_run;
     var obsBase=(this.config&&this.config.obs_base)||'';

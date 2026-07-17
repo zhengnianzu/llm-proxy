@@ -141,7 +141,7 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
                     <td><span v-if="rr.launch_type==='rerun'" class="badge" style="background:#e67e0022;color:#e67e00">补跑</span><span v-else class="badge">启动</span></td>
                     <td><span class="badge" :class="rr.status">{{rr.status}}</span></td>
                     <td style="font-size:.74rem">{{rr.reflection_model||'-'}}</td>
-                    <td style="font-size:.74rem"><span class="ok">{{rr.snapshot_done||0}}</span> / <span class="bad">{{rr.snapshot_failed||0}}</span> / {{rr.snapshot_total||0}}</td>
+                    <td style="font-size:.74rem"><span class="ok">{{rr.run_done||0}}</span> / <span class="bad">{{rr.run_failed||0}}</span> / {{rr.run_attempts||0}}</td>
                     <td style="font-size:.74rem">{{fmtFullTs(rr.created_at)}}</td>
                     <td>
                       <button class="btn" style="font-size:.70rem" @click="viewRunLog(rr)">日志</button>
@@ -316,19 +316,21 @@ methods:{
       var rows=[];
       for(var j=0;j<allDs.length;j++){
         var d=allDs[j];
+        if(!d.has_tasks)continue;
         var run=d.latest_run;
-        if(!run)continue;
+        var c=d.dataset_counts||{done:0,pending:0,processing:0,failed:0};
+        var total=(c.done||0)+(c.pending||0)+(c.processing||0)+(c.failed||0);
         rows.push({
           export_id:d.id,key_slot:d.key_slot,
           created_at:d.created_at,
-          run_id:run.run_id,
-          task_group_id:run.task_group_id||run.run_id,
-          run_status:run.status,
-          task_total:run.total_count||0,
-          task_done:run.done||0,
-          task_pending:run.pending||0,
-          task_processing:run.processing||0,
-          task_failed:run.failed||0,
+          run_id:run?run.run_id:'',
+          task_group_id:String(d.id),
+          run_status:d.dataset_status,
+          task_total:total,
+          task_done:c.done||0,
+          task_pending:c.pending||0,
+          task_processing:c.processing||0,
+          task_failed:c.failed||0,
           run:run,checked:false,
           _tasks:null,_tasks_loading:false,_tasks_total:0,_tasks_loading_more:false,
           _runs:null,_runs_expanded:false,_runs_loading:false
