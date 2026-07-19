@@ -675,13 +675,15 @@ def register_log_routes(app: FastAPI) -> None:
     def logs_dirs():
         """列出 env-key 目录下所有时间戳子目录，当前目录排在第一个。"""
         from utils.stats_index import refresh_index, get_dir_counts
+        from utils.token_index import refresh_token_index
         current_tag = Path(_current_log_dir).name
         dirs = []
         total_count = 0
         env_path = Path(_env_dir)
         if env_path.is_dir():
             index = refresh_index(env_path)
-            counts = get_dir_counts(index)
+            tok_index = refresh_token_index(str(env_path))
+            counts = get_dir_counts(index, tok_index)
             for sub in sorted(env_path.iterdir(), reverse=True):
                 if sub.is_dir():
                     count = counts.get(sub.name, 0)

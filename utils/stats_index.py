@@ -630,11 +630,20 @@ def update_key_records(cache: dict, env_dir: Optional[Path] = None) -> bool:
 # 查询接口
 # ---------------------------------------------------------------------------
 
-def get_dir_counts(index: dict) -> Dict[str, int]:
-    """从索引中提取每个 mtime_dir 的 req_count，供 /logs/dirs 使用。"""
+def get_dir_counts(index: dict, token_index: Optional[dict] = None) -> Dict[str, int]:
+    """从索引中提取每个 mtime_dir 的请求数，供 /logs/dirs 使用。
+
+    优先用 token_index 的 entry_count（已增量维护，无需 iterdir），
+    token_index 中没有该目录时回退到 stats_index 的 req_count。
+    """
+    tok_dirs = token_index.get("dirs", {}) if token_index else {}
     result = {}
     for dir_name, dir_info in index.get("dirs", {}).items():
-        result[dir_name] = dir_info.get("req_count", 0)
+        tok_info = tok_dirs.get(dir_name)
+        if tok_info is not None and tok_info.get("entry_count", 0) > 0:
+            result[dir_name] = tok_info["entry_count"]
+        else:
+            result[dir_name] = dir_info.get("req_count", 0)
     return result
 
 
