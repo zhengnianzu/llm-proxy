@@ -52,6 +52,16 @@
         pre.obs-pre { margin: 12px 14px; font-size: .8rem; line-height: 1.55; white-space: pre-wrap; word-break: break-all; font-family: 'SFMono-Regular', Consolas, monospace; }
         .obs-loading { color: var(--muted-foreground); padding: 20px; text-align: center; font-size: .85rem; }
 
+        /* 快捷路径卡片 */
+        .obs-shortcuts { flex-shrink: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--background); }
+        .obs-shortcut-card { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; background: var(--card); transition: border-color .15s, background .15s; }
+        .obs-shortcut-card:hover { border-color: var(--primary); background: var(--accent); }
+        .obs-shortcut-card.active { border-color: var(--primary); background: var(--accent); }
+        .obs-shortcut-icon { flex-shrink: 0; color: var(--primary); }
+        .obs-shortcut-info { overflow: hidden; }
+        .obs-shortcut-label { font-size: .82rem; font-weight: 600; color: var(--foreground); }
+        .obs-shortcut-path { font-size: .72rem; color: var(--muted-foreground); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
         /* JSON 树（从 chat-viewer 移植） */
         .json-tree { margin: 12px 14px; padding: 12px; background: #1e1e1e; color: #d4d4d4; border-radius: 6px; overflow: auto; font-size: 12px; line-height: 1.6; font-family: 'Cascadia Code','Fira Code',Consolas,monospace; }
         .jt-row { white-space: nowrap; }
@@ -112,6 +122,25 @@
     <div class="obs-path-bar">
         <input class="form-input" v-model="browsePath" placeholder="obs://bucket/path/" @keyup.enter="browse(browsePath)">
         <button class="btn btn-primary btn-sm" @click="browse(browsePath)" :disabled="treeLoading">浏览</button>
+    </div>
+
+    <!-- 快捷路径卡片 -->
+    <div v-if="config.obs_base" class="obs-shortcuts">
+        <div v-for="sc in shortcuts" :key="sc.key"
+             class="obs-shortcut-card" :class="{active: browsePath === sc.path}"
+             @click="browseShortcut(sc.path)">
+            <div class="obs-shortcut-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path v-if="sc.key==='export'" d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline v-if="sc.key==='export'" points="7 10 12 15 17 10"/><line v-if="sc.key==='export'" x1="12" y1="15" x2="12" y2="3"/>
+                    <path v-if="sc.key==='backup'" d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                    <path v-if="sc.key==='reflection'" d="M9 18h6M10 22h4M8.5 14.5A7 7 0 1 1 15.5 14.5C14.5 15.3 14 16 14 18h-4c0-2-.5-2.7-1.5-3.5z"/>
+                </svg>
+            </div>
+            <div class="obs-shortcut-info">
+                <div class="obs-shortcut-label">{{ sc.label }}</div>
+                <div class="obs-shortcut-path">{{ sc.path }}</div>
+            </div>
+        </div>
     </div>
 
     <div class="obs-body">
@@ -340,6 +369,15 @@ var app = new Vue({
         isJson: function() {
             return this.selectedPath.toLowerCase().endsWith('.json');
         },
+        shortcuts: function() {
+            var base = (this.config.obs_base || '').replace(/\/$/, '');
+            if (!base) return [];
+            return [
+                { key: 'export',     label: 'Session 导出',  path: base + '/session_analysis/' },
+                { key: 'backup',     label: '备份路径',       path: base + '/raw/' },
+                { key: 'reflection', label: '解析任务路径',   path: base + '/reflection/' },
+            ];
+        },
     },
     watch: {
         rawContent: function(val) {
@@ -419,6 +457,10 @@ var app = new Vue({
                 })
                 .catch(function(e) { alert('保存失败: ' + e); })
                 .finally(function() { self.saving = false; });
+        },
+        browseShortcut: function(path) {
+            this.browsePath = path;
+            this.browse(path);
         },
         browse: function(path) {
             if (!path) return;
