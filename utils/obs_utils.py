@@ -217,15 +217,25 @@ def run_download_cmd(
 # 目录/文件列表
 # ---------------------------------------------------------------------------
 
-def obsutil_ls(path: str, show_dirs: bool = False, limit: int = 500) -> List[dict]:
-    """执行 obsutil ls，返回解析后的文件/目录列表。"""
+def obsutil_ls(path: str, show_dirs: bool = False, limit: int = 1000) -> List[dict]:
+    """执行 obsutil ls -d，只列出当前一层的子目录和文件（不递归）。
+
+    obsutil ls -d 输出分两段：
+        Folder list:
+        obs://.../subdir/
+        ...
+        Object list:
+        key   LastModified   Size   StorageClass   ETag
+        obs://.../file.json
+                          2026-...   472B   standard   "..."
+    文件的元数据（大小等）在文件 key 的下一行，需要跨行解析。
+    参数 show_dirs 保留兼容，实际始终 -d。
+    """
     if not os.path.isfile(OBSUTIL_BIN):
         return []
     if not path.endswith("/"):
         path += "/"
-    args = [OBSUTIL_BIN, "ls", path, f"-limit={limit}"]
-    if show_dirs:
-        args.append("-d")
+    args = [OBSUTIL_BIN, "ls", path, "-d", f"-limit={limit}"]
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
@@ -233,24 +243,55 @@ def obsutil_ls(path: str, show_dirs: bool = False, limit: int = 500) -> List[dic
     except Exception:
         return []
 
-    items = []
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if not line.startswith("obs://"):
+    dirs: List[dict] = []
+    files: List[dict] = []
+    section = None  # "folder" | "object"
+    lines = result.stdout.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+        i += 1
+
+        low = line.lower()
+        if low.startswith("folder list"):
+            section = "folder"
             continue
-        parts = line.split()
-        full_path = parts[0] if parts else line
-        name = full_path.replace(path, "").strip("/")
-        if not name:
+        if low.startswith("object list"):
+            section = "object"
             continue
-        is_dir = full_path.endswith("/")
-        if is_dir:
-            name = name.rstrip("/")
-        size = None
-        if len(parts) > 1:
-            for p in parts[1:]:
-                if any(p.endswith(u) for u in ("B", "KB", "MB", "GB")):
-                    size = p
-                    break
-        items.append({"name": name, "path": full_path, "is_dir": is_dir, "size": size})
-    return items
+        if not line:
+            continue
+
+        if section == "folder":
+            if not line.startswith("obs://"):
+                continue
+            full_path = line
+            name = full_path.replace(path, "", 1).strip("/")
+            if not name:  # 当前目录自身，跳过
+                continue
+            dirs.append({"name": name, "path": full_path, "is_dir": True, "size": None})
+
+        elif section == "object":
+            if line.startswith("key") and "LastModified" in raw:
+                continue  # 表头
+            if not line.startswith("obs://"):
+                continue
+            full_path = line
+            name = full_path.replace(path, "", 1).strip("/")
+            if not name:  # 目录占位对象（path 自身），跳过
+                continue
+            # 元数据在下一行：<空格>LastModified  Size  StorageClass  ETag
+            size = None
+            if i < len(lines):
+                meta = lines[i].strip()
+                if meta and not meta.startswith("obs://"):
+                    for tok in meta.split():
+                        if any(tok.endswith(u) for u in ("B", "KB", "MB", "GB", "TB")):
+                            size = tok
+                            break
+                    i += 1  # 消费元数据行
+            files.append({"name": name, "path": full_path, "is_dir": False, "size": size})
+
+    return dirs + files
+
