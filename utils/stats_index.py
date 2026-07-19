@@ -79,7 +79,17 @@ def _save_index(env_dir: Path, data: dict) -> None:
 
 
 def _scan_session_cache(cache_file: Path, threshold: int) -> dict:
-    """读一个 .session_cache.jsonl，返回 {(api_key|date): {total, qualified}}。"""
+    """读 session 统计数据，优先从 DB 查询，降级到读 .session_cache.jsonl 文件。"""
+    root_dir = str(cache_file.parent)
+    try:
+        import utils.session_store as _ss
+        count = _ss.get_session_count_by_root(root_dir)
+        if count > 0:
+            return _ss.get_session_stats(root_dir, threshold)
+    except Exception:
+        pass
+
+    # 降级：直接读文件（DB 未初始化或该目录无数据时）
     buckets: Dict[str, Dict[str, int]] = {}
     try:
         with open(cache_file, "r", encoding="utf-8") as f:

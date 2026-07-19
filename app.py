@@ -44,6 +44,7 @@ from utils.export_store import init_db as init_export_db, mark_interrupted as ma
 from utils.backup_store import init_db as init_backup_db
 from utils.backup_routes import register_backup_routes
 from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
+from utils.session_store import init_db as init_session_db
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
 from utils.debug_logs import write_debug, debug_filename, register_debug_routes
 from src.thinking_reflection import register_reflection_routes
@@ -624,6 +625,7 @@ init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
 init_backup_db(SERVICE_LOG_DIR)
 init_user_db(SERVICE_LOG_DIR)
+init_session_db(SERVICE_LOG_DIR)
 load_custom_models()
 mark_export_interrupted()
 load_index(LOGS_DIR)

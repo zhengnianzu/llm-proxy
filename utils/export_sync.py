@@ -35,6 +35,16 @@ SYNC_STATE_NAME = ".sync_export_state.json"
 
 
 def _read_session_cache(logs_dir: str) -> List[dict]:
+    """优先从 DB 读取，降级到读 .session_cache.jsonl 文件。"""
+    try:
+        import utils.session_store as _ss
+        count = _ss.get_session_count_by_root(logs_dir)
+        if count > 0:
+            return _ss.export_sessions(logs_dir)
+    except Exception:
+        pass
+
+    # 降级：直接读文件
     cache_path = Path(logs_dir) / SESSION_CACHE_NAME
     if not cache_path.is_file():
         return []

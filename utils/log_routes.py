@@ -27,6 +27,7 @@ from utils.message_common import (
     parse_streaming_response_content,
 )
 from utils.q1_index import get_effective_q1, should_update_q1, update_q1
+import utils.session_store as _ss
 
 _CACHE_LOCK = threading.Lock()
 _LOG_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -158,103 +159,29 @@ def _build_state(root_dir: str) -> Dict[str, Any]:
         "line_count": 0,
         "byte_offset": 0,
         "known_keys": set(),
-        "sessions": OrderedDict(),  # key=first_ts, value={q1, model, ...}
-        "_chain_map": {},  # chain_key -> first_ts (内存映射，不持久化)
+        "_chain_map": {},  # lookup_key -> session_key，启动时从 DB 重建
         "_last_refresh_ts": 0.0,
     }
 
 
-_CACHE_FILE = ".session_cache.jsonl"
-
-
-def _cache_file_path(root_dir: str) -> str:
-    return os.path.join(root_dir, _CACHE_FILE)
-
-
-def _save_state_to_disk(state: Dict[str, Any]) -> None:
-    """持久化计算状态到磁盘（JSONL 格式）。
-    第一行：元信息（byte_offset, line_count, known_keys）
-    后续每行：一个 session 对象
-    """
+def _load_state_from_db(state: Dict[str, Any]) -> bool:
+    """从 DB 恢复内存 chain_map 和 index 进度。"""
     root_dir = state["root_dir"]
     try:
-        os.makedirs(root_dir, exist_ok=True)
-        tmp = _cache_file_path(root_dir) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            meta = {
-                "_meta": True,
-                "byte_offset": state["byte_offset"],
-                "line_count": state["line_count"],
-                "known_keys": sorted(state["known_keys"]),
-            }
-            f.write(json.dumps(meta, ensure_ascii=False))
-            f.write("\n")
-            for ts_key, s in state["sessions"].items():
-                row = {k: v for k, v in s.items() if not k.startswith("_")}
-                row["_key"] = ts_key
-                f.write(json.dumps(row, ensure_ascii=False))
-                f.write("\n")
-        os.replace(tmp, _cache_file_path(root_dir))
-    except OSError:
-        pass
+        byte_offset, line_count = _ss.get_progress(root_dir)
+        state["byte_offset"] = byte_offset
+        state["line_count"] = line_count
 
+        chain_map = _ss.get_all_chain_index(root_dir)
+        state["_chain_map"] = chain_map
 
-def _load_state_from_disk(state: Dict[str, Any]) -> bool:
-    """从磁盘恢复持久化状态（JSONL 格式）。"""
-    root_dir = state["root_dir"]
-    cache_path = _cache_file_path(root_dir)
+        # known_keys 从 sessions 表重建
+        sessions = _ss.list_sessions(root_dir)
+        state["known_keys"] = {s.get("api_key", "") for s in sessions if s.get("api_key")}
 
-    if not os.path.isfile(cache_path):
+        return bool(byte_offset > 0 or chain_map)
+    except Exception:
         return False
-
-    try:
-        with open(cache_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
-        return False
-
-    if not lines:
-        return False
-
-    try:
-        meta = json.loads(lines[0])
-    except json.JSONDecodeError:
-        return False
-
-    if not meta.get("_meta"):
-        return False
-
-    byte_offset = meta.get("byte_offset", 0)
-    if not isinstance(byte_offset, int) or byte_offset < 0:
-        return False
-
-    state["byte_offset"] = byte_offset
-    state["line_count"] = meta.get("line_count", 0)
-    state["known_keys"] = set(meta.get("known_keys", []))
-
-    sessions = OrderedDict()
-    chain_map = {}
-    for line in lines[1:]:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            s = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ts_key = s.pop("_key", None)
-        if not ts_key:
-            continue
-        if "model" in s and "models" not in s:
-            m = s.pop("model")
-            s["models"] = [m] if m else []
-        sessions[ts_key] = s
-        ck = f"{s.get('api_key', '')}||{s.get('q1', '')}"
-        chain_map[ck] = ts_key
-
-    state["sessions"] = sessions
-    state["_chain_map"] = chain_map
-    return True
 
 
 def _state_key(kind: str, root_dir: str) -> Tuple[str, str]:
@@ -279,19 +206,18 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     if not isinstance(messages, list):
         return False
 
+    root_dir = state["root_dir"]
     filename = req_path.name
     ts = str((index_entry or {}).get("ts") or filename.replace("-req.json", ""))
     model = str(data.get("model", "") or (index_entry or {}).get("model", "") or "")
     message_count = len(messages)
     api_key = str((index_entry or {}).get("api_key", "") or "")
-    state["known_keys"].add(api_key)
 
     if index_entry and index_entry.get("chain_key"):
         chain_key = index_entry["chain_key"]
     else:
         chain_key = build_chain_key(messages)
 
-    # Fallback: if chain_key is a known noise prefix, re-extract from messages
     _noise_prefixes = ("(session bootstrap)",)
     if chain_key and any(chain_key.startswith(p) for p in _noise_prefixes):
         chain_key = build_chain_key(messages)
@@ -305,7 +231,12 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     has_res = res_path.is_file()
     full_message_count = message_count + (1 if has_res else 0)
 
-    trace_entry = {"filename": filename, "model": model, "msg_count": full_message_count, "ts": ts}
+    trace_entry: Dict[str, Any] = {
+        "filename": filename,
+        "model": model,
+        "msg_count": full_message_count,
+        "ts": ts,
+    }
     if index_entry:
         if not index_entry.get("success", True):
             trace_entry["success"] = False
@@ -313,28 +244,34 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
         if index_entry.get("debug_file"):
             trace_entry["debug_file"] = index_entry["debug_file"]
 
-    chain_map = state["_chain_map"]
-    session_key = chain_map.get(lookup_key)
-    session = state["sessions"].get(session_key) if session_key else None
-
-    # 用真实用户轮次判断是否为新会话
     real_user_turns = count_real_user_turns(messages)
 
-    # 新会话检测：real_user_turns 回退到 <= 1 说明是全新对话
-    # 同一轮的工具调用（real_user_turns 不变但 message_count 增长）不应拆分
+    # 用 _CACHE_LOCK 短暂读取内存 chain_map（微秒级）
+    with _CACHE_LOCK:
+        state["known_keys"].add(api_key)
+        session_key = state["_chain_map"].get(lookup_key)
+
+    # DB 读在锁外（不阻塞其他请求）
+    session: Optional[Dict[str, Any]] = None
+    if session_key:
+        session = _ss.get_session(session_key)
+
     if session is not None and real_user_turns <= 1 and \
        real_user_turns < session.get("_max_real_turns", 1):
-        suffix = 1
-        new_lookup = f"{lookup_key}##session_{suffix}"
-        while new_lookup in chain_map:
-            suffix += 1
+        # 新会话检测：需要找一个未被占用的 suffix key
+        with _CACHE_LOCK:
+            suffix = 1
             new_lookup = f"{lookup_key}##session_{suffix}"
+            while new_lookup in state["_chain_map"]:
+                suffix += 1
+                new_lookup = f"{lookup_key}##session_{suffix}"
         lookup_key = new_lookup
         session = None
+        session_key = None
 
     if session is None:
         session_key = ts
-        session = {
+        new_session = {
             "q1": q1_preview or chain_key[:200],
             "models": [model] if model else [],
             "latest_file": filename,
@@ -342,110 +279,163 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
             "api_key": api_key,
             "first_ts": ts,
             "last_ts": ts,
-            "trace_list": [trace_entry],
             "_best_req_count": message_count,
             "_max_real_turns": real_user_turns,
         }
-        state["sessions"][session_key] = session
-        chain_map[lookup_key] = session_key
+        # DB 写在锁外
+        _ss.create_session(root_dir, session_key, new_session)
+        _ss.append_trace(root_dir, session_key, trace_entry)
+        _ss.set_chain_index(root_dir, lookup_key, session_key)
+        # 内存 chain_map 更新需要锁
+        with _CACHE_LOCK:
+            state["_chain_map"][lookup_key] = session_key
     else:
-        session["last_ts"] = ts
-        session["trace_list"].append(trace_entry)
-        if model and model not in session.get("models", []):
-            session.setdefault("models", []).append(model)
-        if real_user_turns > session.get("_max_real_turns", 0):
-            session["_max_real_turns"] = real_user_turns
-        if message_count > session.get("_best_req_count", 0) or \
-           (message_count == session.get("_best_req_count", 0) and has_res):
-            session["latest_file"] = filename
-            session["msg_count"] = full_message_count
-            session["_best_req_count"] = message_count
+        models = session.get("models", [])
+        if model and model not in models:
+            models = models + [model]
+
+        max_real_turns = max(real_user_turns, session.get("_max_real_turns", 0))
+        best_req_count = session.get("_best_req_count", 0)
+        latest_file = session.get("latest_file", "")
+        msg_count = session.get("msg_count", 0)
+
+        if message_count > best_req_count or \
+           (message_count == best_req_count and has_res):
+            latest_file = filename
+            msg_count = full_message_count
+            best_req_count = message_count
+
+        updated = {
+            "last_ts": ts,
+            "models": models,
+            "latest_file": latest_file,
+            "msg_count": msg_count,
+            "_max_real_turns": max_real_turns,
+            "_best_req_count": best_req_count,
+        }
+        # DB 写在锁外
+        _ss.update_session(session_key, updated)
+        _ss.append_trace(root_dir, session_key, trace_entry)
+
+    return True
 
     return True
 
 
 _REFRESH_TTL = 10  # 秒：已初始化的目录在此时间内跳过重复刷新
+_INIT_LOCK: Dict[str, threading.Lock] = {}  # root_dir -> 首次初始化锁
+_INIT_LOCK_GUARD = threading.Lock()
+
+
+def _get_init_lock(root_dir: str) -> threading.Lock:
+    with _INIT_LOCK_GUARD:
+        if root_dir not in _INIT_LOCK:
+            _INIT_LOCK[root_dir] = threading.Lock()
+        return _INIT_LOCK[root_dir]
 
 
 def _refresh_state(kind: str, root_dir: str, force: bool = False) -> None:
-    state = _state(kind, root_dir)
-
-    if not force and state["initialized"] and time.time() - state["_last_refresh_ts"] < _REFRESH_TTL:
-        return
+    # 快速路径：TTL 内直接返回，只读内存变量，不需要全局锁
+    with _CACHE_LOCK:
+        state = _state(kind, root_dir)
+        if not force and state["initialized"] and time.time() - state["_last_refresh_ts"] < _REFRESH_TTL:
+            return
+        already_initialized = state["initialized"]
 
     root = Path(root_dir)
     index_path = Path(state["index_path"])
 
-    # Phase 1: 首次调用时尝试从磁盘恢复持久化状态
-    if not state["initialized"]:
-        if not _load_state_from_disk(state):
-            state["sessions"].clear()
-            state["_chain_map"].clear()
-            state["byte_offset"] = 0
-            state["line_count"] = 0
+    # Phase 1：首次初始化 —— 用 per-root 锁防止并发重复初始化，主锁不参与
+    if not already_initialized:
+        init_lock = _get_init_lock(root_dir)
+        with init_lock:
+            # 二次检查，防止排队的第二个请求重复初始化
+            with _CACHE_LOCK:
+                if state["initialized"]:
+                    return
+            if not _load_state_from_db(state):
+                state["_chain_map"].clear()
+                state["known_keys"].clear()
+                state["byte_offset"] = 0
+                state["line_count"] = 0
 
-    # Phase 2: 增量读取 index.jsonl
+    # Phase 2：锁外读 index.jsonl 新增内容（纯文件 I/O，不竞争）
+    with _CACHE_LOCK:
+        current_offset = state["byte_offset"]
+
     if index_path.is_file():
-        rows, new_offset = _read_new_index_entries(index_path, root, state["byte_offset"])
+        rows, new_offset = _read_new_index_entries(index_path, root, current_offset)
 
-        if new_offset == 0 and state["byte_offset"] > 0:
-            # 文件被截断/轮转 — 全量重建
-            state["sessions"].clear()
-            state["_chain_map"].clear()
-            state["byte_offset"] = 0
-            state["line_count"] = 0
+        if new_offset == 0 and current_offset > 0:
+            # 文件被截断/轮转 — 全量重建，需要锁保护内存清理
+            with _CACHE_LOCK:
+                state["_chain_map"].clear()
+                state["known_keys"].clear()
+                state["byte_offset"] = 0
+                state["line_count"] = 0
             rows, new_offset = _read_new_index_entries(index_path, root, 0)
 
         if rows:
+            # 锁外处理每行：读 req.json（文件 I/O）+ 写 DB
+            # chain_map 读写在 _process_req_row 内部用 _CACHE_LOCK 短暂保护
             for row in rows:
                 _process_req_row(kind, state, row["req_path"], row["entry"])
-            state["line_count"] += len(rows)
-            state["byte_offset"] = new_offset
-            _save_state_to_disk(state)
-        elif new_offset != state["byte_offset"]:
-            state["byte_offset"] = new_offset
+            with _CACHE_LOCK:
+                state["line_count"] += len(rows)
+                state["byte_offset"] = new_offset
+            _ss.set_progress(root_dir, new_offset, state["line_count"])
+        elif new_offset != current_offset:
+            with _CACHE_LOCK:
+                state["byte_offset"] = new_offset
+            _ss.set_progress(root_dir, new_offset, state["line_count"])
     else:
-        # 无 index.jsonl — 降级为目录扫描（保持原有行为）
-        if not state["initialized"]:
+        if not already_initialized:
             for req_path in _collect_req_files(root):
                 _process_req_row(kind, state, req_path)
 
-    state["initialized"] = True
-    state["_last_refresh_ts"] = time.time()
+    with _CACHE_LOCK:
+        state["initialized"] = True
+        state["_last_refresh_ts"] = time.time()
 
 
 def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "") -> Dict[str, Any]:
+    _refresh_state(kind, root_dir, force=refresh)
+
+    sessions = _ss.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
+    session_keys = [s["session_key"] for s in sessions]
+    traces_by_key = _ss.get_traces_batch(session_keys)
+
+    known_models = _ss.get_known_models(root_dir)
+    items = []
+    for session in sessions:
+        sk = session["session_key"]
+        for trace in traces_by_key.get(sk, []):
+            if trace.get("msg_count", 0) >= min_messages:
+                if model and trace.get("model", "") != model:
+                    continue
+                item: Dict[str, Any] = {
+                    "filename": trace["filename"],
+                    "message_count": trace["msg_count"],
+                    "model": trace.get("model", ""),
+                    "api_key": session.get("api_key", ""),
+                }
+                if not trace.get("success", True):
+                    item["success"] = False
+                    item["total_attempts"] = trace.get("total_attempts", 1)
+                if trace.get("debug_file"):
+                    item["debug_file"] = trace["debug_file"]
+                items.append(item)
+
+    items.sort(key=lambda x: x["filename"], reverse=True)
+    total = len(items)
+    paged = items[offset:offset + limit] if limit > 0 else items[offset:]
+
     with _CACHE_LOCK:
         current_state = _state(kind, root_dir)
-        _refresh_state(kind, root_dir, force=refresh)
-        items = []
-        known_models: set = set()
-        for session in current_state["sessions"].values():
-            if api_key and (session.get("api_key", "") or "") != api_key:
-                continue
-            for m in session.get("models", []):
-                if m:
-                    known_models.add(m)
-            for trace in session.get("trace_list", []):
-                if trace.get("msg_count", 0) >= min_messages:
-                    if model and trace.get("model", "") != model:
-                        continue
-                    item = {
-                        "filename": trace["filename"],
-                        "message_count": trace["msg_count"],
-                        "model": trace.get("model", ""),
-                        "api_key": session.get("api_key", ""),
-                    }
-                    if not trace.get("success", True):
-                        item["success"] = False
-                        item["total_attempts"] = trace.get("total_attempts", 1)
-                    if trace.get("debug_file"):
-                        item["debug_file"] = trace["debug_file"]
-                    items.append(item)
-        items.sort(key=lambda x: x["filename"], reverse=True)
-        total = len(items)
-        paged = items[offset:offset + limit] if limit > 0 else items[offset:]
-        return {"items": paged, "total": total, "known_keys": sorted(current_state["known_keys"]), "known_models": sorted(known_models), "last_refresh_ts": current_state.get("_last_refresh_ts", 0)}
+        known_keys = sorted(current_state["known_keys"])
+        last_ts = current_state.get("_last_refresh_ts", 0)
+
+    return {"items": paged, "total": total, "known_keys": known_keys, "known_models": known_models, "last_refresh_ts": last_ts}
 
 
 def _content_contains_keyword(content, kw: str) -> bool:
@@ -488,55 +478,50 @@ def _match_messages_content(root_dir: str, filename: str, keyword: str) -> bool:
 
 
 def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
-    with _CACHE_LOCK:
-        current_state = _state(kind, root_dir)
-        _refresh_state(kind, root_dir, force=refresh)
-        sessions = []
-        known_models: set = set()
-        for session in current_state["sessions"].values():
-            if api_key and (session.get("api_key", "") or "") != api_key:
-                continue
-            for m in session.get("models", []):
-                if m:
-                    known_models.add(m)
-            if session.get("msg_count", 0) < min_messages:
-                continue
-            if model and model not in session.get("models", []):
-                continue
-            sessions.append(session)
-        saved_known_keys = sorted(current_state["known_keys"])
-        last_refresh_ts = current_state.get("_last_refresh_ts", 0)
+    _refresh_state(kind, root_dir, force=refresh)
+
+    search = (search or "").strip()
 
     if search:
-        search = search.strip()
-    if search:
+        # search 需要全量加载再过滤（无法下推 SQL），分页在过滤后处理
+        sessions = _ss.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
         sessions = [s for s in sessions if _match_messages_content(root_dir, s.get("latest_file", ""), search)]
+        total = len(sessions)
+        paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
+    else:
+        # 无 search：COUNT + 分页完全下推 SQL
+        total = _ss.count_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
+        paged = _ss.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages, offset=offset, limit=limit if limit > 0 else 0)
 
-    sessions.sort(key=lambda s: s.get("last_ts", ""), reverse=True)
-    total = len(sessions)
-    paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
+    known_models = _ss.get_known_models(root_dir)
+    paged_keys = [s["session_key"] for s in paged]
+    traces_by_key = _ss.get_traces_batch(paged_keys)
 
     items = []
     for session in paged:
-        models = session.get("models", [])
-        if not models and session.get("model"):
-            models = [session["model"]]
-        payload = {
+        sk = session["session_key"]
+        trace_list = traces_by_key.get(sk, [])
+        payload: Dict[str, Any] = {
             "first_time": _format_time(session["first_ts"]),
             "last_time": _format_time(session["last_ts"]),
-            "file_count": len(session.get("trace_list", [])),
+            "file_count": len(trace_list),
             "message_count": session.get("msg_count", 0),
-            "models": models,
+            "models": session.get("models", []),
             "latest_file": session.get("latest_file", ""),
             "api_key": session.get("api_key", ""),
             "q1_preview": session.get("q1", ""),
-            "trace_list": session.get("trace_list", []),
+            "trace_list": trace_list,
         }
-        if any(not t.get("success", True) for t in session.get("trace_list", [])):
+        if any(not t.get("success", True) for t in trace_list):
             payload["has_failure"] = True
         items.append(payload)
 
-    return {"items": items, "total": total, "known_keys": saved_known_keys, "known_models": sorted(known_models), "last_refresh_ts": last_refresh_ts}
+    with _CACHE_LOCK:
+        current_state = _state(kind, root_dir)
+        known_keys = sorted(current_state["known_keys"])
+        last_refresh_ts = current_state.get("_last_refresh_ts", 0)
+
+    return {"items": items, "total": total, "known_keys": known_keys, "known_models": known_models, "last_refresh_ts": last_refresh_ts}
 
 
 def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
@@ -553,23 +538,17 @@ def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: i
     all_known_keys: set = set()
     all_known_models: set = set()
 
-    with _CACHE_LOCK:
-        for sub in sub_dirs:
-            root_dir = str(sub)
-            current_state = _state(kind, root_dir)
-            _refresh_state(kind, root_dir, force=refresh)
-            for session in current_state["sessions"].values():
-                if api_key and (session.get("api_key", "") or "") != api_key:
-                    continue
-                for m in session.get("models", []):
-                    if m:
-                        all_known_models.add(m)
-                if session.get("msg_count", 0) < min_messages:
-                    continue
-                if model and model not in session.get("models", []):
-                    continue
-                all_sessions.append((session, root_dir))
-            all_known_keys.update(current_state["known_keys"])
+    for sub in sub_dirs:
+        root_dir = str(sub)
+        _refresh_state(kind, root_dir, force=refresh)
+
+        sessions = _ss.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
+        for session in sessions:
+            for m in session.get("models", []):
+                if m:
+                    all_known_models.add(m)
+            all_known_keys.add(session.get("api_key", ""))
+            all_sessions.append((session, root_dir))
 
     if search and search.strip():
         search = search.strip()
@@ -579,23 +558,33 @@ def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: i
     total = len(all_sessions)
     paged = all_sessions[offset:offset + limit] if limit > 0 else all_sessions[offset:]
 
+    # 按 root_dir 分组批量获取 traces
+    from collections import defaultdict
+    by_root: Dict[str, List[str]] = defaultdict(list)
+    for session, rd in paged:
+        by_root[rd].append(session["session_key"])
+
+    traces_map: Dict[str, Dict[str, List]] = {}
+    for rd, keys in by_root.items():
+        traces_map[rd] = _ss.get_traces_batch(keys)
+
     items = []
-    for session, _ in paged:
+    for session, rd in paged:
+        sk = session["session_key"]
+        trace_list = traces_map.get(rd, {}).get(sk, [])
         models = session.get("models", [])
-        if not models and session.get("model"):
-            models = [session["model"]]
-        payload = {
+        payload: Dict[str, Any] = {
             "first_time": _format_time(session["first_ts"]),
             "last_time": _format_time(session["last_ts"]),
-            "file_count": len(session.get("trace_list", [])),
+            "file_count": len(trace_list),
             "message_count": session.get("msg_count", 0),
             "models": models,
             "latest_file": session.get("latest_file", ""),
             "api_key": session.get("api_key", ""),
             "q1_preview": session.get("q1", ""),
-            "trace_list": session.get("trace_list", []),
+            "trace_list": trace_list,
         }
-        if any(not t.get("success", True) for t in session.get("trace_list", [])):
+        if any(not t.get("success", True) for t in trace_list):
             payload["has_failure"] = True
         items.append(payload)
 
