@@ -23,33 +23,53 @@
         .obs-cfg-field label { display: block; font-size: .75rem; color: var(--muted-foreground); margin-bottom: 3px; }
         .obs-cfg-field input { width: 100%; }
 
+        /* 全宽路径搜索栏 */
+        .obs-path-bar { flex-shrink: 0; display: flex; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--background); }
+        .obs-path-bar input { flex: 1; font-size: .84rem; font-family: monospace; }
+
         /* 两栏布局 */
         .obs-body { display: flex; flex: 1; overflow: hidden; }
 
         /* 左侧树 */
-        .obs-left { width: 300px; min-width: 220px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; background: var(--card); }
-        .obs-left-toolbar { padding: 8px 10px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; flex-shrink: 0; }
-        .obs-left-toolbar input { flex: 1; font-size: .8rem; }
+        .obs-left { width: 300px; min-width: 200px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; background: var(--card); }
         .obs-tree { flex: 1; overflow-y: auto; padding: 4px 0; }
-        .obs-node { display: flex; align-items: center; gap: 5px; padding: 3px 8px 3px 0; cursor: pointer; font-size: .82rem; white-space: nowrap; overflow: hidden; border-radius: 4px; }
+        .obs-node { display: flex; align-items: center; gap: 4px; padding: 3px 8px 3px 0; cursor: pointer; font-size: .82rem; white-space: nowrap; overflow: hidden; border-radius: 4px; }
         .obs-node:hover { background: var(--accent); }
         .obs-node.active { background: var(--primary); color: var(--primary-foreground); }
         .obs-node.active .obs-node-size { color: var(--primary-foreground); opacity: .7; }
-        .obs-node-indent { flex-shrink: 0; }
         .obs-node-icon { flex-shrink: 0; }
         .obs-node-name { overflow: hidden; text-overflow: ellipsis; flex: 1; }
         .obs-node-size { font-size: .72rem; color: var(--muted-foreground); flex-shrink: 0; margin-left: 4px; }
-        .obs-node-arrow { flex-shrink: 0; font-size: .7rem; color: var(--muted-foreground); width: 12px; text-align: center; }
+        .obs-node-arrow { flex-shrink: 0; font-size: .7rem; color: var(--muted-foreground); width: 14px; text-align: center; }
 
         /* 右侧内容 */
         .obs-right { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-        .obs-right-header { padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: .8rem; color: var(--muted-foreground); flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-        .obs-breadcrumb { font-family: monospace; font-size: .78rem; word-break: break-all; }
+        .obs-right-header { padding: 7px 14px; border-bottom: 1px solid var(--border); font-size: .8rem; color: var(--muted-foreground); flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .obs-breadcrumb { font-family: monospace; font-size: .78rem; word-break: break-all; flex: 1; }
         .obs-right-actions { display: flex; gap: 6px; flex-shrink: 0; }
-        .obs-content-area { flex: 1; overflow-y: auto; padding: 12px 14px; }
+        .obs-content-area { flex: 1; overflow-y: auto; }
         .obs-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted-foreground); font-size: .9rem; }
-        pre.obs-pre { font-size: .8rem; line-height: 1.55; margin: 0; white-space: pre-wrap; word-break: break-all; font-family: 'SFMono-Regular', Consolas, monospace; }
+        pre.obs-pre { margin: 12px 14px; font-size: .8rem; line-height: 1.55; white-space: pre-wrap; word-break: break-all; font-family: 'SFMono-Regular', Consolas, monospace; }
         .obs-loading { color: var(--muted-foreground); padding: 20px; text-align: center; font-size: .85rem; }
+
+        /* JSON 树（从 chat-viewer 移植） */
+        .json-tree { margin: 12px 14px; padding: 12px; background: #1e1e1e; color: #d4d4d4; border-radius: 6px; overflow: auto; font-size: 12px; line-height: 1.6; font-family: 'Cascadia Code','Fira Code',Consolas,monospace; }
+        .jt-row { white-space: nowrap; }
+        .jt-toggle { display: inline-block; width: 14px; text-align: center; cursor: pointer; user-select: none; color: #808080; font-size: 10px; vertical-align: middle; margin-right: 2px; }
+        .jt-toggle:hover { color: #d4d4d4; }
+        .jt-key { color: #9cdcfe; }
+        .jt-str { color: #ce9178; }
+        .jt-num { color: #b5cea8; }
+        .jt-bool { color: #569cd6; }
+        .jt-null { color: #808080; font-style: italic; }
+        .jt-bracket { color: #d4d4d4; }
+        .jt-summary { color: #6a6a6a; font-style: italic; font-size: 11px; }
+        .jt-children { margin-left: 20px; }
+        .jt-children.collapsed { display: none; }
+        .jt-close { margin-left: 20px; }
+        .jt-close.root { margin-left: 0; }
+        .jt-str-long { cursor: pointer; text-decoration: underline dotted #6a6a6a; }
+        .jt-str-long:hover { text-decoration: underline solid #ce9178; }
 {% endblock %}
 
 {% block content %}
@@ -88,20 +108,22 @@
         </div>
     </div>
 
+    <!-- 全宽路径搜索栏 -->
+    <div class="obs-path-bar">
+        <input class="form-input" v-model="browsePath" placeholder="obs://bucket/path/" @keyup.enter="browse(browsePath)">
+        <button class="btn btn-primary btn-sm" @click="browse(browsePath)" :disabled="treeLoading">浏览</button>
+    </div>
+
     <div class="obs-body">
 
         <!-- 左侧树 -->
         <div class="obs-left">
-            <div class="obs-left-toolbar">
-                <input class="form-input" v-model="browsePath" placeholder="obs://bucket/path/" @keyup.enter="browse(browsePath)" style="font-size:.78rem;">
-                <button class="btn btn-primary btn-sm" @click="browse(browsePath)" :disabled="treeLoading">浏览</button>
-            </div>
             <div class="obs-tree" v-if="treeNodes.length > 0">
                 <obs-node v-for="node in treeNodes" :key="node.path" :node="node" :selected="selectedPath" @select="onSelect" @toggle="onToggle" :depth="0"></obs-node>
             </div>
             <div class="obs-loading" v-else-if="treeLoading">加载中...</div>
             <div class="obs-loading" v-else-if="treePath">目录为空</div>
-            <div class="obs-loading" v-else>输入 OBS 路径后点击浏览</div>
+            <div class="obs-loading" v-else style="font-size:.8rem;">输入路径后点击浏览</div>
         </div>
 
         <!-- 右侧内容 -->
@@ -109,14 +131,14 @@
             <div v-if="selectedPath" class="obs-right-header">
                 <span class="obs-breadcrumb">{{ selectedPath }}</span>
                 <div class="obs-right-actions">
-                    <button v-if="isJson && !jsonExpanded" class="btn btn-sm" @click="jsonExpanded = true" style="font-size:.75rem;padding:2px 8px;">展开全部</button>
-                    <button v-if="isJson && jsonExpanded" class="btn btn-sm" @click="jsonExpanded = false" style="font-size:.75rem;padding:2px 8px;">收起</button>
+                    <button v-if="isJson" class="btn btn-sm" @click="toggleRaw" style="font-size:.75rem;padding:2px 8px;">{{ showRaw ? '树形视图' : '原始文本' }}</button>
                 </div>
             </div>
             <div class="obs-content-area">
                 <div v-if="contentLoading" class="obs-loading">加载中...</div>
                 <div v-else-if="contentError" class="obs-loading" style="color:var(--danger);">{{ contentError }}</div>
-                <pre v-else-if="displayContent" class="obs-pre">{{ displayContent }}</pre>
+                <div v-else-if="rawContent && isJson && !showRaw" id="obs-json-tree"></div>
+                <pre v-else-if="rawContent" class="obs-pre">{{ rawContent }}</pre>
                 <div v-else class="obs-empty">选择左侧文件查看内容</div>
             </div>
         </div>
@@ -129,7 +151,6 @@
 {% block scripts %}
 {% raw %}
 <script>
-// 树节点组件
 Vue.component('obs-node', {
     name: 'obs-node',
     props: ['node', 'selected', 'depth'],
@@ -162,7 +183,141 @@ Vue.component('obs-node', {
     `,
 });
 
-new Vue({
+// JSON 树渲染（参考 chat-viewer.html）
+function renderJsonTree(value, container, defaultDepth) {
+    if (defaultDepth === undefined) defaultDepth = 1;
+    container.innerHTML = '';
+    var root = document.createElement('div');
+    root.className = 'json-tree';
+
+    function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+    function isArr(v) { return Array.isArray(v); }
+
+    function valSpan(v) {
+        var s = document.createElement('span');
+        if (v === null) { s.className = 'jt-null'; s.textContent = 'null'; }
+        else if (typeof v === 'boolean') { s.className = 'jt-bool'; s.textContent = String(v); }
+        else if (typeof v === 'number') { s.className = 'jt-num'; s.textContent = String(v); }
+        else if (typeof v === 'string') {
+            s.className = 'jt-str';
+            var escaped = JSON.stringify(v);
+            if (v.length > 120) {
+                var short = JSON.stringify(v.slice(0, 120));
+                s.textContent = short.slice(0, -1) + '…"';
+                s.classList.add('jt-str-long');
+                s.title = '点击展开/折叠完整内容';
+                s._full = escaped;
+                s._short = short.slice(0, -1) + '…"';
+                s._expanded = false;
+                s.addEventListener('click', function() {
+                    this._expanded = !this._expanded;
+                    this.textContent = this._expanded ? this._full : this._short;
+                    this.style.whiteSpace = this._expanded ? 'pre-wrap' : '';
+                    this.style.wordBreak = this._expanded ? 'break-all' : '';
+                });
+            } else {
+                s.textContent = escaped;
+            }
+        }
+        return s;
+    }
+
+    function buildNode(parentEl, key, val, depth, isLast) {
+        if (isObj(val) || isArr(val)) {
+            var entries = isArr(val) ? val.map(function(v, i) { return [i, v]; }) : Object.entries(val);
+            var open = isArr(val) ? '[' : '{';
+            var close = isArr(val) ? ']' : '}';
+            var count = entries.length;
+            var label = isArr(val) ? count + ' items' : count + ' fields';
+            var expanded = depth < defaultDepth;
+
+            var row = document.createElement('div');
+            row.className = 'jt-row';
+
+            var toggle = document.createElement('span');
+            toggle.className = 'jt-toggle';
+            toggle.textContent = expanded ? '▼' : '▶';
+            row.appendChild(toggle);
+
+            if (key !== null) {
+                var k = document.createElement('span');
+                k.className = 'jt-key';
+                k.textContent = JSON.stringify(String(key));
+                row.appendChild(k);
+                row.appendChild(document.createTextNode(': '));
+            }
+
+            var br = document.createElement('span');
+            br.className = 'jt-bracket';
+            br.textContent = open;
+            row.appendChild(br);
+
+            var summary = document.createElement('span');
+            summary.className = 'jt-summary';
+            summary.textContent = ' ' + label + ' ';
+            row.appendChild(summary);
+
+            var closeSummary = document.createElement('span');
+            var closeBrS = document.createElement('span');
+            closeBrS.className = 'jt-bracket';
+            closeBrS.textContent = close + (isLast ? '' : ',');
+            closeSummary.appendChild(closeBrS);
+            row.appendChild(closeSummary);
+
+            parentEl.appendChild(row);
+
+            var children = document.createElement('div');
+            children.className = 'jt-children' + (expanded ? '' : ' collapsed');
+            entries.forEach(function(entry, i) {
+                buildNode(children, isArr(val) ? i : entry[0], entry[1], depth + 1, i === entries.length - 1);
+            });
+            parentEl.appendChild(children);
+
+            var closeRow = document.createElement('div');
+            closeRow.className = 'jt-row jt-close' + (depth === 0 ? ' root' : '');
+            var closeBr2 = document.createElement('span');
+            closeBr2.className = 'jt-bracket';
+            closeBr2.textContent = close + (isLast ? '' : ',');
+            closeRow.appendChild(closeBr2);
+            parentEl.appendChild(closeRow);
+
+            function setExpanded(exp) {
+                children.className = 'jt-children' + (exp ? '' : ' collapsed');
+                closeRow.style.display = exp ? '' : 'none';
+                summary.style.display = exp ? 'none' : '';
+                closeSummary.style.display = exp ? 'none' : '';
+                toggle.textContent = exp ? '▼' : '▶';
+            }
+            setExpanded(expanded);
+
+            toggle.addEventListener('click', function() {
+                var isExp = !children.classList.contains('collapsed');
+                setExpanded(!isExp);
+            });
+        } else {
+            var row = document.createElement('div');
+            row.className = 'jt-row';
+            var spacer = document.createElement('span');
+            spacer.style.cssText = 'display:inline-block;width:14px;margin-right:2px;';
+            row.appendChild(spacer);
+            if (key !== null) {
+                var k = document.createElement('span');
+                k.className = 'jt-key';
+                k.textContent = JSON.stringify(String(key));
+                row.appendChild(k);
+                row.appendChild(document.createTextNode(': '));
+            }
+            row.appendChild(valSpan(val));
+            if (!isLast) row.appendChild(document.createTextNode(','));
+            parentEl.appendChild(row);
+        }
+    }
+
+    buildNode(root, null, value, 0, true);
+    container.appendChild(root);
+}
+
+var app = new Vue({
     el: '#app',
     data: {
         showConfig: false,
@@ -179,18 +334,23 @@ new Vue({
         rawContent: '',
         contentLoading: false,
         contentError: '',
-        jsonExpanded: false,
+        showRaw: false,
     },
     computed: {
         isJson: function() {
             return this.selectedPath.toLowerCase().endsWith('.json');
         },
-        displayContent: function() {
-            if (!this.rawContent) return '';
-            if (this.isJson && !this.jsonExpanded) {
-                return this._collapseJson(this.rawContent);
+    },
+    watch: {
+        rawContent: function(val) {
+            if (val && this.isJson && !this.showRaw) {
+                this._renderTree();
             }
-            return this.rawContent;
+        },
+        showRaw: function(val) {
+            if (!val && this.rawContent && this.isJson) {
+                this._renderTree();
+            }
         },
     },
     mounted: function() {
@@ -199,6 +359,22 @@ new Vue({
     methods: {
         _h: function(extra) {
             return Object.assign({ 'x-requested-with': 'XMLHttpRequest' }, extra || {});
+        },
+        _renderTree: function() {
+            var self = this;
+            self.$nextTick(function() {
+                var el = document.getElementById('obs-json-tree');
+                if (!el) return;
+                try {
+                    var obj = JSON.parse(self.rawContent);
+                    renderJsonTree(obj, el, 1);
+                } catch(e) {
+                    el.textContent = '无法解析 JSON: ' + e.message;
+                }
+            });
+        },
+        toggleRaw: function() {
+            this.showRaw = !this.showRaw;
         },
         _loadConfig: function() {
             var self = this;
@@ -234,7 +410,6 @@ new Vue({
                     if (d.ok) {
                         self.configSaved = true;
                         setTimeout(function() { self.configSaved = false; }, 3000);
-                        // 更新浏览路径默认值
                         if (self.config.obs_base && !self.browsePath) {
                             self.browsePath = self.config.obs_base;
                         }
@@ -245,13 +420,15 @@ new Vue({
                 .catch(function(e) { alert('保存失败: ' + e); })
                 .finally(function() { self.saving = false; });
         },
-
         browse: function(path) {
             if (!path) return;
             var self = this;
             self.treeLoading = true;
             self.treeNodes = [];
             self.treePath = path;
+            self.selectedPath = '';
+            self.rawContent = '';
+            self.contentError = '';
             var enc = encodeURIComponent(path).replace(/%2F/g, '/');
             fetch('/api/obs/browse/' + enc, { headers: self._h() })
                 .then(function(r) { return r.json(); })
@@ -264,7 +441,6 @@ new Vue({
                 .catch(function(e) { alert('浏览失败: ' + e); })
                 .finally(function() { self.treeLoading = false; });
         },
-
         onToggle: function(node) {
             if (!node.is_dir) return;
             if (node.expanded) {
@@ -289,7 +465,6 @@ new Vue({
                 .catch(function(e) { alert('加载失败: ' + e); })
                 .finally(function() { node.loading = false; });
         },
-
         onSelect: function(node) {
             if (node.is_dir) return;
             var self = this;
@@ -297,7 +472,7 @@ new Vue({
             self.rawContent = '';
             self.contentError = '';
             self.contentLoading = true;
-            self.jsonExpanded = false;
+            self.showRaw = false;
             var enc = encodeURIComponent(node.path).replace(/%2F/g, '/');
             fetch('/api/obs/cat/' + enc, { headers: self._h() })
                 .then(function(r) {
@@ -311,43 +486,6 @@ new Vue({
                 .then(function(d) { self.rawContent = d.content || ''; })
                 .catch(function(e) { self.contentError = typeof e === 'string' ? e : '加载失败'; })
                 .finally(function() { self.contentLoading = false; });
-        },
-
-        _collapseJson: function(raw) {
-            try {
-                var obj = JSON.parse(raw);
-                if (typeof obj !== 'object' || obj === null) return raw;
-                var preview = Array.isArray(obj) ? [] : {};
-                var keys = Array.isArray(obj) ? obj : Object.keys(obj);
-                if (Array.isArray(obj)) {
-                    // 数组：只展示前3项并折叠
-                    for (var i = 0; i < Math.min(obj.length, 3); i++) {
-                        var v = obj[i];
-                        if (v !== null && typeof v === 'object') {
-                            preview.push(Array.isArray(v)
-                                ? '[... ' + v.length + ' items]'
-                                : '{... ' + Object.keys(v).length + ' keys}');
-                        } else {
-                            preview.push(v);
-                        }
-                    }
-                    if (obj.length > 3) preview.push('... (' + (obj.length - 3) + ' more)');
-                } else {
-                    for (var k in obj) {
-                        var v = obj[k];
-                        if (v !== null && typeof v === 'object') {
-                            preview[k] = Array.isArray(v)
-                                ? '[... ' + v.length + ' items]'
-                                : '{... ' + Object.keys(v).length + ' keys}';
-                        } else {
-                            preview[k] = v;
-                        }
-                    }
-                }
-                return JSON.stringify(preview, null, 2);
-            } catch(e) {
-                return raw;
-            }
         },
     },
 });
