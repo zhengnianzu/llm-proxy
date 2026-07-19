@@ -338,11 +338,15 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 )
                 eval_report_path = eval_result.get("report_path", "")
                 analysis_json_path = eval_result.get("analysis_json_path", "")
+                # 只有文件 ≤100MB 才存入 DB（超大文件直接从 local_copy_dir 读取即可）
+                _MAX_ANALYSIS_JSON = 100 * 1024 * 1024
                 if analysis_json_path and Path(analysis_json_path).is_file():
-                    # 读取内容并写入外部文件
-                    from utils.export_store import _externalize_field
-                    analysis_json_content = Path(analysis_json_path).read_text(encoding="utf-8")
-                    analysis_json_stored = _externalize_field(record_id, "analysis_json", analysis_json_content)
+                    if Path(analysis_json_path).stat().st_size <= _MAX_ANALYSIS_JSON:
+                        from utils.export_store import _externalize_field
+                        analysis_json_content = Path(analysis_json_path).read_text(encoding="utf-8")
+                        analysis_json_stored = _externalize_field(record_id, "analysis_json", analysis_json_content)
+                    else:
+                        _log(f"analysis_json 过大（{Path(analysis_json_path).stat().st_size // 1024 // 1024}MB），跳过存储，报告直接使用 session_report.html")
 
                 from utils.eval.reformat import write_eval_to_cache
                 for mt in mtime_dirs:
