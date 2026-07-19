@@ -198,38 +198,56 @@ def _state(kind: str, root_dir: str) -> Dict[str, Any]:
 
 
 def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_entry: Optional[Dict[str, Any]] = None) -> bool:
-    data = _load_json(req_path)
-    if not data:
-        return False
+    _noise_prefixes = ("(session bootstrap)",)
+    ie = index_entry or {}
 
-    messages = data.get("messages")
-    if not isinstance(messages, list):
-        return False
+    # 快速路径：index_entry 已含 msg_count/user_turns/chain_key，跳过读 req.json
+    _idx_msg_count = ie.get("msg_count", 0)
+    _idx_user_turns = ie.get("user_turns")
+    _idx_chain_key = ie.get("chain_key", "")
+    _needs_req = (
+        not _idx_msg_count  # 旧格式 index 没有 msg_count
+        or not _idx_chain_key
+        or (_idx_chain_key and any(_idx_chain_key.startswith(p) for p in _noise_prefixes))
+        or (_idx_user_turns is None)
+    )
+
+    messages = None
+    data = None
+    if _needs_req:
+        data = _load_json(req_path)
+        if not data:
+            return False
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return False
 
     root_dir = state["root_dir"]
     filename = req_path.name
-    ts = str((index_entry or {}).get("ts") or filename.replace("-req.json", ""))
-    model = str(data.get("model", "") or (index_entry or {}).get("model", "") or "")
-    message_count = len(messages)
-    api_key = str((index_entry or {}).get("api_key", "") or "")
+    ts = str(ie.get("ts") or filename.replace("-req.json", ""))
+    model = str((data.get("model", "") if data else "") or ie.get("model", "") or "")
+    api_key = str(ie.get("api_key", "") or "")
 
-    if index_entry and index_entry.get("chain_key"):
-        chain_key = index_entry["chain_key"]
+    if _idx_chain_key and not any(_idx_chain_key.startswith(p) for p in _noise_prefixes):
+        chain_key = _idx_chain_key
     else:
         chain_key = build_chain_key(messages)
 
-    _noise_prefixes = ("(session bootstrap)",)
-    if chain_key and any(chain_key.startswith(p) for p in _noise_prefixes):
-        chain_key = build_chain_key(messages)
-
     lookup_key = f"{api_key}||{chain_key}"
-    q1_preview = (index_entry or {}).get("q1_preview", "")
+    q1_preview = ie.get("q1_preview", "")
     if q1_preview and any(q1_preview.startswith(p) for p in _noise_prefixes):
-        q1_preview = get_first_user_text(messages)[:200]
+        q1_preview = get_first_user_text(messages)[:200] if messages is not None else ""
 
-    res_path = req_path.with_name(filename.replace("-req.json", "-res.json"))
-    has_res = res_path.is_file()
-    full_message_count = message_count + (1 if has_res else 0)
+    if _idx_msg_count and not _needs_req:
+        message_count = _idx_msg_count
+        res_path = req_path.with_name(filename.replace("-req.json", "-res.json"))
+        has_res = res_path.is_file()
+        full_message_count = message_count + (1 if has_res else 0)
+    else:
+        message_count = len(messages)
+        res_path = req_path.with_name(filename.replace("-req.json", "-res.json"))
+        has_res = res_path.is_file()
+        full_message_count = message_count + (1 if has_res else 0)
 
     trace_entry: Dict[str, Any] = {
         "filename": filename,
@@ -238,13 +256,16 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
         "ts": ts,
     }
     if index_entry:
-        if not index_entry.get("success", True):
+        if not ie.get("success", True):
             trace_entry["success"] = False
-            trace_entry["total_attempts"] = index_entry.get("total_attempts", 1)
-        if index_entry.get("debug_file"):
-            trace_entry["debug_file"] = index_entry["debug_file"]
+            trace_entry["total_attempts"] = ie.get("total_attempts", 1)
+        if ie.get("debug_file"):
+            trace_entry["debug_file"] = ie["debug_file"]
 
-    real_user_turns = count_real_user_turns(messages)
+    if _idx_user_turns is not None and not _needs_req:
+        real_user_turns = _idx_user_turns
+    else:
+        real_user_turns = count_real_user_turns(messages)
 
     # 用 _CACHE_LOCK 短暂读取内存 chain_map（微秒级）
     with _CACHE_LOCK:

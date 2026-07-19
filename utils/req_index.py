@@ -92,7 +92,8 @@ def append_index(ts: str, req_file: str, provider: str, logs_dir: str, model: st
                  api_key: str = "", chain_key: str = "", q1_preview: str = "",
                  total_attempts: int = 1, start_turn: int = 0,
                  channel_key: str = "", usage: dict = None,
-                 debug_file: str = ""):
+                 debug_file: str = "",
+                 msg_count: int = 0, user_turns: int = 0):
     global _first_count, _total_count, _valid_count
     entry = {
         "ts": ts,
@@ -111,6 +112,8 @@ def append_index(ts: str, req_file: str, provider: str, logs_dir: str, model: st
         "start_turn": start_turn,
         "channel_key": channel_key,
         "usage": usage or {},
+        "msg_count": msg_count,
+        "user_turns": user_turns,
     }
     if debug_file:
         entry["debug_file"] = debug_file
@@ -126,6 +129,7 @@ def append_index(ts: str, req_file: str, provider: str, logs_dir: str, model: st
 
 def append_index_anthropic(ts, req_path, total_attempts, valid, logs_dir, model="", tok_in=0, tok_out=0, cache_in=0, api_key="", messages=None, channel_key="", usage=None, debug_file=""):
     msgs = messages or []
+    from utils.message_common import count_real_user_turns
     append_index(
         ts, req_path, provider="anthropic", logs_dir=logs_dir, model=model,
         tok_in=tok_in, tok_out=tok_out, cache_in=cache_in, success=valid,
@@ -137,11 +141,14 @@ def append_index_anthropic(ts, req_path, total_attempts, valid, logs_dir, model=
         channel_key=channel_key,
         usage=usage,
         debug_file=debug_file,
+        msg_count=len(msgs),
+        user_turns=count_real_user_turns(msgs),
     )
 
 
 def append_index_openai(ts, req_path, logs_dir, model="", tok_in=0, tok_out=0, success=True, api_key="", messages=None, channel_key="", usage=None, debug_file=""):
     msgs = messages or []
+    from utils.message_common import count_real_user_turns
     append_index(
         ts, req_path, provider="openai", logs_dir=logs_dir, model=model,
         tok_in=tok_in, tok_out=tok_out, success=success,
@@ -151,6 +158,8 @@ def append_index_openai(ts, req_path, logs_dir, model="", tok_in=0, tok_out=0, s
         channel_key=channel_key,
         usage=usage,
         debug_file=debug_file,
+        msg_count=len(msgs),
+        user_turns=count_real_user_turns(msgs),
     )
 
 
