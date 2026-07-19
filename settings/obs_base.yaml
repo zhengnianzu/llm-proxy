@@ -8,7 +8,7 @@ obs_base: obs://bucket/llm-proxy-logs/
 interval: 600
 
 # 并发上传线程数，默认 4
-workers: 4
+workers: 20
 
 # 自定义上传脚本路径（可选），默认使用 obs_utils
 # upload_script: /path/to/upload.sh

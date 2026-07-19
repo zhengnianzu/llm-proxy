@@ -451,6 +451,8 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             "workers": cfg.get("workers", 4),
             "interval": cfg.get("interval", 600),
             "upload_script": cfg.get("upload_script", ""),
+            "upload_timeout": cfg.get("upload_timeout", 3600),
+            "upload_jobs": cfg.get("upload_jobs", 8),
         })
 
     @app.put("/api/backup/config")
@@ -472,7 +474,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             else:
                 existing = {}
 
-            for key in ("obs_base", "workers", "interval", "upload_script"):
+            for key in ("obs_base", "workers", "interval", "upload_script", "upload_timeout", "upload_jobs"):
                 if key in body:
                     existing[key] = body[key]
 

@@ -146,7 +146,7 @@
             <div v-if="k.records && k.records.length" style="margin-top:10px;">
                 <small class="text-muted" style="font-weight:600">导出历史:</small>
                 <div v-for="r in k.records" :key="r.id" class="record-row">
-                    <span class="badge" :class="{'badge-success': r.status === 'success', 'badge-danger': r.status === 'failed', 'badge-warning': r.status === 'running', 'badge-muted': r.status === 'pending'}">{{ statusText(r.status, r.mode) }}</span>
+                    <span class="badge" :class="{'badge-success': r.status === 'success', 'badge-danger': r.status === 'failed', 'badge-warning': r.status === 'running' || r.status === 'queued', 'badge-muted': r.status === 'pending' || r.status === 'cancelled'}">{{ statusText(r.status, r.mode) }}</span>
                     <span v-if="r.mode === 'eval'" class="badge badge-info" style="font-size:.68rem">质检</span>
                     <span>{{ r.created_at }}</span>
                     <span class="text-muted">
@@ -158,6 +158,16 @@
                     </span>
                     <span style="cursor:pointer;font-size:.8rem;color:var(--primary)" @click="openLogDrawer(r.id)">
                         [详情]
+                    </span>
+                    <span v-if="r.status === 'queued'"
+                          style="cursor:pointer;font-size:.8rem;color:var(--destructive);font-weight:600"
+                          @click="cancelTask(r)">
+                        [取消]
+                    </span>
+                    <span v-if="r.status === 'failed' && r.obs_dst && r.local_copy_dir"
+                          style="cursor:pointer;font-size:.8rem;color:var(--warning);font-weight:600"
+                          @click="retryUpload(r)">
+                        [重试上传]
                     </span>
                     <span v-if="r.mode === 'eval' && r.status === 'success'"
                           style="cursor:pointer;font-size:.8rem;font-weight:600;color:var(--success)" @click="openReport(r.id)">
@@ -372,9 +382,9 @@ new Vue({
 
         statusText: function(s, mode) {
             if (mode === 'eval') {
-                return { pending: '等待中', running: '质检中', success: '成功', failed: '失败' }[s] || s;
+                return { pending: '等待中', queued: '排队中', running: '质检中', success: '成功', failed: '失败', cancelled: '已取消' }[s] || s;
             }
-            return { pending: '等待中', running: '导出中', success: '成功', failed: '失败' }[s] || s;
+            return { pending: '等待中', queued: '排队中', running: '导出中', success: '成功', failed: '失败', cancelled: '已取消' }[s] || s;
         },
 
         openExportModal: function(k) {
@@ -436,7 +446,7 @@ new Vue({
                         try {
                             self.logEntries = JSON.parse(d.progress_log || '[]');
                         } catch(e) {}
-                        var done = (d.status === 'success' || d.status === 'failed');
+                        var done = (d.status === 'success' || d.status === 'failed' || d.status === 'cancelled');
                         if (done) {
                             clearInterval(self.pollTimer);
                             self.pollTimer = null;
@@ -511,7 +521,7 @@ new Vue({
                             var body = self.$el.querySelector('.drawer-body');
                             if (body) body.scrollTop = body.scrollHeight;
                         });
-                        if (d.status === 'success' || d.status === 'failed') {
+                        if (d.status === 'success' || d.status === 'failed' || d.status === 'cancelled') {
                             clearInterval(self.logPollTimer);
                             self.logPollTimer = null;
                         }
@@ -526,6 +536,39 @@ new Vue({
 
         openReport: function(recordId) {
             window.open('/keys/export/report/' + recordId, '_blank');
+        },
+
+        cancelTask: function(r) {
+            fetch('/api/export/cancel', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({record_id: r.id}),
+            }).then(function(res) { return res.json(); }).then(function(d) {
+                if (d.status === 'cancelled') {
+                    this.fetchKeys();
+                } else {
+                    this.error = d.detail || '取消失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this));
+        },
+
+        retryUpload: function(r) {
+            fetch('/api/export/upload_retry', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({record_id: r.id}),
+            }).then(function(res) { return res.json(); }).then(function(d) {
+                if (d.record_id) {
+                    this.pollRecordId = d.record_id;
+                    this._startPoll();
+                } else {
+                    this.error = d.detail || '重试失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this));
         },
     }
 });

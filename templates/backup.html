@@ -118,6 +118,14 @@
                     <label>上传脚本</label>
                     <input v-model="config.upload_script" class="form-input" placeholder="./tools/obs_upload.sh">
                 </div>
+                <div class="config-field">
+                    <label>上传超时（秒）</label>
+                    <input v-model.number="config.upload_timeout" class="form-input" type="number" min="60">
+                </div>
+                <div class="config-field">
+                    <label>OBS 并发数（-j）</label>
+                    <input v-model.number="config.upload_jobs" class="form-input" type="number" min="1" max="64">
+                </div>
             </div>
             <div class="config-actions">
                 <button class="btn btn-primary btn-sm" @click="saveConfig" :disabled="saving">{{ saving ? '保存中...' : '保存配置' }}</button>
@@ -269,7 +277,7 @@ new Vue({
         loading: false,
         syncing: false,
         showConfig: false,
-        config: { obs_base: '', workers: 4, interval: 600, upload_script: '' },
+        config: { obs_base: '', workers: 4, interval: 600, upload_script: '', upload_timeout: 3600, upload_jobs: 8 },
         saving: false,
         drawerDir: null,
         drawerLogs: [],

@@ -8,6 +8,7 @@ utils/export_routes.py — Session 导出 Web 路由
 import json
 import logging
 import os
+import queue
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,46 @@ from utils.stats_index import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 全局任务队列（串行执行，支持取消排队中任务）
+# ---------------------------------------------------------------------------
+# 队列项: (record_id, fn, args)
+# fn 是无参可调用，内部捕获所有上下文
+_task_queue: queue.Queue = queue.Queue()
+_queue_lock = threading.Lock()
+
+# record_id -> True 表示该任务已被取消，调度线程出队后直接跳过
+_cancelled_ids: set = set()
+
+
+def _queue_runner():
+    """全局单一调度线程，逐个执行队列中的任务。"""
+    while True:
+        record_id, fn = _task_queue.get()
+        with _queue_lock:
+            if record_id in _cancelled_ids:
+                _cancelled_ids.discard(record_id)
+                _task_queue.task_done()
+                continue
+        try:
+            fn()
+        except Exception:
+            logger.exception("queue_runner: task %s raised", record_id)
+        finally:
+            _task_queue.task_done()
+
+
+def _enqueue_task(record_id: int, fn) -> None:
+    """将任务加入队列，并把记录状态设为 queued（如果还不是 running）。"""
+    from utils.export_store import update_status
+    update_status(record_id, "queued")
+    _task_queue.put((record_id, fn))
+
+
+# 启动调度线程（只启动一次）
+_runner_thread = threading.Thread(target=_queue_runner, daemon=True, name="export-queue-runner")
+_runner_thread.start()
 
 
 def _load_sync_config() -> dict:
@@ -157,6 +198,26 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
     # -----------------------------------------------------------------
     # 统一任务执行（导出 / 质检）
     # -----------------------------------------------------------------
+
+    def _run_upload_only(record_id, local_copy_dir, obs_dst):
+        """仅执行上传步骤，用于对已完成导出/质检但上传失败的记录进行重试。"""
+        from utils.obs_sync import _run_upload_cmd
+        _log = lambda msg: append_log(record_id, msg)
+        try:
+            sync_cfg = _load_sync_config()
+            upload_script = sync_cfg.get("upload_script") or None
+            obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
+            _log(f"重试上传: {local_copy_dir} -> {obs_parent}")
+            ok, msg = _run_upload_cmd(local_copy_dir, obs_parent, upload_script)
+            if ok:
+                _log("上传成功")
+                update_status(record_id, "success")
+            else:
+                _log(f"上传失败: {msg}")
+                update_status(record_id, "failed", error_message=f"OBS upload: {msg}")
+        except Exception as e:
+            logger.exception("_run_upload_only crashed (record=%s)", record_id)
+            update_status(record_id, "failed", error_message=str(e))
 
     def _run_task(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force=False):
         from utils.eval.reformat import reformat_and_analyze
@@ -354,15 +415,9 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             mode=mode,
         )
 
-        t = threading.Thread(
-            target=_run_task,
-            args=(record_id, env_dir, env_key_name, obs_prefix, now_tag, mode),
-            kwargs={"force": force},
-            daemon=True,
-        )
-        t.start()
+        _enqueue_task(record_id, lambda rid=record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode, f=force: _run_task(rid, ed, ek, op, nt, m, force=f))
 
-        return JSONResponse({"record_id": record_id, "status": "running", "mode": mode})
+        return JSONResponse({"record_id": record_id, "status": "queued", "mode": mode})
 
     @app.post("/api/export/eval")
     async def export_eval(request: Request):
@@ -390,14 +445,56 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             source_export_id=src_record_id,
         )
 
-        t = threading.Thread(
-            target=_run_task,
-            args=(new_record_id, env_dir, env_key_name, obs_prefix, now_tag, "eval"),
-            daemon=True,
-        )
-        t.start()
+        _enqueue_task(new_record_id, lambda rid=new_record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag: _run_task(rid, ed, ek, op, nt, "eval"))
 
-        return JSONResponse({"record_id": new_record_id, "status": "running", "mode": "eval"})
+        return JSONResponse({"record_id": new_record_id, "status": "queued", "mode": "eval"})
+
+    @app.post("/api/export/upload_retry")
+    async def export_upload_retry(request: Request):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        record_id = body.get("record_id")
+        if not record_id:
+            return JSONResponse({"detail": "record_id is required"}, status_code=400)
+        rec = get_record(record_id)
+        if not rec:
+            return JSONResponse({"detail": "Record not found"}, status_code=404)
+        if rec["status"] != "failed":
+            return JSONResponse({"detail": "只能对失败记录重试上传"}, status_code=400)
+        local_copy_dir = rec.get("local_copy_dir", "")
+        if not local_copy_dir or not Path(local_copy_dir).is_dir():
+            return JSONResponse({"detail": "本地文件不存在，无法重试（可能已被清理）"}, status_code=400)
+        obs_dst = rec.get("obs_dst", "")
+        if not obs_dst:
+            return JSONResponse({"detail": "无 OBS 目标路径，无法上传"}, status_code=400)
+
+        def _upload_retry_task(rid=record_id, lcd=local_copy_dir, od=obs_dst):
+            update_status(rid, "running", error_message="")
+            _run_upload_only(rid, lcd, od)
+
+        _enqueue_task(record_id, _upload_retry_task)
+        return JSONResponse({"record_id": record_id, "status": "queued"})
+
+    @app.post("/api/export/cancel")
+    async def export_cancel(request: Request):
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        record_id = body.get("record_id")
+        if not record_id:
+            return JSONResponse({"detail": "record_id is required"}, status_code=400)
+        rec = get_record(record_id)
+        if not rec:
+            return JSONResponse({"detail": "Record not found"}, status_code=404)
+        if rec["status"] != "queued":
+            return JSONResponse({"detail": "只能取消排队中的任务"}, status_code=400)
+        with _queue_lock:
+            _cancelled_ids.add(record_id)
+        update_status(record_id, "cancelled", error_message="用户取消")
+        return JSONResponse({"record_id": record_id, "status": "cancelled"})
 
     @app.get("/api/export/status/{record_id}")
     def export_status(request: Request, record_id: int):
@@ -518,17 +615,12 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         obs_dst = f"{obs_prefix}/session_analysis/{env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
 
-        t = threading.Thread(
-            target=_run_task,
-            args=(record_id, env_dir, env_key_name, obs_prefix, now_tag, mode),
-            daemon=True,
-        )
-        t.start()
+        _enqueue_task(record_id, lambda rid=record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode: _run_task(rid, ed, ek, op, nt, m))
 
         return JSONResponse({
             "record_id": record_id,
             "session_path": obs_dst,
-            "status": "running",
+            "status": "queued",
         })
 
     @app.get("/api/shared/export/status/{record_id}")

@@ -11,6 +11,7 @@ utils/obs_utils.py — OBS 路径管理与工具函数
 import os
 import subprocess
 from pathlib import Path
+from subprocess import PIPE, STDOUT, Popen
 from typing import Dict, List, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -112,9 +113,16 @@ def run_upload_cmd(
     local: str,
     dst: str,
     upload_script: Optional[str] = None,
-    timeout: int = 120,
+    timeout: Optional[int] = None,
+    jobs: Optional[int] = None,
 ) -> Tuple[bool, str]:
-    """执行上传脚本，将本地文件/目录上传到 OBS。"""
+    """流式执行上传脚本（Popen 模式），实时打印进度。timeout/jobs 默认从 sync_config 读取。"""
+    cfg = load_sync_config()
+    if timeout is None:
+        timeout = int(cfg.get("upload_timeout", 3600))
+    if jobs is None:
+        jobs = int(cfg.get("upload_jobs", 8))
+
     if upload_script is None:
         upload_script = DEFAULT_UPLOAD_SCRIPT
     else:
@@ -122,12 +130,24 @@ def run_upload_cmd(
         if not p.is_absolute():
             upload_script = str((PROJECT_ROOT / p).resolve())
 
-    cmd = [upload_script, local, dst]
+    cmd = [upload_script, local, dst, str(jobs)]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode == 0:
-            return True, result.stdout.strip()
-        return False, (result.stderr or result.stdout).strip()
+        proc = Popen(cmd, stdout=PIPE, stderr=STDOUT, text=True)
+        lines: List[str] = []
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                lines.append(line)
+                print(line, flush=True)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return False, f"Command timed out after {timeout}s"
+        if proc.returncode == 0:
+            return True, lines[-1] if lines else ""
+        return False, "\n".join(lines[-5:]) if lines else "upload failed"
     except Exception as e:
         return False, str(e)
 

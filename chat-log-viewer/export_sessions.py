@@ -176,7 +176,7 @@ def build_triplet_from_index_entry(src: Path, entry: dict) -> Optional[Tuple[str
     return ts, tri
 
 
-def _load_session_index(path: Path) -> List[dict]:
+def _load_session_index(path: Path, filter_key='') -> List[dict]:
     entries = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -185,6 +185,9 @@ def _load_session_index(path: Path) -> List[dict]:
                 continue
             try:
                 obj = json.loads(line)
+                # 过滤指定api_key
+                if len(filter_key) > 0 and obj.get('api_key', '') != filter_key:
+                    continue
             except json.JSONDecodeError:
                 continue
             if obj.get("_meta"):
@@ -406,6 +409,7 @@ def main():
                         help="并行 worker 数，默认使用 CPU 核心数")
     parser.add_argument("--pretty-json", action="store_true",
                         help="输出格式化 JSON；默认使用紧凑 JSON 以减少导出耗时")
+    parser.add_argument("--filter_key", default='', help="过滤指定的api_key")
     args = parser.parse_args()
 
     src = Path(args.src).resolve()
@@ -450,7 +454,7 @@ def main():
     # session_index.jsonl 快速路径：已聚合，直接导出
     if use_session_index:
         print("[info] 使用 session_index.jsonl（快速路径）")
-        session_entries = _load_session_index(session_index_path)
+        session_entries = _load_session_index(session_index_path, args.filter_key)
         _export_from_session_index(src, out, session_entries, worker_num, args.pretty_json)
         return
 

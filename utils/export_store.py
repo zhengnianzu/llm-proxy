@@ -133,7 +133,7 @@ def update_status(record_id: int, status: str, **kwargs):
     values = [status]
     if status == "running":
         fields.append("started_at = datetime('now','localtime')")
-    elif status in ("success", "failed"):
+    elif status in ("success", "failed", "cancelled"):
         fields.append("finished_at = datetime('now','localtime')")
     for k, v in kwargs.items():
         if k in ("error_message", "total_sessions", "files_uploaded", "files_skipped",
@@ -207,10 +207,10 @@ def list_records_for_datasets(limit: int = 1000) -> list:
 
 def get_records_summary() -> tuple:
     """返回 (max_id, count, running_count)，用于快速判断 export_records 是否有变化。
-    running_count 用于检测 status 从 running → success/failed 的变化。"""
+    running_count 用于检测 status 从 running/queued → success/failed 的变化。"""
     conn = _get_conn()
     row = conn.execute(
-        "SELECT MAX(id), COUNT(*), SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) FROM export_records"
+        "SELECT MAX(id), COUNT(*), SUM(CASE WHEN status IN ('running','queued') THEN 1 ELSE 0 END) FROM export_records"
     ).fetchone()
     return (row[0] or 0, row[1] or 0, row[2] or 0)
 
@@ -233,12 +233,16 @@ def list_records_all_slim(limit_per_key: int = 10) -> dict:
 
 
 def mark_interrupted():
-    """启动时将遗留的 running 记录标记为 failed。"""
+    """启动时将遗留的 running/queued 记录标记为 failed/cancelled。"""
     conn = _get_conn()
     with _lock:
         conn.execute(
             "UPDATE export_records SET status = 'failed', error_message = '服务重启中断', "
             "finished_at = datetime('now','localtime') WHERE status = 'running'"
+        )
+        conn.execute(
+            "UPDATE export_records SET status = 'cancelled', error_message = '服务重启取消', "
+            "finished_at = datetime('now','localtime') WHERE status = 'queued'"
         )
         conn.commit()
 
