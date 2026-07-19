@@ -490,16 +490,11 @@ new Vue({
         },
         fmtNum(n) {
             if (!n) return '0';
-            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-            return String(n);
+            return Number(n).toLocaleString();
         },
         fmtTok(n) {
             if (!n) return '0';
-            if (n >= 1000000000) return (n / 1000000000).toFixed(2) + 'B';
-            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-            return String(n);
+            return Number(n).toLocaleString();
         },
         loadActiveDir() {
             fetch('/api/backup/active-dir', { headers: { 'x-requested-with': 'XMLHttpRequest' } })

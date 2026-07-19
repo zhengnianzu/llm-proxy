@@ -277,11 +277,12 @@ def refresh_token_index(env_dir: str, force: bool = False) -> dict:
                 }
                 changed = True
 
+        # 只删除非 frozen 的消失目录；frozen 代表数据已稳定，本地删除后仍保留统计
         removed = set(dirs_cache.keys()) - current_dirs
-        if removed:
-            for r in removed:
+        for r in removed:
+            if not dirs_cache[r].get("frozen"):
                 del dirs_cache[r]
-            changed = True
+                changed = True
 
         if changed:
             index["dirs"] = dirs_cache
