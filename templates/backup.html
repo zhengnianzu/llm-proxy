@@ -409,6 +409,7 @@ new Vue({
                 .catch(e => alert('删除失败: ' + e));
         },
         openLogs(d) {
+            this.closeObsBrowser();
             this.drawerDir = d;
             this._fetchLogs(d.dir_path);
             if (d.status === 'syncing' || d.status === 'live_syncing') this._startLogPoll(d.dir_path);
@@ -455,6 +456,7 @@ new Vue({
             }, 5000);
         },
         openObsBrowser(obsPath) {
+            this.closeLogs();
             this.obsDrawerPath = obsPath;
             this.obsHistory = [];
             this.browseObs(obsPath);
