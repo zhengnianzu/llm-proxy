@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from utils.export_store import (
@@ -502,9 +502,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if denied:
             return denied
         from utils.export_store import get_record_resolved
-        rec = get_record_resolved(record_id)  # 自动解析外部文件
+        rec = get_record_resolved(record_id)
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)
+        rec.pop("analysis_json", None)  # 可达 2GB+，不返回给前端
         return JSONResponse(rec)
 
     @app.get("/api/export/records")
@@ -532,24 +533,31 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/api/export/eval/report/{record_id}")
     def export_eval_report(request: Request, record_id: int):
-        from utils.export_store import get_record_resolved
-        rec = get_record_resolved(record_id)  # 自动解析外部文件
+        rec = get_record(record_id)
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
+        # 优先直接 serve 本地 HTML 文件（FileResponse 流式传输，不占内存）
         report_path = rec.get("eval_report_path", "")
-        html_path = ""
-        if report_path:
-            html_path = str(Path(report_path).parent / "session_report.html")
+        html_path = Path(report_path).parent / "session_report.html" if report_path else None
+        if html_path and html_path.is_file():
+            return FileResponse(str(html_path), media_type="text/html")
 
-        if html_path and Path(html_path).is_file():
-            content = Path(html_path).read_text(encoding="utf-8")
-            return JSONResponse({"report_html": content, "record_id": record_id})
-
-        analysis_json = rec.get("analysis_json", "")
-        if analysis_json:
+        # 降级：analysis_json 重建报告（限制文件大小 ≤ 200MB，防止 OOM）
+        analysis_json_ref = rec.get("analysis_json", "")
+        if analysis_json_ref:
+            from utils.export_store import _read_field_content
+            # 先检查外部文件大小
+            if analysis_json_ref.startswith("file://"):
+                fpath = Path(analysis_json_ref[7:])
+                if fpath.is_file() and fpath.stat().st_size > 200 * 1024 * 1024:
+                    return JSONResponse(
+                        {"detail": f"analysis_json 过大（{fpath.stat().st_size // 1024 // 1024}MB），无法在线渲染，请直接访问 OBS"},
+                        status_code=413,
+                    )
             try:
                 from utils.eval.eval import load_analysis_json, compute_stats, render_html_report_string
+                analysis_json = _read_field_content(analysis_json_ref)
                 sessions = load_analysis_json(analysis_json)
                 stats = compute_stats(sessions)
                 key_slot = rec.get("key_slot", "all")
@@ -558,14 +566,13 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                     key_name=f"{env_key_name}/{key_slot}",
                     obs_path=rec.get("obs_dst", ""),
                 )
-                return JSONResponse({"report_html": content, "record_id": record_id})
+                return HTMLResponse(content=content)
             except Exception as e:
                 logger.exception("Failed to rebuild report from analysis JSON")
                 return JSONResponse({"detail": f"报告重建失败: {e}"}, status_code=500)
 
         if report_path and Path(report_path).is_file():
-            content = Path(report_path).read_text(encoding="utf-8")
-            return JSONResponse({"report_md": content, "record_id": record_id})
+            return FileResponse(str(report_path), media_type="text/plain")
 
         return JSONResponse({"detail": "报告未生成"}, status_code=404)
 

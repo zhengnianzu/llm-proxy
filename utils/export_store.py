@@ -153,14 +153,24 @@ def get_record(record_id: int) -> Optional[dict]:
 
 
 def get_record_resolved(record_id: int) -> Optional[dict]:
-    """获取记录并自动解析外部文件内容"""
+    """获取记录并自动解析外部文件内容（仅展开 progress_log，不读 analysis_json）"""
     rec = get_record(record_id)
     if not rec:
         return None
-    # 自动解析可能的外部字段
-    for field in ["progress_log", "analysis_json"]:
-        if field in rec and rec[field]:
-            rec[field] = _read_field_content(rec[field])
+    if rec.get("progress_log"):
+        rec["progress_log"] = _read_field_content(rec["progress_log"])
+    return rec
+
+
+def get_record_with_analysis(record_id: int) -> Optional[dict]:
+    """获取记录并展开 analysis_json（体积可能极大，仅在需要重新渲染报告时使用）"""
+    rec = get_record(record_id)
+    if not rec:
+        return None
+    if rec.get("progress_log"):
+        rec["progress_log"] = _read_field_content(rec["progress_log"])
+    if rec.get("analysis_json"):
+        rec["analysis_json"] = _read_field_content(rec["analysis_json"])
     return rec
 
 
