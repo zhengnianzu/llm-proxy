@@ -25,6 +25,7 @@ from utils.backup_store import (
     get_dir,
     get_live_syncing_dirs,
     get_logs,
+    has_any_dirs,
     list_dirs,
     list_env_names,
     mark_backed_up,
@@ -253,6 +254,26 @@ def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int
         script = str((Path(__file__).resolve().parent.parent / script).resolve())
 
     try:
+        # 本地目录不存在：已被清理，标记为 backed_up 跳过上传
+        if not (logs_all / dir_path).is_dir():
+            dir_info = get_dir(dir_path)
+            if dir_info and dir_info.get("obs_path"):
+                update_sync_status(dir_path, "backed_up", obs_path=dir_info["obs_path"])
+                append_log(dir_path, "本地目录不存在，已标记为已备份（跳过上传）")
+            else:
+                append_log(dir_path, "本地目录不存在且无 OBS 路径，跳过", level="error")
+            return
+
+        # synced=1：之前已成功同步过，status 可能被后续操作误覆盖，修正并跳过
+        dir_info = get_dir(dir_path)
+        if dir_info and dir_info.get("synced") and dir_info.get("obs_path"):
+            if dir_info.get("status") != "done":
+                update_sync_status(dir_path, "done", obs_path=dir_info["obs_path"])
+                append_log(dir_path, f"已有成功同步记录（synced=1），修正状态为 done，跳过重复上传")
+            else:
+                append_log(dir_path, "已有成功同步记录（synced=1），跳过重复上传")
+            return
+
         update_sync_status(dir_path, "syncing", obs_path=obs_dst)
         append_log(dir_path, f"开始同步: {dir_path} -> {obs_dst}")
 
@@ -341,20 +362,37 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
 
         env_name = request.query_params.get("env_name", "")
 
-        if env_name:
+        # 只有该 env 在 DB 中完全没有记录时，才做一次性初始扫描（首次建立 DB 或 DB 丢失）
+        if env_name and not has_any_dirs(env_name):
             fs_dirs = _scan_data_dirs(logs_all, env_name=env_name, port_env_map=_port_env_map)
             for d in fs_dirs:
                 upsert_dir(d["dir_path"], d["env_name"], d["mtime_tag"], d["file_count"],
-                           port=d.get("port", ""), source="local")
+                           port=d.get("port", ""), has_local=True)
 
         db_dirs = list_dirs(env_name=env_name if env_name else None)
 
-        fs_paths = set()
-        if env_name:
-            fs_paths = {d["dir_path"] for d in fs_dirs}
+        # 从 token_index 按 env 批量加载统计数据（内存缓存，无额外 IO）
+        _tok_cache: dict = {}
+        def _get_tok_stats(env_n: str, mtime_t: str) -> dict:
+            if env_n not in _tok_cache:
+                try:
+                    from utils.token_index import refresh_token_index
+                    idx = refresh_token_index(str(logs_all / env_n))
+                    _tok_cache[env_n] = idx.get("dirs", {})
+                except Exception:
+                    _tok_cache[env_n] = {}
+            di = _tok_cache[env_n].get(mtime_t, {})
+            return {
+                "req_total": di.get("entry_count", 0),
+                "req_success": sum(v.get("s_count", 0) for v in di.get("models", {}).values()),
+                "req_error": sum(v.get("e_count", 0) for v in di.get("models", {}).values()),
+                "tok_in": sum(v.get("s_tok_in", 0) + v.get("e_tok_in", 0) for v in di.get("models", {}).values()),
+                "tok_out": sum(v.get("s_tok_out", 0) for v in di.get("models", {}).values()),
+            }
 
         merged = []
         for d in db_dirs:
+            stats = _get_tok_stats(d["env_name"], d["mtime_tag"])
             entry = {
                 "dir_path": d["dir_path"],
                 "env_name": d["env_name"],
@@ -367,8 +405,10 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                 "error_msg": d.get("error_msg", ""),
                 "sync_pid": d.get("sync_pid"),
                 "is_active": d["dir_path"] == _active_dir_path,
-                "source": d.get("source", "local"),
+                "has_local": bool(d.get("has_local", 1)),
+                "has_obs": bool(d.get("has_obs", 0)),
                 "port": d.get("port", ""),
+                **stats,
             }
             merged.append(entry)
 
@@ -533,7 +573,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         obs_dirs = _scan_obs_dirs(obs_base, env_name=env_name if env_name else None)
         for d in obs_dirs:
             upsert_dir(d["dir_path"], d["env_name"], d["mtime_tag"],
-                       port=_port_env_map.get(d["env_name"], ""), source="obs")
+                       port=_port_env_map.get(d["env_name"], ""), has_obs=True)
             existing = get_dir(d["dir_path"])
             if existing and existing.get("status") == "pending":
                 update_sync_status(d["dir_path"], "backed_up", obs_path=d["obs_path"])
@@ -625,3 +665,16 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         return JSONResponse({"detail": result.get("detail", "停止失败")}, status_code=400)
 
     _cleanup_stale_live_syncs()
+
+    # 启动时将当前活跃 mtime 目录注册进 DB（append-only，不触发文件系统全量扫描）
+    if _active_dir_path:
+        _env_n, _mtime_t = _active_dir_path.split("/", 1)
+        _active_local = logs_all / _active_dir_path
+        _fcount = 0
+        if _active_local.is_dir():
+            try:
+                _fcount = sum(1 for f in _active_local.iterdir() if f.is_file())
+            except OSError:
+                pass
+        upsert_dir(_active_dir_path, _env_n, _mtime_t, _fcount,
+                   port=_port_env_map.get(_env_n, port), has_local=True)

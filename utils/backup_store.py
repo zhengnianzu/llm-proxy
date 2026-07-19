@@ -9,7 +9,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 _lock = threading.Lock()
 _conn: Optional[sqlite3.Connection] = None
@@ -52,18 +52,32 @@ def init_db(db_dir: str):
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_backup_logs_dir ON backup_logs(dir_path)"
         )
-        try:
-            _conn.execute("ALTER TABLE backup_dirs ADD COLUMN sync_pid INTEGER DEFAULT NULL")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            _conn.execute("ALTER TABLE backup_dirs ADD COLUMN port TEXT NOT NULL DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            _conn.execute("ALTER TABLE backup_dirs ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")
-        except sqlite3.OperationalError:
-            pass
+        for col, definition in [
+            ("sync_pid", "INTEGER DEFAULT NULL"),
+            ("port",     "TEXT NOT NULL DEFAULT ''"),
+            ("has_local","INTEGER NOT NULL DEFAULT 1"),
+            ("has_obs",  "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            try:
+                _conn.execute(f"ALTER TABLE backup_dirs ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass
+
+        # 迁移旧 source 字段 -> has_local / has_obs
+        cols = {row[1] for row in _conn.execute("PRAGMA table_info(backup_dirs)")}
+        if "source" in cols:
+            _conn.execute("""
+                UPDATE backup_dirs SET
+                    has_local = CASE WHEN source IN ('local','both') THEN 1 ELSE 0 END,
+                    has_obs   = CASE WHEN source IN ('obs','both') OR obs_path != '' THEN 1 ELSE 0 END
+                WHERE has_local = 1 AND has_obs = 0 AND source IS NOT NULL
+            """)
+            # 对于 backed_up 状态（本地已删）本地标记清零
+            _conn.execute("""
+                UPDATE backup_dirs SET has_local = 0
+                WHERE status = 'backed_up'
+            """)
+
         _conn.commit()
 
 
@@ -71,52 +85,57 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def upsert_dir(dir_path: str, env_name: str, mtime_tag: str, file_count: int = 0, port: str = "", source: str = "local"):
+def upsert_dir(dir_path: str, env_name: str, mtime_tag: str, file_count: int = 0,
+               port: str = "", has_local: bool = True, has_obs: bool = False):
     with _lock:
         existing = _conn.execute(
-            "SELECT source, port FROM backup_dirs WHERE dir_path = ?", (dir_path,)
+            "SELECT has_local, has_obs, port FROM backup_dirs WHERE dir_path = ?", (dir_path,)
         ).fetchone()
         if existing:
-            old_source = existing["source"] or "local"
-            old_port = existing["port"] or ""
-            if source and old_source and source != old_source:
-                merged_source = "both"
-            else:
-                merged_source = source or old_source
-            merged_port = old_port or port
-            _conn.execute("""
-                UPDATE backup_dirs SET
-                    file_count = ?, source = ?, port = ?, updated_at = ?
-                WHERE dir_path = ?
-            """, (file_count, merged_source, merged_port, _now(), dir_path))
+            merged_local = existing["has_local"] or int(has_local)
+            merged_obs   = existing["has_obs"]   or int(has_obs)
+            merged_port  = existing["port"] or port
+            fields = ["has_local = ?", "has_obs = ?", "port = ?", "updated_at = ?"]
+            params = [merged_local, merged_obs, merged_port, _now()]
+            if file_count > 0:
+                fields.insert(0, "file_count = ?")
+                params.insert(0, file_count)
+            params.append(dir_path)
+            _conn.execute(
+                f"UPDATE backup_dirs SET {', '.join(fields)} WHERE dir_path = ?",
+                params,
+            )
         else:
             _conn.execute("""
-                INSERT INTO backup_dirs (dir_path, env_name, mtime_tag, file_count, port, source, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (dir_path, env_name, mtime_tag, file_count, port, source, _now(), _now()))
+                INSERT INTO backup_dirs
+                    (dir_path, env_name, mtime_tag, file_count, port, has_local, has_obs, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (dir_path, env_name, mtime_tag, file_count, port,
+                  int(has_local), int(has_obs), _now(), _now()))
         _conn.commit()
 
 
-def update_sync_status(
-    dir_path: str,
-    status: str,
-    obs_path: str = "",
-    error_msg: str = "",
-):
+def update_sync_status(dir_path: str, status: str, obs_path: str = "", error_msg: str = ""):
     fields = ["status = ?", "updated_at = ?"]
     params: list = [status, _now()]
     if obs_path:
         fields.append("obs_path = ?")
+        fields.append("has_obs = 1")
         params.append(obs_path)
     if error_msg:
         fields.append("error_msg = ?")
         params.append(error_msg)
+    else:
+        fields.append("error_msg = ''")
     if status == "done":
         fields.append("synced = 1")
         fields.append("sync_time = ?")
         params.append(_now())
     if status in ("done", "error", "pending"):
         fields.append("sync_pid = NULL")
+    if status == "backed_up":
+        fields.append("has_local = 0")
+        fields.append("has_obs = 1")
     params.append(dir_path)
     with _lock:
         _conn.execute(
@@ -159,7 +178,7 @@ def get_dir(dir_path: str) -> Optional[dict]:
 def mark_backed_up(dir_path: str):
     with _lock:
         _conn.execute(
-            "UPDATE backup_dirs SET status = 'backed_up', source = 'obs', updated_at = ? WHERE dir_path = ?",
+            "UPDATE backup_dirs SET status='backed_up', has_local=0, has_obs=1, updated_at=? WHERE dir_path=?",
             (_now(), dir_path),
         )
         _conn.commit()
@@ -180,6 +199,17 @@ def get_live_syncing_dirs() -> List[dict]:
             "SELECT * FROM backup_dirs WHERE status = 'live_syncing'"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def has_any_dirs(env_name: str = None) -> bool:
+    with _lock:
+        if env_name:
+            row = _conn.execute(
+                "SELECT 1 FROM backup_dirs WHERE env_name = ? LIMIT 1", (env_name,)
+            ).fetchone()
+        else:
+            row = _conn.execute("SELECT 1 FROM backup_dirs LIMIT 1").fetchone()
+    return row is not None
 
 
 def remove_dir(dir_path: str):

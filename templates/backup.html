@@ -41,10 +41,10 @@
 .status-badge.live_syncing { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); animation: pulse 1.5s infinite; border: 1px solid color-mix(in srgb, var(--success) 40%, transparent); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
 
-/* source badge */
-.status-badge.source-local { background: color-mix(in srgb, var(--info) 12%, transparent); color: var(--info); }
-.status-badge.source-obs { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); }
-.status-badge.source-both { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); }
+/* source badges */
+.src-badge { display: inline-block; font-size: .72rem; padding: 1px 7px; border-radius: 999px; font-weight: 600; margin-right: 3px; }
+.src-badge.local { background: color-mix(in srgb, var(--info) 14%, transparent); color: var(--info); }
+.src-badge.obs   { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
 
 /* action buttons */
 .btn-xs { font-size: .78rem; padding: 3px 10px; border-radius: var(--radius); cursor: pointer; border: 1px solid var(--border); background: var(--card); color: var(--foreground); transition: all var(--transition); }
@@ -157,7 +157,10 @@
                     <th><input type="checkbox" @change="toggleAll" :checked="allChecked"></th>
                     <th>环境</th>
                     <th>目录</th>
-                    <th>文件数</th>
+                    <th>调用</th>
+                    <th>成功</th>
+                    <th>输入 Token</th>
+                    <th>输出 Token</th>
                     <th>来源</th>
                     <th>状态</th>
                     <th>同步时间</th>
@@ -173,9 +176,13 @@
                         {{ d.mtime_tag }}
                         <span v-if="d.is_active" style="font-size:.7rem;background:var(--success);color:#fff;padding:1px 6px;border-radius:99px;margin-left:4px;">活跃</span>
                     </td>
-                    <td>{{ d.source === 'obs' && d.status === 'backed_up' ? '-' : d.file_count }}</td>
+                    <td>{{ d.req_total > 0 ? fmtNum(d.req_total) : '-' }}</td>
+                    <td>{{ d.req_total > 0 ? fmtNum(d.req_success) : '-' }}</td>
+                    <td>{{ d.tok_in > 0 ? fmtTok(d.tok_in) : '-' }}</td>
+                    <td>{{ d.tok_out > 0 ? fmtTok(d.tok_out) : '-' }}</td>
                     <td>
-                        <span :class="['status-badge', sourceClass(d.source)]">{{ sourceLabel(d.source) }}</span>
+                        <span v-if="d.has_local" class="src-badge local">Local</span>
+                        <span v-if="d.has_obs"   class="src-badge obs">OBS</span>
                     </td>
                     <td>
                         <span :class="['status-badge', d.status]">{{ statusLabel(d.status) }}</span>
@@ -307,14 +314,6 @@ new Vue({
         statusLabel(s) {
             var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', deleted: '已删除', backed_up: '已备份' };
             return m[s] || s;
-        },
-        sourceLabel(s) {
-            var m = { local: '本地', obs: 'OBS', both: '两者' };
-            return m[s] || s || '本地';
-        },
-        sourceClass(s) {
-            var m = { local: 'source-local', obs: 'source-obs', both: 'source-both' };
-            return m[s] || 'source-local';
         },
         toggleAll(e) {
             if (e.target.checked) {
@@ -488,6 +487,19 @@ new Vue({
             if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
             if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
             return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+        },
+        fmtNum(n) {
+            if (!n) return '0';
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return String(n);
+        },
+        fmtTok(n) {
+            if (!n) return '0';
+            if (n >= 1000000000) return (n / 1000000000).toFixed(2) + 'B';
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return String(n);
         },
         loadActiveDir() {
             fetch('/api/backup/active-dir', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
