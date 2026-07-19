@@ -208,7 +208,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             upload_script = sync_cfg.get("upload_script") or None
             obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
             _log(f"重试上传: {local_copy_dir} -> {obs_parent}")
-            ok, msg = _run_upload_cmd(local_copy_dir, obs_parent, upload_script)
+            ok, msg = _run_upload_cmd(local_copy_dir, obs_parent, upload_script, log_cb=_log)
             if ok:
                 _log("上传成功")
                 update_status(record_id, "success")
@@ -356,7 +356,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             if obs_dst:
                 _log(f"同步到 OBS: {obs_dst}")
                 obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
-                ok, msg = _run_upload_cmd(str(local_base), obs_parent, upload_script)
+                ok, msg = _run_upload_cmd(str(local_base), obs_parent, upload_script, log_cb=_log)
                 if ok:
                     _log("上传成功")
                 else:

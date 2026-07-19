@@ -115,8 +115,12 @@ def run_upload_cmd(
     upload_script: Optional[str] = None,
     timeout: Optional[int] = None,
     jobs: Optional[int] = None,
+    log_cb=None,
 ) -> Tuple[bool, str]:
-    """流式执行上传脚本（Popen 模式），实时打印进度。timeout/jobs 默认从 sync_config 读取。"""
+    """流式执行上传脚本（Popen 模式），实时打印进度。timeout/jobs 默认从 sync_config 读取。
+    log_cb: 可选回调 fn(str)，每 10 秒汇报一次上传进度（避免 progress_log 过于庞大）。
+    """
+    import time as _time
     cfg = load_sync_config()
     if timeout is None:
         timeout = int(cfg.get("upload_timeout", 3600))
@@ -134,11 +138,23 @@ def run_upload_cmd(
     try:
         proc = Popen(cmd, stdout=PIPE, stderr=STDOUT, text=True)
         lines: List[str] = []
+        line_count = 0
+        last_log_ts = _time.monotonic()
         for line in proc.stdout:
             line = line.rstrip()
-            if line:
-                lines.append(line)
-                print(line, flush=True)
+            if not line:
+                continue
+            lines.append(line)
+            line_count += 1
+            print(line, flush=True)
+            if log_cb:
+                now = _time.monotonic()
+                if now - last_log_ts >= 10:
+                    try:
+                        log_cb(f"上传中... 已处理 {line_count} 行，最新: {line[-120:]}")
+                    except Exception:
+                        pass
+                    last_log_ts = now
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
