@@ -445,7 +445,16 @@ class ReflectionService:
         root = Path(record["local_copy_dir"])
         cache_path = root / ".session_cache.json"
 
+        # 自动穿透：如果 root 下没有 session_analysis.json，但只有一个子目录（同名嵌套），
+        # 则往下一层查找（obsutil cp 上传目录时会把目录名本身复制进去造成双层嵌套）
         analysis_path = root / "session_analysis.json"
+        if not analysis_path.is_file() and root.is_dir():
+            subdirs = [d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")]
+            if len(subdirs) == 1 and (subdirs[0] / "session_analysis.json").is_file():
+                root = subdirs[0]
+                analysis_path = root / "session_analysis.json"
+                cache_path = root / ".session_cache.json"
+
         if analysis_path.is_file():
             source, source_mtime = "session_analysis", analysis_path.stat().st_mtime
         else:
