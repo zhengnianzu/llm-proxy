@@ -160,10 +160,27 @@ def run_upload_cmd(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+            if log_cb:
+                try:
+                    log_cb(f"上传超时（{timeout}s）")
+                except Exception:
+                    pass
             return False, f"Command timed out after {timeout}s"
         if proc.returncode == 0:
-            return True, lines[-1] if lines else ""
-        return False, "\n".join(lines[-5:]) if lines else "upload failed"
+            last = lines[-1] if lines else ""
+            if log_cb and last:
+                try:
+                    log_cb(f"obsutil: {last}")
+                except Exception:
+                    pass
+            return True, last
+        tail = "\n".join(lines[-5:]) if lines else "upload failed"
+        if log_cb and tail:
+            try:
+                log_cb(f"obsutil 错误: {tail[-200:]}")
+            except Exception:
+                pass
+        return False, tail
     except Exception as e:
         return False, str(e)
 
