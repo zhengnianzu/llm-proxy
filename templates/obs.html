@@ -41,6 +41,15 @@
         .obs-node-name { overflow: hidden; text-overflow: ellipsis; flex: 1; }
         .obs-node-size { font-size: .72rem; color: var(--muted-foreground); flex-shrink: 0; margin-left: 4px; }
         .obs-node-arrow { flex-shrink: 0; font-size: .7rem; color: var(--muted-foreground); width: 14px; text-align: center; }
+        .obs-node-refresh { flex-shrink: 0; display: inline-flex; align-items: center; margin-left: 4px; color: var(--muted-foreground); opacity: 0; transition: opacity .12s; cursor: pointer; }
+        .obs-node:hover .obs-node-refresh { opacity: .65; }
+        .obs-node-refresh:hover { opacity: 1 !important; color: var(--primary); }
+        .obs-node.active .obs-node-refresh { color: var(--primary-foreground); }
+
+        /* 刷新按钮 + 旋转动画 */
+        .obs-refresh-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }
+        @keyframes obs-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .spin { animation: obs-spin .8s linear infinite; }
 
         /* 右侧内容 */
         .obs-right { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
@@ -122,6 +131,9 @@
     <div class="obs-path-bar">
         <input class="form-input" v-model="browsePath" placeholder="obs://bucket/path/" @keyup.enter="browse(browsePath)">
         <button class="btn btn-primary btn-sm" @click="browse(browsePath)" :disabled="treeLoading">浏览</button>
+        <button class="btn btn-sm obs-refresh-btn" @click="browse(browsePath, true)" :disabled="treeLoading" title="刷新当前目录（忽略缓存）">
+            <svg :class="{spin: treeLoading}" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
     </div>
 
     <!-- 快捷路径卡片 -->
@@ -148,7 +160,7 @@
         <!-- 左侧树 -->
         <div class="obs-left">
             <div class="obs-tree" v-if="treeNodes.length > 0">
-                <obs-node v-for="node in treeNodes" :key="node.path" :node="node" :selected="selectedPath" @select="onSelect" @toggle="onToggle" :depth="0"></obs-node>
+                <obs-node v-for="node in treeNodes" :key="node.path" :node="node" :selected="selectedPath" @select="onSelect" @toggle="onToggle" @refresh="onRefreshNode" :depth="0"></obs-node>
             </div>
             <div class="obs-loading" v-else-if="treeLoading">加载中...</div>
             <div class="obs-loading" v-else-if="treePath">目录为空</div>
@@ -200,12 +212,16 @@ Vue.component('obs-node', {
                 </svg>
                 <span class="obs-node-name" :title="node.name">{{ node.name }}</span>
                 <span class="obs-node-size" v-if="node.size">{{ node.size }}</span>
+                <span v-if="node.is_dir" class="obs-node-refresh" title="刷新此目录（忽略缓存）"
+                      @click.stop="$emit('refresh', node)">
+                    <svg :class="{spin: node.loading}" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                </span>
             </div>
             <template v-if="node.is_dir && node.expanded">
                 <div v-if="node.loading" :style="{paddingLeft: ((depth+1)*16+8)+'px'}" class="obs-loading" style="padding-top:4px;padding-bottom:4px;font-size:.78rem;">加载中...</div>
                 <obs-node v-for="child in (node.children || [])" :key="child.path"
                           :node="child" :selected="selected" :depth="depth+1"
-                          @select="$emit('select', $event)" @toggle="$emit('toggle', $event)">
+                          @select="$emit('select', $event)" @toggle="$emit('toggle', $event)" @refresh="$emit('refresh', $event)">
                 </obs-node>
             </template>
         </div>
@@ -462,7 +478,7 @@ var app = new Vue({
             this.browsePath = path;
             this.browse(path);
         },
-        browse: function(path) {
+        browse: function(path, refresh) {
             if (!path) return;
             var self = this;
             self.treeLoading = true;
@@ -472,7 +488,7 @@ var app = new Vue({
             self.rawContent = '';
             self.contentError = '';
             var enc = encodeURIComponent(path).replace(/%2F/g, '/');
-            fetch('/api/obs/browse/' + enc, { headers: self._h() })
+            fetch('/api/obs/browse/' + enc + (refresh ? '?refresh=1' : ''), { headers: self._h() })
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
                     if (d.detail) { alert(d.detail); return; }
@@ -493,11 +509,19 @@ var app = new Vue({
                 node.expanded = true;
                 return;
             }
+            this._loadChildren(node, false);
+        },
+        onRefreshNode: function(node) {
+            if (!node.is_dir || node.loading) return;
+            node.expanded = true;
+            this._loadChildren(node, true);
+        },
+        _loadChildren: function(node, refresh) {
             node.loading = true;
             node.expanded = true;
             var self = this;
             var enc = encodeURIComponent(node.path).replace(/%2F/g, '/');
-            fetch('/api/obs/browse/' + enc, { headers: self._h() })
+            fetch('/api/obs/browse/' + enc + (refresh ? '?refresh=1' : ''), { headers: self._h() })
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
                     node.children = (d.items || []).map(function(item) {

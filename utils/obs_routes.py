@@ -2,14 +2,15 @@
 utils/obs_routes.py — OBS 管理页面路由
 
 提供:
-  GET /obs                       — OBS 管理页面
-  GET /api/obs/browse/{path}     — 列出 OBS 目录内容
-  GET /api/obs/cat/{path}        — 下载并返回 OBS 文件内容（≤10MB）
+  GET /obs                              — OBS 管理页面
+  GET /api/obs/browse/{path}?refresh=1  — 列出 OBS 目录内容（默认走缓存，refresh 强制刷新）
+  GET /api/obs/cat/{path}               — 下载并返回 OBS 文件内容（≤10MB）
 """
 
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -17,6 +18,11 @@ from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from utils.obs_utils import OBSUTIL_BIN, obsutil_ls
+
+
+# 目录列表缓存：path -> items（进程内存，服务重启即失效）
+_browse_cache: dict = {}
+_browse_cache_lock = threading.Lock()
 
 
 def _require_ajax(request: Request):
@@ -50,9 +56,19 @@ def register_obs_routes(app: FastAPI, templates: Jinja2Templates) -> None:
             return denied
         if not obs_path.startswith("obs://"):
             obs_path = "obs://" + obs_path
+        refresh = request.query_params.get("refresh", "") in ("1", "true", "yes")
+
+        if not refresh:
+            with _browse_cache_lock:
+                cached = _browse_cache.get(obs_path)
+            if cached is not None:
+                return JSONResponse({"path": obs_path, "items": cached, "cached": True})
+
         try:
             items = obsutil_ls(obs_path)
-            return JSONResponse({"path": obs_path, "items": items})
+            with _browse_cache_lock:
+                _browse_cache[obs_path] = items
+            return JSONResponse({"path": obs_path, "items": items, "cached": False})
         except Exception as e:
             return JSONResponse({"detail": str(e)}, status_code=500)
 
