@@ -103,28 +103,12 @@
         <div v-if="showConfig">
             <div class="config-grid">
                 <div class="config-field">
-                    <label>OBS 路径</label>
-                    <input v-model="config.obs_base" class="form-input" placeholder="obs://bucket/path/">
-                </div>
-                <div class="config-field">
                     <label>并发线程数</label>
                     <input v-model.number="config.workers" class="form-input" type="number" min="1" max="16">
                 </div>
                 <div class="config-field">
                     <label>同步间隔（秒）</label>
                     <input v-model.number="config.interval" class="form-input" type="number" min="60">
-                </div>
-                <div class="config-field">
-                    <label>上传脚本</label>
-                    <input v-model="config.upload_script" class="form-input" placeholder="./tools/obs_upload.sh">
-                </div>
-                <div class="config-field">
-                    <label>上传超时（秒）</label>
-                    <input v-model.number="config.upload_timeout" class="form-input" type="number" min="60">
-                </div>
-                <div class="config-field">
-                    <label>OBS 并发数（-j）</label>
-                    <input v-model.number="config.upload_jobs" class="form-input" type="number" min="1" max="64">
                 </div>
             </div>
             <div class="config-actions">
@@ -277,7 +261,7 @@ new Vue({
         loading: false,
         syncing: false,
         showConfig: false,
-        config: { obs_base: '', workers: 4, interval: 600, upload_script: '', upload_timeout: 3600, upload_jobs: 8 },
+        config: { workers: 4, interval: 600 },
         saving: false,
         drawerDir: null,
         drawerLogs: [],

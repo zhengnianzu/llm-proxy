@@ -43,6 +43,7 @@ from utils.user_routes import register_user_routes
 from utils.export_store import init_db as init_export_db, mark_interrupted as mark_export_interrupted
 from utils.backup_store import init_db as init_backup_db
 from utils.backup_routes import register_backup_routes
+from utils.obs_routes import register_obs_routes
 from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
 from utils.session_store import init_db as init_session_db
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
@@ -1636,6 +1637,7 @@ register_key_routes(app, templates)
 register_channel_routes(app, templates)
 register_export_routes(app, LOGS_DIR)
 register_backup_routes(app, LOGS_DIR, port=os.getenv("PROXY_PORT", "4000"))
+register_obs_routes(app, templates)
 register_user_routes(app, templates)
 register_debug_routes(app, LOGS_DEBUG, STARTUP_DATE_TAG)
 register_reflection_routes(app, templates)
