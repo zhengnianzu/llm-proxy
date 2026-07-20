@@ -47,7 +47,7 @@ from utils.obs_routes import register_obs_routes
 from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
 from utils.session_store import init_db as init_session_db
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
-from utils.debug_logs import write_debug, debug_filename, register_debug_routes
+from utils.debug_logs import write_debug, write_debug_async, debug_filename, register_debug_routes
 from src.thinking_reflection import register_reflection_routes
 from utils.req_index import (
     append_index_anthropic, append_index_openai, append_index_responses,
@@ -779,7 +779,7 @@ async def anthropic_messages(req: Request):
                                     final_valid = True
                                     break
                                 logging.warning(f"Attempt {attempt} empty content (anthropic non-stream), retrying: {r.text[:200]}")
-                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, "empty_content", r.text[:2000])
+                                _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, "empty_content", r.text[:2000])
                                 if _dbg: logging.warning(f"  -> debug: {_dbg}")
                             except Exception:
                                 # JSON 解析失败：透传原始响应
@@ -787,7 +787,7 @@ async def anthropic_messages(req: Request):
                                 break
                         else:
                             # 非 200 一律重试，最大次数后透传
-                            _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                            _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                             logging.warning(f"Attempt {attempt} non-200 (anthropic non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
@@ -874,7 +874,7 @@ async def anthropic_messages(req: Request):
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, "rate_limit", last_retry_err_text[:2000])
+                                _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, "rate_limit", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} rate limit (anthropic stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
@@ -926,7 +926,7 @@ async def anthropic_messages(req: Request):
                             if not committed:
                                 raw_text = raw_buf.decode("utf-8", errors="replace")
                                 if attempt < MAX_RETRIES - 1:
-                                    _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, "no_message_start", raw_text[:4000])
+                                    _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, "no_message_start", raw_text[:4000])
                                     logging.warning(f"Attempt {attempt} no message_start in SSE (anthropic stream), retrying" + (f" -> debug: {_dbg}" if _dbg else ""))
                                     connection_established = False
                                     up_chunks.clear()
@@ -1084,7 +1084,7 @@ async def openai_chat_completions(req: Request):
                             success = True
                             break
                         # 非 200 一律重试，最大次数后透传
-                        _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                        _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                         logging.warning(f"Attempt {attempt} non-200 (openai non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
@@ -1170,7 +1170,7 @@ async def openai_chat_completions(req: Request):
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
+                                _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} non-200 (openai stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)
@@ -1332,7 +1332,7 @@ async def openai_responses(req: Request):
                         if r.status_code == 200:
                             success = True
                             break
-                        _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
+                        _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                         logging.warning(f"Attempt {attempt} non-200 (responses non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
                         last_exception = e
@@ -1416,7 +1416,7 @@ async def openai_responses(req: Request):
                                 last_retry_err_text = err.decode("utf-8", errors="replace")
                                 last_retry_status = r.status_code
                                 up_chunks.append({"type": "error_body", "body": last_retry_err_text})
-                                _dbg = write_debug(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
+                                _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} non-200 (responses stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
                                     await asyncio.sleep(0.5)

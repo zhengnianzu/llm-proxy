@@ -1,5 +1,6 @@
 """Debug 日志写入、缓存、路由。"""
 
+import asyncio
 import json
 import logging
 import os
@@ -29,6 +30,16 @@ def write_debug(logs_debug: str, ts: str, attempt: int, model: str, reason: str,
         return None
 
 
+async def write_debug_async(logs_debug: str, ts: str, attempt: int, model: str, reason: str, body: str):
+    """write_debug 的异步包装：整个同步写（含文件 append）跑在线程池，
+    不阻塞事件循环。调用点用 `await write_debug_async(...)`。"""
+    try:
+        return await asyncio.to_thread(write_debug, logs_debug, ts, attempt, model, reason, body)
+    except Exception as ex:
+        logging.warning(f"Failed to write debug log (async): {ex}")
+        return None
+
+
 def debug_filename(ts: str, model: str) -> str:
     safe_model = model.replace("/", "_").replace(":", "_")
     return f"{ts}_{safe_model}.jsonl"
@@ -36,44 +47,26 @@ def debug_filename(ts: str, model: str) -> str:
 
 def _append_debug_index(debug_dir: str, filename: str, ts: str,
                         attempt: int, model: str, reason: str, size: int):
-    """每个 request 在 .log_index.jsonl 只占一条，后续 retry 更新 attempt_count。"""
+    """追加一条 index 记录（O(1) append，不读不重写整份文件）。
+
+    同一 request 的多次 retry 会追加多行；合并（attempt_count/size 累计、
+    取最新 reason）延后到读取端 _rebuild_debug_cache 完成。这样写路径不再
+    随 index 增大而变慢，也不会阻塞事件循环。
+    """
     index_path = os.path.join(debug_dir, ".log_index.jsonl")
     try:
         parts = ts.rsplit("_", 1)
         ts_dt = parts[0] if len(parts) == 2 else ts
         seq = parts[1] if len(parts) == 2 else ""
 
-        entries = []
-        found = False
-        if os.path.isfile(index_path):
-            with open(index_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if e.get("filename") == filename:
-                        e["attempt_count"] = e.get("attempt_count", 1) + 1
-                        e["size"] = e.get("size", 0) + size
-                        e["written_at"] = time.time()
-                        e["last_reason"] = reason
-                        found = True
-                    entries.append(e)
-
-        if not found:
-            entries.append({
-                "filename": filename, "ts": ts, "ts_dt": ts_dt, "seq": seq,
-                "attempt": attempt, "attempt_count": 1,
-                "model": model, "reason": reason,
-                "size": size, "written_at": time.time(),
-            })
-
-        with open(index_path, "w", encoding="utf-8") as f:
-            for e in entries:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        entry = {
+            "filename": filename, "ts": ts, "ts_dt": ts_dt, "seq": seq,
+            "attempt": attempt, "attempt_count": 1,
+            "model": model, "reason": reason,
+            "size": size, "written_at": time.time(),
+        }
+        with open(index_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -160,6 +153,29 @@ def _rebuild_debug_cache(debug_root: Path) -> tuple:
                         continue
         except OSError:
             continue
+
+        # append-only index：同一 filename 可能有多行（每次 retry 一行），
+        # 在此合并为一条——attempt_count 计数、size 累加、取最新一条的 reason。
+        merged: dict = {}
+        for e in entries:
+            fn = e.get("filename")
+            if fn is None:
+                continue
+            cur = merged.get(fn)
+            if cur is None:
+                cur = dict(e)
+                cur["attempt_count"] = e.get("attempt_count", 1)
+                cur["size"] = e.get("size", 0)
+                cur["last_reason"] = e.get("last_reason", "") or e.get("reason", "")
+                merged[fn] = cur
+            else:
+                cur["attempt_count"] = cur.get("attempt_count", 1) + e.get("attempt_count", 1)
+                cur["size"] = cur.get("size", 0) + e.get("size", 0)
+                if e.get("written_at", 0) >= cur.get("written_at", 0):
+                    cur["written_at"] = e.get("written_at", 0)
+                    cur["attempt"] = e.get("attempt", cur.get("attempt", 0))
+                    cur["last_reason"] = e.get("last_reason", "") or e.get("reason", "") or cur.get("last_reason", "")
+        entries = list(merged.values())
 
         entries.sort(key=lambda e: e.get("written_at", 0), reverse=True)
 
