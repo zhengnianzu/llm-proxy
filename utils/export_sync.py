@@ -99,24 +99,41 @@ def _refresh_session_cache(logs_dir: str) -> bool:
 
 def export_session_index(logs_dir: str, force: bool = False) -> dict:
     """
-    将 logs_dir/.session_cache.jsonl 转为 logs_dir/session_index.jsonl。
+    生成 logs_dir/session_index.jsonl。
 
-    每次先从 index.jsonl 增量刷新 cache，确保不遗漏新数据。
+    session 数据优先来自 session_cache.db（DB），降级读 .session_cache.jsonl。
+    每次先从 index.jsonl 增量刷新，确保不遗漏新数据。
     Returns dict with total_sessions, avg_msg_count, skipped (bool).
     """
     # 先刷新 cache（增量），确保包含 index.jsonl 中的最新数据
     _refresh_session_cache(logs_dir)
 
     cache_path = Path(logs_dir) / SESSION_CACHE_NAME
-    if not cache_path.is_file():
-        logger.warning("未找到 %s 且无法从 index.jsonl 生成", cache_path)
-        return {"total_sessions": 0, "avg_msg_count": 0, "skipped": True}
 
-    cache_mtime = cache_path.stat().st_mtime
+    # source_mtime 作为“是否跳过”的变更判据：
+    #  - 有 .session_cache.jsonl 文件（旧路径）：用文件 mtime
+    #  - 无文件（数据已迁到 session_cache.db）：用 DB 的 session 条数
+    #    （条数变化即视为有更新；避免文件不存在就误判为 0）
+    if cache_path.is_file():
+        source_mtime = cache_path.stat().st_mtime
+    else:
+        db_count = 0
+        try:
+            import utils.session_store as _ss
+            db_count = _ss.get_session_count_by_root(logs_dir)
+        except Exception:
+            db_count = 0
+        if db_count <= 0:
+            logger.warning("未找到 %s 且 DB 无数据", cache_path)
+            return {"total_sessions": 0, "avg_msg_count": 0, "skipped": True}
+        # 用负数 count 作 source_mtime，与文件 mtime（正 float）区分，
+        # 且 DB 条数变化时该值随之变化，触发重新导出。
+        source_mtime = float(-db_count)
+
     if not force:
         meta = _read_session_index_meta(logs_dir)
-        if meta and meta.get("source_mtime") == cache_mtime:
-            logger.info("session_cache 未变更，跳过 export (mtime=%.1f)", cache_mtime)
+        if meta and meta.get("source_mtime") == source_mtime:
+            logger.info("session 数据未变更，跳过 export (source_mtime=%.1f)", source_mtime)
             return {
                 "total_sessions": meta.get("total_sessions", 0),
                 "avg_msg_count": meta.get("avg_msg_count", 0),
@@ -141,7 +158,7 @@ def export_session_index(logs_dir: str, force: bool = False) -> dict:
             "_meta": True,
             "total_sessions": total,
             "avg_msg_count": avg_msg,
-            "source_mtime": cache_mtime,
+            "source_mtime": source_mtime,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         f.write(json.dumps(meta_line, ensure_ascii=False) + "\n")
