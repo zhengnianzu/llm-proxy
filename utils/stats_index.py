@@ -198,6 +198,53 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
 
                 cache_file = sub / ".session_cache.jsonl"
                 if not cache_file.is_file():
+                    # .session_cache.jsonl 已不在运行时生成（数据迁到 session_cache.db）。
+                    # 文件不存在不代表无 session：先查 DB，有数据就从 DB 聚合，
+                    # 否则退回 req 文件计数占位。
+                    db_count = 0
+                    try:
+                        import utils.session_store as _ss
+                        db_count = _ss.get_session_count_by_root(str(sub))
+                    except Exception:
+                        db_count = 0
+
+                    if db_count > 0:
+                        # DB 有数据：count 未变则跳过重扫（省一次聚合查询）
+                        if (not force and prev
+                                and prev.get("db_count") == db_count):
+                            if dir_name != active_tag and not prev.get("frozen"):
+                                prev["frozen"] = True
+                                changed = True
+                            continue
+
+                        sessions = _scan_session_cache(cache_file, threshold)
+                        old_sessions = prev.get("sessions", {}) if prev else {}
+                        changed_buckets.extend(_diff_sessions(old_sessions, sessions, dir_name))
+
+                        try:
+                            dir_mt = os.path.getmtime(str(sub))
+                        except OSError:
+                            dir_mt = 0
+                        if prev and prev.get("req_count_mtime") == dir_mt and prev.get("req_count", 0) > 0:
+                            req_count = prev["req_count"]
+                            req_mt = prev["req_count_mtime"]
+                        else:
+                            req_count = _count_req_files(sub)
+                            req_mt = dir_mt
+
+                        dirs_cache[dir_name] = {
+                            "cache_mtime": 0,
+                            "cache_size": 0,
+                            "db_count": db_count,
+                            "req_count": req_count,
+                            "req_count_mtime": req_mt,
+                            "frozen": dir_name != active_tag,
+                            "sessions": sessions,
+                        }
+                        changed = True
+                        continue
+
+                    # DB 无数据：沿用原有 req 文件计数占位逻辑
                     if prev and not force and dir_name != active_tag:
                         if not prev.get("frozen"):
                             prev["frozen"] = True
