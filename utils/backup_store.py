@@ -52,6 +52,20 @@ def init_db(db_dir: str):
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_backup_logs_dir ON backup_logs(dir_path)"
         )
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS backup_failed_files (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                dir_path   TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                obs_path   TEXT NOT NULL,
+                error      TEXT NOT NULL DEFAULT '',
+                resolved   INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failed_files_dir ON backup_failed_files(dir_path)"
+        )
         for col, definition in [
             ("sync_pid", "INTEGER DEFAULT NULL"),
             ("port",     "TEXT NOT NULL DEFAULT ''"),
@@ -131,7 +145,7 @@ def update_sync_status(dir_path: str, status: str, obs_path: str = "", error_msg
         fields.append("synced = 1")
         fields.append("sync_time = ?")
         params.append(_now())
-    if status in ("done", "error", "pending"):
+    if status in ("done", "error", "pending", "partial"):
         fields.append("sync_pid = NULL")
     if status == "backed_up":
         fields.append("has_local = 0")
@@ -216,6 +230,7 @@ def remove_dir(dir_path: str):
     with _lock:
         _conn.execute("DELETE FROM backup_dirs WHERE dir_path = ?", (dir_path,))
         _conn.execute("DELETE FROM backup_logs WHERE dir_path = ?", (dir_path,))
+        _conn.execute("DELETE FROM backup_failed_files WHERE dir_path = ?", (dir_path,))
         _conn.commit()
 
 
@@ -240,4 +255,64 @@ def get_logs(dir_path: str, limit: int = 200) -> List[dict]:
 def clear_logs(dir_path: str):
     with _lock:
         _conn.execute("DELETE FROM backup_logs WHERE dir_path = ?", (dir_path,))
+        _conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# backup_failed_files — obsutil 上传部分失败的文件清单，供"补同步"逐个重传
+# ---------------------------------------------------------------------------
+
+def record_failed_files(dir_path: str, items: List[tuple]):
+    """记录失败文件清单。items = [(local_path, obs_path, error), ...]。
+    先清除该目录已有的未 resolved 记录，避免重复。"""
+    with _lock:
+        _conn.execute(
+            "DELETE FROM backup_failed_files WHERE dir_path = ? AND resolved = 0",
+            (dir_path,),
+        )
+        _conn.executemany(
+            """INSERT INTO backup_failed_files (dir_path, local_path, obs_path, error, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [(dir_path, local, obs, error or "", _now()) for local, obs, error in items],
+        )
+        _conn.commit()
+
+
+def list_failed_files(dir_path: str, only_unresolved: bool = True) -> List[dict]:
+    with _lock:
+        if only_unresolved:
+            rows = _conn.execute(
+                "SELECT * FROM backup_failed_files WHERE dir_path = ? AND resolved = 0 ORDER BY id",
+                (dir_path,),
+            ).fetchall()
+        else:
+            rows = _conn.execute(
+                "SELECT * FROM backup_failed_files WHERE dir_path = ? ORDER BY id",
+                (dir_path,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_file_resolved(dir_path: str, obs_path: str):
+    with _lock:
+        _conn.execute(
+            "UPDATE backup_failed_files SET resolved = 1 WHERE dir_path = ? AND obs_path = ?",
+            (dir_path, obs_path),
+        )
+        _conn.commit()
+
+
+def count_unresolved_failed(dir_path: str) -> int:
+    with _lock:
+        row = _conn.execute(
+            "SELECT COUNT(*) FROM backup_failed_files WHERE dir_path = ? AND resolved = 0",
+            (dir_path,),
+        ).fetchone()
+    return row[0] if row else 0
+
+
+def clear_failed_files(dir_path: str):
+    """清空该目录的失败文件记录（用于目录整体同步成功后）。"""
+    with _lock:
+        _conn.execute("DELETE FROM backup_failed_files WHERE dir_path = ?", (dir_path,))
         _conn.commit()

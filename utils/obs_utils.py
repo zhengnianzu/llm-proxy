@@ -8,7 +8,9 @@ utils/obs_utils.py — OBS 路径管理与工具函数
 - 目录/文件列表（obsutil ls）
 """
 
+import glob
 import os
+import re
 import subprocess
 from pathlib import Path
 from subprocess import PIPE, STDOUT, Popen
@@ -294,4 +296,92 @@ def obsutil_ls(path: str, show_dirs: bool = False, limit: int = 1000) -> List[di
             files.append({"name": name, "path": full_path, "is_dir": False, "size": size})
 
     return dirs + files
+
+
+# ---------------------------------------------------------------------------
+# 失败报告解析 + 单文件补传（"补同步"）
+# ---------------------------------------------------------------------------
+
+DEFAULT_OBSUTIL_OUTPUT_DIR = str(Path.home() / ".obsutil_output")
+
+# 匹配失败报告数据行的 status/error message，用于记录失败原因
+_STATUS_RE = re.compile(r"status \[(\d+)\]")
+_ERRMSG_RE = re.compile(r"error message \[([^\]]*)\]")
+
+
+def find_failed_report(task_id: str, output_dir: str = "") -> Optional[str]:
+    """在 output_dir 下查找 obsutil 某次 cp 的失败报告，返回最新匹配文件路径。
+
+    obsutil 命名：cp_failed_report_<timestamp>_<task_id>.txt
+    """
+    if not task_id:
+        return None
+    base = output_dir or DEFAULT_OBSUTIL_OUTPUT_DIR
+    pattern = os.path.join(base, f"cp_failed_report_*_{task_id}.txt")
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    return max(matches, key=os.path.getmtime)
+
+
+def parse_failed_report(report_path: str) -> List[Tuple[str, str, str]]:
+    """解析 obsutil 失败报告，返回 [(local_path, obs_path, error), ...]。
+
+    数据行形如：
+        <ts> <size>, <local_src> --> <obs_dst>, cost [N], status [500], error code [..], error message [..], request id [..]
+    表头行是 `[file size, src --> dst, ...]`（含 `-->` 但被方括号包裹），需排除。
+    """
+    result: List[Tuple[str, str, str]] = []
+    try:
+        with open(report_path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.strip()
+                if " --> " not in line:
+                    continue
+                # 排除表头：形如 "... [file size, src --> dst, cost(ms), ...]"
+                if "[file size" in line or "src --> dst" in line:
+                    continue
+                # 切出 src：--> 左侧，取最后一个 ", " 之后（前面是时间戳+大小）
+                left, _, right = line.partition(" --> ")
+                # left 末尾是 "<ts> <size>, <local_src>"，local 从第一个 ", " 后开始
+                if ", " in left:
+                    local_path = left.split(", ", 1)[1].strip()
+                else:
+                    local_path = left.strip()
+                # 切出 dst：--> 右侧到 ", cost [" 之前
+                obs_path = right.split(", cost [", 1)[0].strip()
+                if not obs_path:
+                    obs_path = right.strip()
+                # 错误信息
+                status_m = _STATUS_RE.search(line)
+                errmsg_m = _ERRMSG_RE.search(line)
+                parts = []
+                if status_m:
+                    parts.append(f"status {status_m.group(1)}")
+                if errmsg_m:
+                    parts.append(errmsg_m.group(1))
+                error = " - ".join(parts) if parts else "upload failed"
+                if local_path and obs_path.startswith("obs://"):
+                    result.append((local_path, obs_path, error))
+    except OSError:
+        return []
+    return result
+
+
+def reupload_file(local_path: str, obs_path: str, timeout: int = 120) -> Tuple[bool, str]:
+    """单文件补传：obsutil cp <local> <obs> -f（非 -r，幂等覆盖）。"""
+    if not os.path.isfile(OBSUTIL_BIN):
+        return False, "obsutil not found"
+    if not os.path.isfile(local_path):
+        return False, f"本地文件不存在: {local_path}"
+    cmd = [OBSUTIL_BIN, "cp", local_path, obs_path, "-f"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return True, (result.stdout or "").strip()[-200:]
+        return False, ((result.stderr or result.stdout) or "").strip()[-200:]
+    except subprocess.TimeoutExpired:
+        return False, f"补传超时（{timeout}s）"
+    except Exception as e:
+        return False, str(e)
 

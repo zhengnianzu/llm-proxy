@@ -22,18 +22,31 @@ from fastapi.templating import Jinja2Templates
 from utils.backup_store import (
     append_log,
     clear_logs,
+    clear_failed_files,
+    count_unresolved_failed,
     get_dir,
     get_live_syncing_dirs,
     get_logs,
     has_any_dirs,
     list_dirs,
     list_env_names,
+    list_failed_files,
     mark_backed_up,
+    mark_file_resolved,
+    record_failed_files,
     update_sync_pid,
     update_sync_status,
     upsert_dir,
 )
-from utils.obs_utils import load_obs_base, load_sync_config, get_sync_config_path, obsutil_ls
+from utils.obs_utils import (
+    load_obs_base,
+    load_sync_config,
+    get_sync_config_path,
+    obsutil_ls,
+    find_failed_report,
+    parse_failed_report,
+    reupload_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,18 +293,37 @@ def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int
         cmd = [script, logs_dir, obs_dst]
         append_log(dir_path, f"执行: {' '.join(cmd)}")
         proc = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.STDOUT, text=True)
+        task_id = ""
+        output_dir = ""
         for line in proc.stdout:
             line = line.rstrip()
             if line:
                 append_log(dir_path, line)
+                # obsutil 开始时打印 Task id / OutputDir，捕获用于定位失败报告
+                if not task_id and line.startswith("Task id:"):
+                    task_id = line.split(":", 1)[1].strip()
+                elif not output_dir and line.startswith("OutputDir:"):
+                    output_dir = line.split(":", 1)[1].strip()
         proc.wait(timeout=600)
 
         if proc.returncode == 0:
             update_sync_status(dir_path, "done", obs_path=obs_dst)
+            clear_failed_files(dir_path)
             append_log(dir_path, "同步完成")
         else:
-            append_log(dir_path, f"上传失败: exit_code={proc.returncode}", level="error")
-            update_sync_status(dir_path, "error", error_msg=f"exit_code={proc.returncode}", obs_path=obs_dst)
+            # 尝试从 obsutil 失败报告解析出失败文件清单 → 标记 partial（部分失败）
+            failed_items = []
+            report = find_failed_report(task_id, output_dir) if task_id else None
+            if report:
+                failed_items = parse_failed_report(report)
+            if failed_items:
+                record_failed_files(dir_path, failed_items)
+                msg = f"部分失败: {len(failed_items)} 个文件上传失败 (exit_code={proc.returncode})"
+                append_log(dir_path, f"{msg}，可点击「补同步」重传", level="error")
+                update_sync_status(dir_path, "partial", error_msg=msg, obs_path=obs_dst)
+            else:
+                append_log(dir_path, f"上传失败: exit_code={proc.returncode}", level="error")
+                update_sync_status(dir_path, "error", error_msg=f"exit_code={proc.returncode}", obs_path=obs_dst)
     except Exception as e:
         update_sync_status(dir_path, "error", error_msg=str(e))
         append_log(dir_path, f"同步失败: {e}", level="error")
@@ -316,6 +348,55 @@ def _run_sync_batch(dirs: List[str], logs_all: Path):
 
     for d in dirs:
         _run_sync_for_dir(d, logs_all, obs_base, workers, upload_script)
+
+
+def _run_resync_failed(dir_path: str):
+    """补同步：逐个重传该目录 obsutil 上报的失败文件。"""
+    try:
+        items = list_failed_files(dir_path, only_unresolved=True)
+        if not items:
+            append_log(dir_path, "没有待补传的失败文件")
+            # 无遗留失败 → 若之前是 partial，视为已完成
+            dir_info = get_dir(dir_path)
+            if dir_info and dir_info.get("status") == "partial":
+                update_sync_status(dir_path, "done", obs_path=dir_info.get("obs_path", ""))
+                append_log(dir_path, "无待补文件，状态修正为 done")
+            return
+
+        update_sync_status(dir_path, "syncing")
+        append_log(dir_path, f"开始补同步: {len(items)} 个失败文件")
+        ok_count = 0
+        fail_count = 0
+        for it in items:
+            local = it["local_path"]
+            obs = it["obs_path"]
+            success, msg = reupload_file(local, obs)
+            if success:
+                mark_file_resolved(dir_path, obs)
+                ok_count += 1
+                append_log(dir_path, f"补传成功: {os.path.basename(local)}")
+            else:
+                fail_count += 1
+                append_log(dir_path, f"补传失败: {os.path.basename(local)} — {msg}", level="error")
+
+        remaining = count_unresolved_failed(dir_path)
+        dir_info = get_dir(dir_path)
+        obs_path = dir_info.get("obs_path", "") if dir_info else ""
+        if remaining == 0:
+            update_sync_status(dir_path, "done", obs_path=obs_path)
+            clear_failed_files(dir_path)
+            append_log(dir_path, f"补同步完成: {ok_count} 个成功，全部已备份")
+        else:
+            update_sync_status(dir_path, "partial",
+                               error_msg=f"仍有 {remaining} 个文件未成功", obs_path=obs_path)
+            append_log(dir_path, f"补同步部分完成: {ok_count} 成功 / {fail_count} 失败，剩余 {remaining}",
+                       level="error")
+    except Exception as e:
+        update_sync_status(dir_path, "partial", error_msg=f"补同步异常: {e}")
+        append_log(dir_path, f"补同步异常: {e}", level="error")
+        logger.exception("resync failed for %s", dir_path)
+    finally:
+        _syncing_dirs.discard(dir_path)
 
 
 def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
@@ -408,6 +489,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                 "has_local": bool(d.get("has_local", 1)),
                 "has_obs": bool(d.get("has_obs", 0)),
                 "port": d.get("port", ""),
+                "failed_count": count_unresolved_failed(d["dir_path"]),
                 **stats,
             }
             merged.append(entry)
@@ -439,6 +521,34 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         t.start()
 
         return JSONResponse({"started": new_dirs})
+
+    @app.post("/api/backup/resync-failed")
+    async def backup_resync_failed(request: Request):
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+
+        body = await request.json()
+        dir_path = body.get("dir_path", "")
+        if not dir_path:
+            return JSONResponse({"detail": "缺少 dir_path"}, status_code=400)
+
+        dir_info = get_dir(dir_path)
+        if not dir_info:
+            return JSONResponse({"detail": "目录不存在"}, status_code=404)
+
+        failed = list_failed_files(dir_path, only_unresolved=True)
+        if not failed:
+            return JSONResponse({"detail": "没有待补传的失败文件，请重新同步"}, status_code=400)
+
+        if dir_path in _syncing_dirs:
+            return JSONResponse({"detail": "该目录正在同步中"}, status_code=409)
+        _syncing_dirs.add(dir_path)
+
+        t = threading.Thread(target=_run_resync_failed, args=(dir_path,), daemon=True)
+        t.start()
+
+        return JSONResponse({"started": dir_path, "total": len(failed)})
 
     @app.get("/api/backup/config")
     def backup_config_get(request: Request):

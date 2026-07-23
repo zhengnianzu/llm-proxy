@@ -36,6 +36,7 @@
 .status-badge.syncing { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); animation: pulse 1.5s infinite; }
 .status-badge.done { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
 .status-badge.error { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+.status-badge.partial { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
 .status-badge.deleted { background: var(--muted); color: var(--muted-foreground); text-decoration: line-through; }
 .status-badge.backed_up { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
 .status-badge.live_syncing { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); animation: pulse 1.5s infinite; border: 1px solid color-mix(in srgb, var(--success) 40%, transparent); }
@@ -190,6 +191,7 @@
                             <button class="btn-xs danger" v-if="d.status === 'live_syncing'" @click="stopLiveSync(d)" :disabled="liveSyncing">停止在线同步</button>
                         </template>
                         <button class="btn-xs" @click="syncOne(d)" :disabled="d.status === 'syncing' || d.status === 'live_syncing'" v-if="d.status !== 'live_syncing'">同步</button>
+                        <button class="btn-xs" v-if="(d.status === 'partial' || d.status === 'error') && d.failed_count > 0" @click="resyncFailed(d)" :disabled="d.status === 'syncing'" style="background:color-mix(in srgb, var(--warning) 12%, transparent);border-color:var(--warning);color:var(--warning);">补同步 ({{ d.failed_count }})</button>
                         <button class="btn-xs" @click="openLogs(d)">详情</button>
                         <button class="btn-xs danger" @click="deleteOne(d)" :disabled="d.status !== 'done'" v-if="d.status === 'done'">删除本地文件</button>
                     </td>
@@ -304,7 +306,7 @@ new Vue({
     },
     methods: {
         statusLabel(s) {
-            var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', deleted: '已删除', backed_up: '已备份' };
+            var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', partial: '部分失败', deleted: '已删除', backed_up: '已备份' };
             return m[s] || s;
         },
         toggleAll(e) {
@@ -347,6 +349,23 @@ new Vue({
         },
         syncOne(d) {
             this._doSync([d.dir_path]);
+        },
+        resyncFailed(d) {
+            fetch('/api/backup/resync-failed', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                body: JSON.stringify({ dir_path: d.dir_path }),
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.started) {
+                        d.status = 'syncing';
+                        this._startAutoRefresh();
+                    } else if (data.detail) {
+                        alert(data.detail);
+                    }
+                })
+                .catch(e => alert('补同步请求失败: ' + e));
         },
         syncSelected() {
             if (this.selectedDirs.length === 0) return;
