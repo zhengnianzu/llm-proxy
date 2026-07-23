@@ -73,6 +73,7 @@ from src.utils.message_utils import (
     get_first_user_text,
     load_json,
     parse_response,
+    q1_hash_from_text,
 )
 from src.utils.triplet_collector import collect_new_triplets, read_session_index_jsonl
 
@@ -313,7 +314,8 @@ def run_export(
 
     # Build sessions
     sessions: List[dict] = []
-    latest_session_by_q1: Dict[str, dict] = {}
+    # 聚合键用 q1_hash（完整 Q1 的 md5），避免长 query 前缀相同时误聚合
+    latest_session_by_hash: Dict[str, dict] = {}
 
     for entry in base_index:
         q1 = entry.get("q1", "")
@@ -326,7 +328,7 @@ def run_export(
             "from_base": True,
         }
         sessions.append(session)
-        latest_session_by_q1[q1] = session
+        latest_session_by_hash[q1_hash_from_text(q1)] = session
 
     skipped = 0
     for prefix in new_prefixes:
@@ -347,18 +349,19 @@ def run_export(
             continue
 
         q1 = get_first_user_text(messages)
+        q1_hash = q1_hash_from_text(q1)
         user_count = count_user_messages(messages)
 
         if user_count <= 1:
             session = {"folder_prefix": prefix, "q1": q1, "items": [(prefix, tri)], "from_base": False}
             sessions.append(session)
-            latest_session_by_q1[q1] = session
+            latest_session_by_hash[q1_hash] = session
         else:
-            session = latest_session_by_q1.get(q1)
+            session = latest_session_by_hash.get(q1_hash)
             if session is None:
                 session = {"folder_prefix": prefix, "q1": q1, "items": [], "from_base": False}
                 sessions.append(session)
-                latest_session_by_q1[q1] = session
+                latest_session_by_hash[q1_hash] = session
             session["items"].append((prefix, tri))
 
     logger.debug("Sessions total: %d, skipped triplets: %d", len(sessions), skipped)

@@ -158,8 +158,8 @@ def _scan_index_file(index_file: Path, offset: int = 0,
                 keys[kk]["count"] += 1
                 keys[kk]["tok_in"] += tok_in
                 keys[kk]["tok_out"] += tok_out
-                chain_key = entry.get("chain_key", "")
-                if chain_key:
+                sess_id = entry.get("q1_hash") or entry.get("chain_key", "")
+                if sess_id:
                     keys[kk]["sessions"] += 1
 
                 # channels dimension
@@ -172,7 +172,7 @@ def _scan_index_file(index_file: Path, offset: int = 0,
                 channels[ck]["count"] += 1
                 channels[ck]["tok_in"] += tok_in
                 channels[ck]["tok_out"] += tok_out
-                if chain_key:
+                if sess_id:
                     channels[ck]["sessions"] += 1
 
             end_offset = f.tell()

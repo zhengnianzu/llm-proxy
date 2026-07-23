@@ -4,7 +4,7 @@ import json
 import os
 
 from utils.log_paths import build_index_path
-from utils.message_common import build_chain_key, get_first_user_text
+from utils.message_common import build_chain_key, compute_q1_hash, get_first_user_text, q1_hash_from_text
 
 
 _first_count: int = 0
@@ -86,10 +86,30 @@ def _extract_q1_preview_responses(input_data) -> str:
     return ""
 
 
+def _extract_q1_full_responses(input_data) -> str:
+    """responses provider 的完整（未截断）首条 user 文本，供 q1_hash 使用。"""
+    if isinstance(input_data, str):
+        return input_data
+    if isinstance(input_data, list):
+        for item in input_data:
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") == "user":
+                content = item.get("content", "")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "input_text":
+                            return part.get("text", "")
+    return ""
+
+
 def append_index(ts: str, req_file: str, provider: str, logs_dir: str, model: str = "",
                  tok_in: int = 0, tok_out: int = 0, cache_in: int = 0,
                  success: bool = True,
                  api_key: str = "", chain_key: str = "", q1_preview: str = "",
+                 q1_hash: str = "",
                  total_attempts: int = 1, start_turn: int = 0,
                  channel_key: str = "", usage: dict = None,
                  debug_file: str = "",
@@ -107,6 +127,7 @@ def append_index(ts: str, req_file: str, provider: str, logs_dir: str, model: st
         "api_key": api_key,
         "chain_key": chain_key,
         "q1_preview": q1_preview,
+        "q1_hash": q1_hash,
         "total_attempts": total_attempts,
         "retried": total_attempts > 1,
         "start_turn": start_turn,
@@ -136,6 +157,7 @@ def append_index_anthropic(ts, req_path, total_attempts, valid, logs_dir, model=
         api_key=api_key,
         chain_key=build_chain_key(msgs),
         q1_preview=_extract_q1_preview(msgs),
+        q1_hash=compute_q1_hash(msgs),
         total_attempts=total_attempts,
         start_turn=get_first_user_text(msgs, return_index=True)[1],
         channel_key=channel_key,
@@ -155,6 +177,7 @@ def append_index_openai(ts, req_path, logs_dir, model="", tok_in=0, tok_out=0, s
         api_key=api_key,
         chain_key=build_chain_key(msgs),
         q1_preview=_extract_q1_preview(msgs),
+        q1_hash=compute_q1_hash(msgs),
         channel_key=channel_key,
         usage=usage,
         debug_file=debug_file,
@@ -170,6 +193,7 @@ def append_index_responses(ts, req_path, logs_dir, model="", tok_in=0, tok_out=0
         api_key=api_key,
         chain_key=_extract_chain_key_responses(input_data),
         q1_preview=_extract_q1_preview_responses(input_data),
+        q1_hash=q1_hash_from_text(_extract_q1_full_responses(input_data)),
         channel_key=channel_key,
         usage=usage,
         debug_file=debug_file,

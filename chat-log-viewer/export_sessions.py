@@ -66,6 +66,7 @@ from src.utils.message_utils import (
     get_first_user_text,
     load_json,
     parse_response,
+    q1_hash_from_text,
 )
 from src.utils.triplet_collector import collect_new_triplets
 
@@ -138,21 +139,22 @@ def make_progress(desc: str, unit: str, total: Optional[int] = None):
     return _LogProgress(desc=desc, unit=unit)
 
 
-def preload_request(task: Tuple[str, dict]) -> Tuple[str, dict, Optional[str], Optional[int]]:
+def preload_request(task: Tuple[str, dict]) -> Tuple[str, dict, Optional[str], Optional[str], Optional[int]]:
     prefix, tri = task
     try:
         req_data = load_json(tri["req"])
     except Exception as e:
         print(f"[warn] 读取 req 失败 {prefix}: {e}")
-        return prefix, tri, None, None
+        return prefix, tri, None, None, None
 
     messages = extract_messages(req_data)
     if not messages:
-        return prefix, tri, None, None
+        return prefix, tri, None, None, None
 
     q1 = get_first_user_text(messages)
+    q1_hash = q1_hash_from_text(q1)
     user_count = count_user_messages(messages)
-    return prefix, tri, q1, user_count
+    return prefix, tri, q1, q1_hash, user_count
 
 
 def build_triplet_from_index_entry(src: Path, entry: dict) -> Optional[Tuple[str, dict]]:
@@ -232,12 +234,12 @@ def stream_preload_requests(
             prefix, tri = task
             try:
                 result = preload_request((prefix, tri))
-                _, tri2, q1, user_count = result
+                _, tri2, q1, q1_hash, user_count = result
                 if q1 is None or user_count is None:
                     add_skipped()
                 else:
                     with preloaded_lock:
-                        preloaded.append((prefix, tri2, q1, user_count))
+                        preloaded.append((prefix, tri2, q1, q1_hash, user_count))
             finally:
                 task_queue.task_done()
 
@@ -475,12 +477,12 @@ def main():
             futures = {executor.submit(preload_request, task): task for task in preload_tasks}
             with make_progress(total=len(preload_tasks), desc="预解析请求", unit="req") as bar:
                 for future in as_completed(futures):
-                    prefix, tri, q1, user_count = future.result()
+                    prefix, tri, q1, q1_hash, user_count = future.result()
                     bar.update(1)
                     if q1 is None or user_count is None:
                         skipped += 1
                         continue
-                    preloaded.append((prefix, tri, q1, user_count))
+                    preloaded.append((prefix, tri, q1, q1_hash, user_count))
     collect_elapsed = time.perf_counter() - collect_start
 
     if not new_triplets and not base_index:
@@ -491,13 +493,15 @@ def main():
 
     # ── 构建 session 列表 ────────────────────────────────────────
     sessions: List[dict] = []
-    latest_session_by_q1: Dict[str, dict] = {}
+    # 聚合键用 q1_hash（完整 Q1 的 md5），避免长 query 前缀相同时误聚合
+    latest_session_by_hash: Dict[str, dict] = {}
 
     if base_out:
         for entry in base_index:
             q1 = entry.get("q1", "")
             if not q1:
                 continue
+            q1_hash = q1_hash_from_text(q1)
             session = {
                 "folder_prefix": entry["folder"],
                 "q1": q1,
@@ -505,14 +509,14 @@ def main():
                 "from_base": True,
             }
             sessions.append(session)
-            latest_session_by_q1[q1] = session
+            latest_session_by_hash[q1_hash] = session
 
     preload_elapsed = collect_elapsed
 
     group_start = time.perf_counter()
     preloaded.sort(key=lambda item: item[0])
 
-    for prefix, tri, q1, user_count in preloaded:
+    for prefix, tri, q1, q1_hash, user_count in preloaded:
 
         if user_count <= 1:
             session = {
@@ -522,13 +526,13 @@ def main():
                 "from_base": False,
             }
             sessions.append(session)
-            latest_session_by_q1[q1] = session
+            latest_session_by_hash[q1_hash] = session
         else:
-            session = latest_session_by_q1.get(q1)
+            session = latest_session_by_hash.get(q1_hash)
             if session is None:
                 session = {"folder_prefix": prefix, "q1": q1, "items": [], "from_base": False}
                 sessions.append(session)
-                latest_session_by_q1[q1] = session
+                latest_session_by_hash[q1_hash] = session
             session["items"].append((prefix, tri))
     group_elapsed = time.perf_counter() - group_start
 

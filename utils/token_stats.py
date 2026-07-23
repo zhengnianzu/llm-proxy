@@ -317,9 +317,9 @@ def statistic_keys(date_start: str = '2000-01-01', date_end: str = '9999-12-31',
             key_data[raw_key]["count"] += 1
             key_data[raw_key]["tok_in"] += tok_in
             key_data[raw_key]["tok_out"] += tok_out
-            chain_key = entry.get("chain_key", "")
-            if chain_key:
-                key_data[raw_key]["sessions"].add(chain_key)
+            sess_id = entry.get("q1_hash") or entry.get("chain_key", "")
+            if sess_id:
+                key_data[raw_key]["sessions"].add(sess_id)
 
     keys_list = [
         {"key": _mask_api_key(k), "count": v["count"], "tok_in": v["tok_in"], "tok_out": v["tok_out"], "sessions": len(v["sessions"]) or v["count"]}
@@ -357,9 +357,9 @@ def statistic_channels(date_start: str = '2000-01-01', date_end: str = '9999-12-
             ch_data[raw_key]["count"] += 1
             ch_data[raw_key]["tok_in"] += tok_in
             ch_data[raw_key]["tok_out"] += tok_out
-            chain_key = entry.get("chain_key", "")
-            if chain_key:
-                ch_data[raw_key]["sessions"].add(chain_key)
+            sess_id = entry.get("q1_hash") or entry.get("chain_key", "")
+            if sess_id:
+                ch_data[raw_key]["sessions"].add(sess_id)
 
     ch_list = [
         {"key": _mask_api_key(k), "count": v["count"], "tok_in": v["tok_in"], "tok_out": v["tok_out"], "sessions": len(v["sessions"]) or v["count"]}

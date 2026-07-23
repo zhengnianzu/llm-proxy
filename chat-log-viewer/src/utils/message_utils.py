@@ -19,6 +19,7 @@ from utils.message_common import (
     get_text_from_content,
     parse_response,
     parse_streaming_response,
+    q1_hash_from_text,
 )
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "get_text_from_content",
     "parse_streaming_response",
     "parse_response",
+    "q1_hash_from_text",
     "load_json",
 ]
 

@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from utils.log_paths import build_index_path, get_log_dir
 from utils.message_common import (
     build_chain_key,
+    compute_q1_hash,
     count_real_user_turns,
     extract_res_usage,
     get_first_user_text,
@@ -205,9 +206,11 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     _idx_msg_count = ie.get("msg_count", 0)
     _idx_user_turns = ie.get("user_turns")
     _idx_chain_key = ie.get("chain_key", "")
+    _idx_q1_hash = ie.get("q1_hash", "")
     _needs_req = (
         not _idx_msg_count  # 旧格式 index 没有 msg_count
         or not _idx_chain_key
+        or not _idx_q1_hash  # 旧格式 index 没有 q1_hash，需读 req.json 现算
         or (_idx_chain_key and any(_idx_chain_key.startswith(p) for p in _noise_prefixes))
         or (_idx_user_turns is None)
     )
@@ -233,7 +236,14 @@ def _process_req_row(kind: str, state: Dict[str, Any], req_path: Path, index_ent
     else:
         chain_key = build_chain_key(messages)
 
-    lookup_key = f"{api_key}||{chain_key}"
+    # 聚合键：优先用 index 里的 q1_hash（完整 Q1 的 md5）；旧 index 无此字段时
+    # 从 messages 现算，保证不误聚合。messages 在 _needs_req 分支已加载。
+    if _idx_q1_hash:
+        q1_hash = _idx_q1_hash
+    else:
+        q1_hash = compute_q1_hash(messages) if messages is not None else ""
+
+    lookup_key = f"{api_key}||{q1_hash}"
     q1_preview = ie.get("q1_preview", "")
     if q1_preview and any(q1_preview.startswith(p) for p in _noise_prefixes):
         q1_preview = get_first_user_text(messages)[:200] if messages is not None else ""

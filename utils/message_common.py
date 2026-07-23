@@ -7,6 +7,7 @@ app.py（在线）和 chat-log-viewer（离线）共用的核心逻辑：
 - 统一响应解析
 """
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -219,6 +220,23 @@ def get_first_user_text(messages: List[dict], return_index: bool = False) -> Uni
 def build_chain_key(messages: List[dict]) -> str:
     """构建聚合用的 chain_key：直接使用 Q1 文本。"""
     return get_first_user_text(messages)[:500]
+
+
+def q1_hash_from_text(text: str) -> str:
+    """对完整 Q1 文本做 md5，返回 32 字符 hexdigest。
+
+    用作会话聚合键：hash 整个（未截断）Q1，避免长 query 前缀相同时误聚合，
+    且聚合键定长省内存。空文本返回空串（保持与旧 chain_key 空值一致的
+    聚合行为：同 api_key 下空 Q1 仍 collapse 成一个 session）。
+    """
+    if not text:
+        return ""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def compute_q1_hash(messages: List[dict]) -> str:
+    """从 messages 提取完整 Q1 并返回其 q1_hash。"""
+    return q1_hash_from_text(get_first_user_text(messages))
 
 
 def parse_streaming_response(chunks: List[dict]) -> dict:
