@@ -355,7 +355,7 @@ logs_all/
 
 - **原始三元组文件**：`<ts>-req.json` / `-res.json` / `-headers.json`
 - **一行索引**：`append_index()` 往该目录 `index.jsonl` **追加一行**，含
-  `ts / req_file / api_key / model / chain_key / q1_preview / msg_count / user_turns / success / usage …`
+  `ts / req_file / api_key / model / chain_key / q1_preview / q1_hash / msg_count / user_turns / success / usage …`
 
 目录名 = `log_paths._env_key_segment()` = `<LOG_TASK_TAG>-<UPSTREAM_API_KEY 后4位>`，
 **进程启动时固定**；时间戳段 `STARTUP_DATE_TAG`（如 `26071922`）也是启动时刻，即「活跃目录」。
@@ -365,7 +365,8 @@ logs_all/
 - **`_refresh_state(kind, root_dir)`**（`_REFRESH_TTL=10s` 节流）：按 `index_progress` 表记录的
   `byte_offset` 只读 `index.jsonl` 的**新增字节**（`_read_new_index_entries`），实现增量。
 - **`_process_req_row()`** 做**会话聚合**：
-  - `lookup_key = api_key || chain_key`（chain_key 由消息内容生成，同会话连续请求 chain 前缀递增）
+  - `lookup_key = api_key || q1_hash`（`q1_hash` = 完整 Q1 文本的 md5，见下方
+    [会话聚合键：q1_hash](#会话聚合键q1_hash)）
   - 经 `chain_index` 表查 lookup_key → `session_key`；查不到则**新建 session**（session_key = 首个 ts），
     查到则**更新**（`latest_file` 取消息最多/带响应的那次，`msg_count / models / last_ts` 等）
   - 新会话检测：user_turns 回落到 ≤1 时判为新会话，另起 `##session_N` 后缀
@@ -378,6 +379,29 @@ logs_all/
 | `traces` | 一个会话的所有请求轨迹（每 req 一行） |
 | `chain_index` | `lookup_key → session_key`（会话归并的关键） |
 | `index_progress` | `root_dir → byte_offset`（index.jsonl 消费进度，支持增量） |
+
+#### 会话聚合键：q1_hash
+
+会话归并的 `lookup_key = api_key || q1_hash`。历史上聚合键用 **Q1 文本本身**（第一条真实用户消息，经 `build_chain_key` 截断到 500 字符），存在两个问题：
+
+1. **误聚合**：system query 特别长时，两条前 500 字符相同、之后不同的 query 会被截断成同一个 `chain_key`，归并进同一个 session。
+2. **费内存**：长文本作为内存 `_chain_map` 和 DB `chain_index` 的 key，占用大。
+
+改为 **`q1_hash = md5(完整未截断 Q1).hexdigest()`**（32 字符定长）作为聚合键：
+
+- **Q1 拆分为两个职责**：`q1_hash` 只做聚合，`q1` / `q1_preview` 只做展示（展示长度不变，`q1_preview=100`、session `q1=200`）。
+- 完整 Q1 参与 hash → 长 query 不再误聚合；定长 key → 省内存。
+- **空 Q1 语义保持**：空 Q1 → `q1_hash=""` → `lookup_key="api_key||"`，同 api_key 下空 Q1 仍 collapse 成一个 session（与旧 chain_key 空值行为一致）。
+
+| 组件 | 位置 | 说明 |
+|------|------|------|
+| `q1_hash_from_text(text)` / `compute_q1_hash(messages)` | `utils/message_common.py` | 计算 md5 |
+| 写入端 | `utils/req_index.py` | 三个 provider（anthropic/openai/responses）都写 `q1_hash` 字段；responses 走 input_data 文本路径 |
+| 实时聚合 | `utils/log_routes.py` | `lookup_key` 用 `q1_hash`；旧 index 无该字段时读 req.json 现算 |
+| 导出聚合 | `export_sessions.py` / `sync_sessions.py` | `latest_session_by_hash` 以 q1_hash 为 dict key |
+| 会话计数去重 | `utils/token_stats.py` / `utils/token_index.py` | distinct session 计数用 `q1_hash or chain_key`（旧数据回退） |
+
+**向后兼容**：旧 `index.jsonl` 无 `q1_hash` 时，运行时按需现算（读 req.json）或回退 chain_key，无需迁移即可运行。彻底统一口径需跑 **`utils/migrate_q1_hash.py`**：回填历史 index.jsonl 的 `q1_hash`（两阶段并行读 req.json，`--workers`），并可选 `--reset-db` 清空聚合表由运行时全量重建。`chain_key` 字段保留（展示回退 + token 统计仍用）。
 
 ### ④ 导出 session_index.jsonl（`utils/export_sync.py:export_session_index`）
 
