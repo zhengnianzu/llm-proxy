@@ -8,7 +8,10 @@ utils/eval/reformat.py — 格式重整 + 质检一体化
 
 import json
 import logging
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
+import signal
+import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -16,6 +19,46 @@ from utils.eval.eval import analyze_best_data, fmt_quality
 from utils.message_common import parse_response
 
 logger = logging.getLogger(__name__)
+
+# 无进展超时：距上一个 future 完成超过该秒数没有任何新进展，判定卡死
+_NO_PROGRESS_TIMEOUT = int(os.getenv("EVAL_NO_PROGRESS_TIMEOUT", "600"))
+# 进程池关闭宽限：所有 future 已完成后，等待 executor 正常收尾的最长秒数
+_SHUTDOWN_GRACE = int(os.getenv("EVAL_SHUTDOWN_GRACE", "60"))
+
+
+def _terminate_pool_workers(executor: ProcessPoolExecutor, log: Callable[[str], None]) -> None:
+    """强制回收进程池内残留的 worker 进程（参考 backup_routes 的 SIGTERM->SIGKILL 模式）。
+
+    executor.shutdown(wait=False, cancel_futures=True) 之后，仍可能有 worker
+    卡在收尾阶段不退出，这里直接对存活进程发信号回收，避免僵尸进程堆积。
+    """
+    procs = list(getattr(executor, "_processes", {}).values())
+    if not procs:
+        return
+    log(f"强制回收 {len(procs)} 个 worker 进程")
+    for p in procs:
+        pid = getattr(p, "pid", None)
+        if not pid:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + 10
+    for p in procs:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            p.join(timeout=remaining)
+        except Exception:
+            pass
+    for p in procs:
+        if p.is_alive():
+            pid = getattr(p, "pid", None)
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
 
 
 def _load_json(path: Path) -> Any:
@@ -331,23 +374,77 @@ def reformat_and_analyze(
         _log(f"缓存命中 {len(cached_results)} sessions, 需处理 {len(tasks)}")
     errors = []
     done = 0
+    n_tasks = len(tasks)
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    if n_tasks == 0:
+        return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results}
+
+    executor = ProcessPoolExecutor(max_workers=workers)
+    try:
         futures = {executor.submit(_process_one, t): t for t in tasks}
-        for future in as_completed(futures):
-            done += 1
-            task = futures[future]
-            first_ts = task[2]
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-                else:
-                    errors.append(f"处理失败: {first_ts}")
-            except Exception as e:
-                errors.append(f"{first_ts}: {e}")
+        pending = set(futures.keys())
+        last_progress = time.monotonic()
 
-            if done % 10 == 0 or done == len(tasks):
-                _log(f"reformat+analyze: {done}/{len(tasks)}, 成功 {len(results)}")
+        # 逐批等待完成；用 wait(timeout) 做无进展看门狗，避免某个 future
+        # 永不返回时整个循环无限阻塞（历史卡死正是停在这里之后）。
+        from concurrent.futures import wait as _fwait, FIRST_COMPLETED
+        while pending:
+            completed, pending = _fwait(pending, timeout=30, return_when=FIRST_COMPLETED)
+            if not completed:
+                # 本轮无任何 future 完成，检查是否超过无进展阈值
+                if time.monotonic() - last_progress > _NO_PROGRESS_TIMEOUT:
+                    _log(f"reformat+analyze 无进展超时（{_NO_PROGRESS_TIMEOUT}s）: "
+                         f"已完成 {done}/{n_tasks}, 待处理 {len(pending)}，强制终止")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    _terminate_pool_workers(executor, _log)
+                    raise TimeoutError(
+                        f"reformat_and_analyze no progress for {_NO_PROGRESS_TIMEOUT}s "
+                        f"(done={done}/{n_tasks}, pending={len(pending)})"
+                    )
+                continue
+
+            last_progress = time.monotonic()
+            for future in completed:
+                done += 1
+                task = futures[future]
+                first_ts = task[2]
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                    else:
+                        errors.append(f"处理失败: {first_ts}")
+                except Exception as e:
+                    errors.append(f"{first_ts}: {e}")
+
+                if done % 10 == 0 or done == n_tasks:
+                    _log(f"reformat+analyze: {done}/{n_tasks}, 成功 {len(results)}")
+    finally:
+        # 显式关闭进程池，并对收尾挂起做宽限超时兜底。
+        # 历史卡死表现为：所有 future 已完成，但 with 块隐式 shutdown 永久阻塞。
+        _log("reformat+analyze 完成，开始关闭进程池")
+        shutdown_done = {"ok": False}
+
+        import threading as _threading
+
+        def _do_shutdown():
+            try:
+                executor.shutdown(wait=True)
+                shutdown_done["ok"] = True
+            except Exception:
+                pass
+
+        t = _threading.Thread(target=_do_shutdown, daemon=True)
+        t.start()
+        t.join(timeout=_SHUTDOWN_GRACE)
+        if not shutdown_done["ok"]:
+            _log(f"进程池关闭超时（{_SHUTDOWN_GRACE}s），强制回收 worker")
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            _terminate_pool_workers(executor, _log)
+        else:
+            _log("进程池已关闭")
 
     return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results}

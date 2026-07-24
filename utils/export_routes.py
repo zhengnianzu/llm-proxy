@@ -308,7 +308,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         continue
                     if api_key:
                         _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 {len(session_entries)}")
-                    _log(f"[{mt}] reformat+analyze: {len(session_entries)} sessions...")
+                    _log(f"[{mt}] 进入 reformat+analyze: {len(session_entries)} sessions, workers={workers}...")
                     ra_result = reformat_and_analyze(
                         src_dir=mt_src, out_dir=str(local_base),
                         session_entries=session_entries, api_key=api_key, workers=workers,
@@ -317,7 +317,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                     all_results.extend(ra_result["results"])
                     all_entries.extend(session_entries)
                     total_sessions += len(ra_result["results"])
-                    _log(f"[{mt}] 完成: {ra_result['total_files']} sessions")
+                    _log(f"[{mt}] reformat+analyze 返回: results={ra_result['total_files']}, errors={len(ra_result.get('errors', []))}")
             except Exception as e:
                 _log(f"[{mt}] 错误: {e}")
                 errors.append(f"{mt}: {e}")
@@ -331,11 +331,13 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 with open(idx_path, "w", encoding="utf-8") as f:
                     for entry in all_entries:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                _log(f"开始 evaluate_sessions: {len(all_results)} sessions...")
                 eval_result = evaluate_sessions(
                     sessions=all_results, report_dir=str(local_base), progress_cb=_log,
                     key_name=f"{_env_key_name}/{slot}",
                     obs_path=obs_dst,
                 )
+                _log(f"evaluate_sessions 完成: total_sessions={eval_result.get('total_sessions', 0)}")
                 eval_report_path = eval_result.get("report_path", "")
                 analysis_json_path = eval_result.get("analysis_json_path", "")
                 # 只有文件 ≤100MB 才存入 DB（超大文件直接从 local_copy_dir 读取即可）

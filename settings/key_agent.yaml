@@ -1,0 +1,22 @@
+# Key 管理配置
+# 通过 key config settings/keys.yaml 注入到运行状态
+
+# /keys 管理页面的登录凭证（独立于 app 监控密码）
+user: "admin"
+password: "admin123"
+
+# 邀请码，支持单个字符串或列表，设置后开启 /invite 自助申请
+# invite_code: "abc"       # 单个
+invite_codes:               # 多个
+  - "pangu"
+  - "task"
+
+# 生成 key 时 sk- 后面的随机字符长度（字节数，hex 字符数为此值 2 倍）
+key_len: 4
+
+# key 列表，--apply 时写入数据库
+keys:
+  # - name: test1
+  #   value: sk-11122
+  # - name: test2
+  #   value: sk-111222

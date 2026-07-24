@@ -1,11 +1,22 @@
 # 自定义模型配置
-# alias: 客户端调用的模型名
-# model: 实际转发的上游模型名
-# params: 自动注入到请求 body 的参数（不覆盖客户端已显式传入的同名参数）
+#
+# 两种匹配方式（优先级：models 精确匹配 > prefixes 前缀匹配）：
+#
+# 1) prefixes: 前缀规则（通用，推荐）
+#    客户端发送 "<PREFIX>:<真实模型名>"，自动剥掉前缀得到真实模型名，
+#    并注入该前缀预设的 params。无需为每个模型单独配置。
+#    例：THINKING:claude-opus-4-8  -> model=claude-opus-4-8 + 注入 thinking 参数
+#        THINKING:claude-fable-5   -> model=claude-fable-5  + 注入 thinking 参数
+#
+# 2) models: 精确别名（特例覆盖）
+#    alias: 客户端调用的模型名
+#    model: 实际转发的上游模型名（可与 alias 不同）
+#    params: 注入到请求 body 的参数
+#
+# params 注入不覆盖客户端已显式传入的同名参数。
 
-models:
-  THINKING:claude-opus-4-8:
-    model: claude-opus-4-8
+prefixes:
+  THINKING:
     params:
       thinking:
         type: adaptive
@@ -13,11 +24,11 @@ models:
       output_config:
         effort: high
 
-  THINKING:claude-fable-5:
-    model: claude-fable-5
-    params:
-      thinking:
-        type: adaptive
-        display: summarized
-      output_config:
-        effort: high
+# 精确别名示例（如需把某别名映射到不同名的上游模型，在此配置）：
+# models:
+#   my-opus:
+#     model: claude-opus-4-8
+#     params:
+#       output_config:
+#         effort: high
+models: {}

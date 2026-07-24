@@ -1,5 +1,6 @@
 """请求 index.jsonl 写入和计数。"""
 
+import asyncio
 import json
 import os
 
@@ -198,3 +199,33 @@ def append_index_responses(ts, req_path, logs_dir, model="", tok_in=0, tok_out=0
         usage=usage,
         debug_file=debug_file,
     )
+
+
+# ---------------------------------------------------------------------------
+# 异步包装：index 写入含 chain_key/q1_hash 等 CPU 计算 + 文件 append，
+# 在事件循环上执行会阻塞其它并发请求。用 to_thread 丢到线程池。
+# 调用点用 `await append_index_*_async(...)`。
+# ---------------------------------------------------------------------------
+
+async def append_index_anthropic_async(*args, **kwargs):
+    try:
+        return await asyncio.to_thread(append_index_anthropic, *args, **kwargs)
+    except Exception as ex:  # 记录失败但不影响响应
+        import logging
+        logging.warning(f"append_index_anthropic_async failed: {ex}")
+
+
+async def append_index_openai_async(*args, **kwargs):
+    try:
+        return await asyncio.to_thread(append_index_openai, *args, **kwargs)
+    except Exception as ex:
+        import logging
+        logging.warning(f"append_index_openai_async failed: {ex}")
+
+
+async def append_index_responses_async(*args, **kwargs):
+    try:
+        return await asyncio.to_thread(append_index_responses, *args, **kwargs)
+    except Exception as ex:
+        import logging
+        logging.warning(f"append_index_responses_async failed: {ex}")
