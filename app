@@ -180,6 +180,23 @@ def is_pid_running(pid: Optional[int]) -> bool:
         return False
 
 
+def _signal_service(pid: int, sig: int) -> None:
+    """给整个服务进程组发信号。
+
+    服务用 start_new_session=True 启动，master 是进程组组长（PGID == master PID），
+    多 worker（PROXY_WORKERS>1）下的 worker 都在同一进程组里。按进程组发信号可以
+    把 master + 所有 worker 一起停掉，避免 SIGKILL 掉 master 后 worker 变孤儿占端口。
+    取不到进程组（异常）时退回只给 master 发信号。"""
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
 def read_pid(path: Path) -> Optional[int]:
     try:
         return int(path.read_text(encoding="utf-8").strip())
@@ -348,7 +365,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
         return 0
 
     print(f"[app] stopping pid={pid} env={service_key}")
-    os.kill(pid, signal.SIGTERM)
+    _signal_service(pid, signal.SIGTERM)
     for _ in range(20):
         time.sleep(0.5)
         if not is_pid_running(pid):
@@ -356,7 +373,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     if is_pid_running(pid):
         print(f"[app] force kill pid={pid}")
-        os.kill(pid, signal.SIGKILL)
+        _signal_service(pid, signal.SIGKILL)
         time.sleep(0.2)
 
     if pid_file:

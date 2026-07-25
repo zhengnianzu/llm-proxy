@@ -70,6 +70,46 @@
     <div class="card">
         <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
             <div>
+                <div class="font-semibold">实时在途请求</div>
+                <div class="text-muted text-sm">
+                    当前正在处理的请求及所处阶段，每 {{ refreshInterval }} 秒刷新
+                    <span v-if="live.uptime_sec">· 本进程已运行 {{ liveUptime }}</span>
+                </div>
+            </div>
+            <span class="blink text-good" title="实时">● LIVE</span>
+        </div>
+        <div class="grid grid-4 text-center">
+            <div>
+                <h5>在途总数</h5>
+                <div class="stat-value" :class="'text-' + inflightLevel">{{ live.in_flight }}</div>
+                <div class="stat-sub">当前并发</div>
+            </div>
+            <div class="dash-divider">
+                <h5>等待厂商</h5>
+                <div class="stat-value" :class="{ 'text-warn': live.stages.waiting_upstream > 0 }">{{ live.stages.waiting_upstream }}</div>
+                <div class="stat-sub">已连上·等生成</div>
+            </div>
+            <div class="dash-divider">
+                <h5>建连中</h5>
+                <div class="stat-value">{{ live.stages.connecting }}</div>
+                <div class="stat-sub">正在连厂商</div>
+            </div>
+            <div class="dash-divider">
+                <h5>回传中</h5>
+                <div class="stat-value">{{ live.stages.streaming }}</div>
+                <div class="stat-sub">透传回客户端</div>
+            </div>
+        </div>
+        <div class="text-muted text-sm" style="margin-top:8px">
+            阻塞提示：<span v-if="live.stages.waiting_upstream > live.stages.streaming && live.stages.waiting_upstream > 5" class="text-warn">大量请求卡在「等待厂商」，瓶颈在上游生成</span>
+            <span v-else-if="live.stages.streaming > 5" class="text-warn">较多请求卡在「回传」，可能客户端接收慢</span>
+            <span v-else class="text-good">链路通畅</span>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <div>
                 <div class="font-semibold">实时监控</div>
                 <div class="text-muted text-sm">RPM 随时间流式刷新，默认展示最近 2 小时</div>
             </div>
@@ -121,11 +161,12 @@ const app = new Vue({
     el: '#app',
     data: {
         latestRpm: 0, latestTpmIn: 0, latestTpmOut: 0, latestErrors: 0,
-        autoRefresh: true, refreshInterval: 15, selectedHours: 2, _refreshTimer: null,
+        autoRefresh: true, refreshInterval: 15, selectedHours: 2, _refreshTimer: null, _liveTimer: null,
         _chartRpm: null, _chartTpm: null, _chartRate: null,
         _realtimeRaw: [], _rateRaw: [],
         selectedModel: '__all__', modelList: [],
         indexStats: { first_count: 0, total_count: 0, valid_count: 0, success_rate: 0 },
+        live: { in_flight: 0, stages: { connecting: 0, waiting_upstream: 0, streaming: 0 }, uptime_sec: 0 },
     },
     computed: {
         totalRetries() { return Math.max(0, this.indexStats.total_count - this.indexStats.first_count); },
@@ -133,6 +174,16 @@ const app = new Vue({
         rateLevel() {
             const r = this.indexStats.success_rate;
             return r >= 0.9 ? 'good' : r >= 0.7 ? 'warn' : 'danger';
+        },
+        inflightLevel() {
+            const n = this.live.in_flight;
+            return n >= 150 ? 'danger' : n >= 80 ? 'warn' : 'good';
+        },
+        liveUptime() {
+            let s = this.live.uptime_sec || 0;
+            const h = Math.floor(s / 3600); s %= 3600;
+            const m = Math.floor(s / 60); s %= 60;
+            return (h ? h + 'h' : '') + (m ? m + 'm' : '') + s + 's';
         },
     },
     methods: {
@@ -243,11 +294,28 @@ const app = new Vue({
                     this.applyModelFilter();
                 }).catch(() => {});
         },
+        fetchLive() {
+            fetch('/metrics/live')
+                .then(r => r.json())
+                .then(d => {
+                    // 容错：字段缺失时用默认结构，避免模板报错
+                    this.live = {
+                        in_flight: d.in_flight || 0,
+                        stages: Object.assign({ connecting: 0, waiting_upstream: 0, streaming: 0 }, d.stages || {}),
+                        uptime_sec: d.uptime_sec || 0,
+                    };
+                }).catch(() => {});
+        },
         startAutoRefresh() {
             this.fetchRealtime();
             this._refreshTimer = setInterval(() => {
                 if (this.autoRefresh) this.fetchRealtime();
             }, this.refreshInterval * 1000);
+            // 在途请求单独用更快的节奏刷新（3 秒），体现「实时」
+            this.fetchLive();
+            this._liveTimer = setInterval(() => {
+                if (this.autoRefresh) this.fetchLive();
+            }, 3000);
         },
         toggleAutoRefresh() {
             this.autoRefresh = !this.autoRefresh;
@@ -262,6 +330,7 @@ const app = new Vue({
     },
     beforeDestroy() {
         clearInterval(this._refreshTimer);
+        clearInterval(this._liveTimer);
     }
 });
 </script>

@@ -44,27 +44,63 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # 队列项: (record_id, fn, args)
 # fn 是无参可调用，内部捕获所有上下文
+#
+# 多 worker 说明：任务 fn 是内存闭包，只存在于「接收入队请求」的那个 worker 的
+# 队列里，无法跨进程。这里保证两条不变量：
+#   1) 取消跨 worker 生效：cancel 请求（可能落到别的 worker）把 DB 状态置为
+#      cancelled；执行 worker 出队时以 DB 状态为准重新判定，取消则跳过。
+#   2) 全局串行：用文件锁（flock 阻塞）保证任意时刻只有一个 worker 在真正执行
+#      导出任务，避免多 worker 各自的 runner 并发跑导出撞 OBS/本地拷贝。
 _task_queue: queue.Queue = queue.Queue()
 _queue_lock = threading.Lock()
 
-# record_id -> True 表示该任务已被取消，调度线程出队后直接跳过
+# record_id -> True 表示该任务已被取消，调度线程出队后直接跳过（本进程内快速路径）
 _cancelled_ids: set = set()
+
+_EXPORT_LOCK_PATH = os.path.join(get_service_log_dir(), "export_queue.lock")
+
+
+def _is_cancelled(record_id: int) -> bool:
+    """出队时判定任务是否已取消：先查本进程集合，再以 DB 状态为准（跨 worker）。"""
+    with _queue_lock:
+        if record_id in _cancelled_ids:
+            _cancelled_ids.discard(record_id)
+            return True
+    try:
+        rec = get_record(record_id)
+        if rec and rec.get("status") == "cancelled":
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _queue_runner():
-    """全局单一调度线程，逐个执行队列中的任务。"""
+    """全局单一调度线程，逐个执行队列中的任务。跨 worker 用文件锁保证全局串行。"""
+    import fcntl
     while True:
         record_id, fn = _task_queue.get()
-        with _queue_lock:
-            if record_id in _cancelled_ids:
-                _cancelled_ids.discard(record_id)
-                _task_queue.task_done()
-                continue
+        if _is_cancelled(record_id):
+            _task_queue.task_done()
+            continue
+        lock_fp = None
         try:
+            # 阻塞式全局锁：等到其它 worker 的导出任务结束再执行本任务
+            lock_fp = open(_EXPORT_LOCK_PATH, "w")
+            fcntl.flock(lock_fp, fcntl.LOCK_EX)
+            # 拿到锁后再确认一次是否在等待期间被取消
+            if _is_cancelled(record_id):
+                continue
             fn()
         except Exception:
             logger.exception("queue_runner: task %s raised", record_id)
         finally:
+            if lock_fp is not None:
+                try:
+                    fcntl.flock(lock_fp, fcntl.LOCK_UN)
+                    lock_fp.close()
+                except OSError:
+                    pass
             _task_queue.task_done()
 
 

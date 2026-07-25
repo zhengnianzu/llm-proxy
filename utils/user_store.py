@@ -36,8 +36,12 @@ def init_db(db_dir: str = "data"):
 def _migrate(conn: sqlite3.Connection):
     cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "permissions" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN permissions TEXT NOT NULL DEFAULT ''")
-        conn.commit()
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN permissions TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # 多 worker 并发迁移时另一进程可能已加列，忽略 duplicate column
+            pass
 
 
 def _get_conn() -> sqlite3.Connection:

@@ -8,7 +8,7 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from datetime import datetime
 from dotenv import load_dotenv
@@ -27,6 +27,8 @@ from utils.key_store import init_db as init_key_db, find_key as _find_key
 from utils.key_config import init_key_config
 from utils.channel_store import init_db as init_channel_db
 from utils.custom_models import resolve_custom_model, load_custom_models
+from utils.http_client import shared_client, get_client, close_all as close_http_clients
+from utils import inflight
 from utils.metrics import (
     get_metrics_snapshot,
     get_rate_history,
@@ -51,6 +53,7 @@ from utils.debug_logs import write_debug, write_debug_async, debug_filename, reg
 from src.thinking_reflection import register_reflection_routes
 from utils.req_index import (
     append_index_anthropic, append_index_openai, append_index_responses,
+    append_index_anthropic_async, append_index_openai_async, append_index_responses_async,
     load_index, get_index_counts,
 )
 
@@ -69,7 +72,19 @@ EXPOSE_THINKING = os.getenv("EXPOSE_THINKING", "true").lower() == "true"
 TRUST_ENV = os.getenv("TRUST_ENV", "true").lower() == "true"
 
 # 全局默认：重试次数（不从环境变量读取）
-MAX_RETRIES = 20
+# 20 次几乎不会比 6 次多救回请求，只会在上游故障时拖长失败等待、占用连接。
+MAX_RETRIES = 6
+
+# 重试退避上限（秒）：指数退避 + 抖动，避免上游过载时的同步重试风暴
+_RETRY_BACKOFF_CAP = 4.0
+
+
+def _retry_delay(attempt: int) -> float:
+    """第 attempt 次失败后的等待：0.3 * 2^attempt，封顶 _RETRY_BACKOFF_CAP，
+    叠加 0~0.25s 抖动，打散并发请求的重试时刻。"""
+    import random
+    base = min(0.3 * (2 ** attempt), _RETRY_BACKOFF_CAP)
+    return base + random.uniform(0, 0.25)
 
 MONITOR_AUTH_EXACT_PATHS = {
     "/",
@@ -145,6 +160,12 @@ LOGS_DEBUG = _build_debug_dir()
 
 app = FastAPI(title="Anthropic+OpenAI Proxy (FastAPI)")
 
+
+@app.on_event("shutdown")
+async def _shutdown_http_clients():
+    """进程退出时关闭所有按 base_url 缓存的共享 httpx client。"""
+    await close_http_clients()
+
 class MonitorAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not _is_monitor_auth_enabled() or not _is_monitor_path(request.url.path):
@@ -200,6 +221,94 @@ async def get_x_auth_token(request) -> str:
             ack = ack.split('Bearer ')[1].strip()
             return ack
     return ''
+
+
+def _append_query(url: str, req: "Request") -> str:
+    """把客户端原始请求的 query string 原样拼到上游 URL 上。
+
+    实现「原样全部透传」：客户端发 /v1/messages?beta=true，转发到上游时也带上
+    ?beta=true。上游 URL 一般不含 query，用 ? 拼接；若已带 query 则用 &。
+    """
+    q = req.url.query
+    if not q:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{q}"
+
+
+# ---------------------------------------------------------------------------
+# 未定义路由 catch-all 透传：客户端打代理上没定义的路径（如 /test/、/v1/models）
+# 时，原样反向代理到「上游域名根 + 该路径」。仍走客户端鉴权 + 渠道选择 + 换上游 key。
+# ---------------------------------------------------------------------------
+
+# 逐跳（hop-by-hop）头：只在单跳连接内有意义，转发时必须剔除，否则会破坏转发。
+_HOP_BY_HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade",
+    # host / content-length 让 httpx 按目标重新计算；client 鉴权头由上游 key 覆盖
+    "host", "content-length",
+}
+
+# catch-all 不该转发的「本地功能」路径前缀。已定义的具体路由本就优先于 catch-all
+# 不会落到这里；这里兜底那些「本地功能的未定义子路径」（如 /query/x、/failures/x）。
+# 后台 /api/*、/metrics/*、/keys/* 等已被 MonitorAuthMiddleware 在更前面拦下。
+_PASSTHROUGH_EXCLUDE_PREFIXES = (
+    "query", "history", "failures", "register", "login", "logout",
+    "invite", "hi", "docs", "redoc", "openapi.json", "favicon.ico",
+    "static", "api", "metrics", "logs", "sessions", "keys", "channels",
+    "users", "backup", "thinking",
+)
+
+
+def _should_passthrough(full_path: str) -> bool:
+    """判断未匹配路径是否应转发上游（True）还是返回本地 404（False）。"""
+    if not full_path:
+        return False  # 根路径由 "/" 路由处理，不该到这
+    first = full_path.split("/", 1)[0].split("?", 1)[0]
+    if first in _PASSTHROUGH_EXCLUDE_PREFIXES:
+        return False
+    if _is_monitor_path("/" + full_path):
+        return False
+    return True
+
+
+def _upstream_root(channel: Optional[dict]) -> str:
+    """从渠道或 env 的 upstream_url 提取「域名根」(scheme://netloc)，去掉 /v1 等后缀。"""
+    base = ""
+    if channel and channel.get("upstream_url"):
+        base = channel["upstream_url"]
+    else:
+        base = os.environ.get("UPSTREAM_URL", "")
+    p = urlparse(base)
+    if p.scheme and p.netloc:
+        return f"{p.scheme}://{p.netloc}"
+    # 兜底：upstream_url 不规范时，退回原字符串去掉尾部路径
+    return base.rstrip("/")
+
+
+def _filter_forward_headers(headers, upstream_key: str) -> dict:
+    """透传客户端请求头，剔除逐跳头，并把鉴权头换成上游 key。"""
+    out = {}
+    for k, v in headers.items():
+        if k.lower() in _HOP_BY_HOP_HEADERS:
+            continue
+        if k.lower() in ("authorization", "x-api-key"):
+            continue  # 下面统一用上游 key 覆盖
+        out[k] = v
+    if upstream_key:
+        out["Authorization"] = f"Bearer {upstream_key}"
+        out["x-api-key"] = upstream_key
+    return out
+
+
+def _filter_response_headers(headers) -> dict:
+    """透传上游响应头，剔除逐跳头。
+
+    我们用 aiter_raw() 原样转发未解压的响应体，所以要**保留** content-encoding
+    （如 gzip），让客户端自己解压。但 content-length / transfer-encoding 要剔除：
+    流式回传由 Starlette 用 chunked 编码，长度不再固定。
+    """
+    return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP_HEADERS}
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -463,6 +572,13 @@ async def health():
     return {"LLM_PROXY": "hello !!!"}
 
 
+@app.get("/metrics/live")
+async def metrics_live():
+    """实时在途请求快照：当前并发数 + 各阶段分布（connecting/waiting_upstream/streaming）。
+    受 /metrics 监控鉴权保护。单 worker 反映本进程；多 worker 需在读取端聚合各进程。"""
+    return inflight.snapshot()
+
+
 @app.get("/login")
 async def monitor_login_page(request: Request, next: str = "/", add: str = ""):
     if not _is_monitor_auth_enabled():
@@ -610,6 +726,16 @@ def _dump_json(path: str, obj):
         f.write("\n")
 
 
+async def _dump_json_async(path: str, obj):
+    """_dump_json 的异步包装：把同步的 JSON 序列化+磁盘写入丢到线程池，
+    不阻塞事件循环。请求体常达数百 KB，indent+sort_keys 序列化+落盘的耗时
+    在高并发下会冻结整个 worker，导致其它请求超时断连。"""
+    try:
+        await asyncio.to_thread(_dump_json, path, obj)
+    except Exception as ex:
+        logging.warning(f"Failed to dump json async ({path}): {ex}")
+
+
 def _resp_to_obj(r):  # httpx.Response -> dict
     base = {"status_code": r.status_code, "headers": dict(r.headers)}
     try:
@@ -630,7 +756,16 @@ init_session_db(SERVICE_LOG_DIR)
 load_custom_models()
 mark_export_interrupted()
 load_index(LOGS_DIR)
-start_metrics_scanner(os.path.dirname(LOGS_DIR))
+# 多 worker：仅 leader 跑 metrics 扫描线程，避免 N 个进程重复写 rpm.log/scanner_state.json
+from utils.leader_lock import try_acquire_leader, is_leader
+_IS_LEADER = try_acquire_leader(os.path.join(SERVICE_LOG_DIR, "scanner.lock"))
+if _IS_LEADER:
+    start_metrics_scanner(os.path.dirname(LOGS_DIR))
+else:
+    logging.info("metrics scanner skipped (not leader worker, pid=%s)", os.getpid())
+# 多 worker：启用 in-flight 跨进程心跳，让 /metrics/live 聚合所有 worker 的在途请求。
+# 单 worker 下也无害（只是多写一份 {pid}.json 心跳文件）。
+inflight.enable_cross_process(SERVICE_LOG_DIR)
 
 
 def _sanitize_messages(messages: Any) -> Any:
@@ -723,13 +858,15 @@ async def anthropic_messages(req: Request):
 
     # 保存请求/响应日志（anthropic 直通）
     os.makedirs(LOGS_DIR, exist_ok=True)
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3] + f"-{os.getpid()}"  # 毫秒+PID，防多worker并发同毫秒撞名
+    _t_start = time.perf_counter()  # 链路计时起点
     req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     _upstream_base = _channel["upstream_url"].rstrip("/") if _channel and _channel.get("upstream_url") else os.environ['UPSTREAM_URL'].rstrip('/')
     upstream_url = f"{_upstream_base}/messages"
+    upstream_url = _append_query(upstream_url, req)  # 原样透传客户端 query（如 ?beta=true）
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
@@ -751,8 +888,8 @@ async def anthropic_messages(req: Request):
     # headers = dict(req.headers)
     headers = dict()
     headers.update(upstream_headers)
-    _dump_json(head_path, headers)
-    _dump_json(req_path, body)
+    await _dump_json_async(head_path, headers)
+    await _dump_json_async(req_path, body)
     # ---- non-stream ----
     if not stream:
         r = None
@@ -760,16 +897,18 @@ async def anthropic_messages(req: Request):
         success = False
         final_valid = False
         upstream_attempts = 0
+        _t_upstream_ms = None
+        _tracker = inflight.Tracker()
         try:
-            async with httpx.AsyncClient(
-                    verify=verify,
-                    timeout=httpx.Timeout(500.0),
-                    trust_env=TRUST_ENV,
-            ) as client:
+            async with shared_client(_upstream_base, verify, TRUST_ENV) as client:
                 for attempt in range(MAX_RETRIES):
                     upstream_attempts += 1
                     try:
+                        _t_up0 = time.perf_counter()
+                        _tracker.enter("waiting_upstream")
                         r = await client.post(upstream_url, headers=upstream_headers, json=body)
+                        _tracker.done()
+                        _t_upstream_ms = int((time.perf_counter() - _t_up0) * 1000)
                         last_exception = None
                         if r.status_code == 200:
                             try:
@@ -790,24 +929,32 @@ async def anthropic_messages(req: Request):
                             _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                             logging.warning(f"Attempt {attempt} non-200 (anthropic non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
+                        _tracker.done()  # 释放在途计数，避免异常泄漏
                         last_exception = e
-                        logging.warning(f"Attempt {attempt} upstream error (anthropic non-stream): {e}")
+                        _t_up_type = type(e).__name__  # 记录异常类型，空消息异常也能区分
+                        logging.warning(f"Attempt {attempt} upstream error (anthropic non-stream): {_t_up_type}: {e}")
 
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_retry_delay(attempt))
                         x_auth_token = await get_x_auth_token(req)
                         upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
         except Exception as e:
+            _tracker.done()
             last_exception = e
             logging.error(f"Failed to create httpx client (anthropic non-stream): {e}")
+
+        _timing = {
+            "t_upstream_ms": _t_upstream_ms,
+            "t_total_ms": int((time.perf_counter() - _t_start) * 1000),
+        }
 
         if not success:
             if r is not None:
                 # 透传上游最后一次错误响应
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (anthropic non-stream), passing through: {error_msg}")
-                _dump_json(res_path, _resp_to_obj(r))
-                append_index_anthropic(ts, req_path, upstream_attempts, False, LOGS_DIR, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
+                await _dump_json_async(res_path, _resp_to_obj(r))
+                await append_index_anthropic_async(ts, req_path, upstream_attempts, False, LOGS_DIR, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model), timing=_timing)
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -816,14 +963,14 @@ async def anthropic_messages(req: Request):
             else:
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (anthropic non-stream): {error_msg}")
-                _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                append_index_anthropic(ts, req_path, upstream_attempts, False, LOGS_DIR, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
+                await _dump_json_async(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+                await append_index_anthropic_async(ts, req_path, upstream_attempts, False, LOGS_DIR, model, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model), timing=_timing)
                 return JSONResponse(
                     status_code=502,
                     content={"type": "error", "error": {"type": "max_retries_exceeded", "message": f"上游多次失败({MAX_RETRIES}次): {error_msg}"}},
                 )
 
-        _dump_json(res_path, _resp_to_obj(r))
+        await _dump_json_async(res_path, _resp_to_obj(r))
         tok_in, tok_out, cache_in = 0, 0, 0
         usage = {}
         try:
@@ -834,7 +981,7 @@ async def anthropic_messages(req: Request):
             cache_in = (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
         except Exception:
             pass
-        append_index_anthropic(ts, req_path, upstream_attempts, final_valid, LOGS_DIR, model, tok_in, tok_out, cache_in=cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
+        await append_index_anthropic_async(ts, req_path, upstream_attempts, final_valid, LOGS_DIR, model, tok_in, tok_out, cache_in=cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage, timing=_timing)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -851,17 +998,16 @@ async def anthropic_messages(req: Request):
         last_retry_status = None
         retry_headers = upstream_headers
         retry_token = x_auth_token
+        _t_ttfb_ms = None          # 首字节(message_start)耗时
+        _tracker = inflight.Tracker()
 
         try:
-            async with httpx.AsyncClient(
-                    verify=verify,
-                    timeout=httpx.Timeout(500.0),
-                    trust_env=TRUST_ENV,
-            ) as client:
+            async with shared_client(_upstream_base, verify, TRUST_ENV) as client:
                 # Retry loop: only retries BEFORE any bytes are yielded to the client
                 for attempt in range(MAX_RETRIES):
                     upstream_attempts += 1
                     try:
+                        _tracker.switch("waiting_upstream")
                         async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
                             up_chunks.append({
                                 "type": "anthropic_passthrough_sse_meta",
@@ -877,7 +1023,7 @@ async def anthropic_messages(req: Request):
                                 _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, "rate_limit", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} rate limit (anthropic stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
-                                    await asyncio.sleep(0.5)
+                                    await asyncio.sleep(_retry_delay(attempt))
                                     retry_token = await get_x_auth_token(req)
                                     retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                 continue
@@ -917,6 +1063,9 @@ async def anthropic_messages(req: Request):
                                                     if json.loads(data_part).get("type") == "message_start":
                                                         committed = True
                                                         connection_established = True
+                                                        if _t_ttfb_ms is None:
+                                                            _t_ttfb_ms = int((time.perf_counter() - _t_start) * 1000)
+                                                        _tracker.switch("streaming")  # 进入透传阶段
                                                         yield bytes(raw_buf)
                                                         raw_buf = bytearray()
                                                         break
@@ -930,7 +1079,7 @@ async def anthropic_messages(req: Request):
                                     logging.warning(f"Attempt {attempt} no message_start in SSE (anthropic stream), retrying" + (f" -> debug: {_dbg}" if _dbg else ""))
                                     connection_established = False
                                     up_chunks.clear()
-                                    await asyncio.sleep(0.5)
+                                    await asyncio.sleep(_retry_delay(attempt))
                                     retry_token = await get_x_auth_token(req)
                                     retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                     continue
@@ -957,7 +1106,7 @@ async def anthropic_messages(req: Request):
                         last_exception = e
                         logging.warning(f"Attempt {attempt} upstream error (anthropic stream): {e}")
                         if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(_retry_delay(attempt))
                             retry_token = await get_x_auth_token(req)
                             retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
 
@@ -972,7 +1121,8 @@ async def anthropic_messages(req: Request):
             err_event = {"type": "error", "error": {"type": "connection_error", "message": str(e)}}
             yield f"event: error\ndata: {json.dumps(err_event, ensure_ascii=False)}\n\n".encode("utf-8")
         finally:
-            _dump_json(res_path, {"type": "anthropic_passthrough_sse_capture", "chunks": up_chunks})
+            _tracker.done()  # 释放在途计数（正常结束 / 客户端断开 / 异常都会走到）
+            await _dump_json_async(res_path, {"type": "anthropic_passthrough_sse_capture", "chunks": up_chunks})
             _tok_in, _tok_out, _cache_in = 0, 0, 0
             _usage_raw = {}
             for _c in up_chunks:
@@ -983,7 +1133,11 @@ async def anthropic_messages(req: Request):
                         _tok_in = _u.get("input_tokens") or 0
                         _tok_out = _u.get("output_tokens") or 0
                         _cache_in = (_u.get("cache_read_input_tokens") or 0) + (_u.get("cache_creation_input_tokens") or 0)
-            append_index_anthropic(ts, req_path, upstream_attempts, connection_established, LOGS_DIR, model, _tok_in, _tok_out, cache_in=_cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "")
+            _timing = {
+                "t_ttfb_ms": _t_ttfb_ms,
+                "t_total_ms": int((time.perf_counter() - _t_start) * 1000),
+            }
+            await append_index_anthropic_async(ts, req_path, upstream_attempts, connection_established, LOGS_DIR, model, _tok_in, _tok_out, cache_in=_cache_in, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "", timing=_timing)
 
 
     return StreamingResponse(
@@ -1037,13 +1191,15 @@ async def openai_chat_completions(req: Request):
 
     # 保存请求/响应日志（OpenAI 直通）
     os.makedirs(LOGS_DIR, exist_ok=True)
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]  # 带毫秒，避免并发重名
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3] + f"-{os.getpid()}"  # 毫秒+PID，防多worker并发同毫秒撞名
+    _t_start = time.perf_counter()  # 链路计时起点
     req_path = os.path.join(LOGS_DIR, f"{ts}-req.json")
     res_path = os.path.join(LOGS_DIR, f"{ts}-res.json")
     head_path = os.path.join(LOGS_DIR, f"{ts}-headers.json")
 
     _upstream_base = _channel["upstream_url"].rstrip("/") if _channel and _channel.get("upstream_url") else os.environ['UPSTREAM_URL'].rstrip('/')
     upstream_url = f"{_upstream_base}/chat/completions"
+    upstream_url = _append_query(upstream_url, req)  # 原样透传客户端 query
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
@@ -1059,9 +1215,9 @@ async def openai_chat_completions(req: Request):
 
     headers = dict(req.headers)
     headers.update(upstream_headers)
-    _dump_json(head_path, headers)
-    _dump_json(head_path, dict(req.headers))
-    _dump_json(req_path, body)
+    await _dump_json_async(head_path, headers)
+    await _dump_json_async(head_path, dict(req.headers))
+    await _dump_json_async(req_path, body)
 
     # ---- non-stream ----
     if not stream:
@@ -1069,16 +1225,18 @@ async def openai_chat_completions(req: Request):
         last_exception = None
         success = False
         upstream_attempts = 0
+        _t_upstream_ms = None
+        _tracker = inflight.Tracker()
         try:
-            async with httpx.AsyncClient(
-                    verify=verify,
-                    timeout=httpx.Timeout(500.0),
-                    trust_env=TRUST_ENV,
-            ) as client:
+            async with shared_client(_upstream_base, verify, TRUST_ENV) as client:
                 for attempt in range(MAX_RETRIES):
                     upstream_attempts += 1
                     try:
+                        _t_up0 = time.perf_counter()
+                        _tracker.enter("waiting_upstream")
                         r = await client.post(upstream_url, headers=upstream_headers, json=body)
+                        _tracker.done()
+                        _t_upstream_ms = int((time.perf_counter() - _t_up0) * 1000)
                         last_exception = None
                         if r.status_code == 200:
                             success = True
@@ -1087,24 +1245,28 @@ async def openai_chat_completions(req: Request):
                         _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                         logging.warning(f"Attempt {attempt} non-200 (openai non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
+                        _tracker.done()
                         last_exception = e
-                        logging.warning(f"Attempt {attempt} upstream error (openai non-stream): {e}")
+                        logging.warning(f"Attempt {attempt} upstream error (openai non-stream): {type(e).__name__}: {e}")
 
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_retry_delay(attempt))
                         x_auth_token = await get_x_auth_token(req)
                         upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
         except Exception as e:
+            _tracker.done()
             last_exception = e
             logging.error(f"Failed to create httpx client (openai non-stream): {e}")
+
+        _timing = {"t_upstream_ms": _t_upstream_ms, "t_total_ms": int((time.perf_counter() - _t_start) * 1000)}
 
         if not success:
             if r is not None:
                 # 透传上游最后一次错误响应
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (openai non-stream), passing through: {error_msg}")
-                _dump_json(res_path, _resp_to_obj(r))
-                append_index_openai(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
+                await _dump_json_async(res_path, _resp_to_obj(r))
+                await append_index_openai_async(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model), timing=_timing)
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -1113,14 +1275,14 @@ async def openai_chat_completions(req: Request):
             else:
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (openai non-stream): {error_msg}")
-                _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                append_index_openai(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model))
+                await _dump_json_async(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+                await append_index_openai_async(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, debug_file=debug_filename(ts, model), timing=_timing)
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
                 )
 
-        _dump_json(res_path, _resp_to_obj(r))
+        await _dump_json_async(res_path, _resp_to_obj(r))
         tok_in, tok_out = 0, 0
         usage = {}
         try:
@@ -1130,7 +1292,7 @@ async def openai_chat_completions(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        append_index_openai(ts, req_path, LOGS_DIR, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage)
+        await append_index_openai_async(ts, req_path, LOGS_DIR, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=usage, timing=_timing)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1147,16 +1309,15 @@ async def openai_chat_completions(req: Request):
         last_retry_status = None
         retry_headers = upstream_headers
         retry_token = x_auth_token
+        _t_ttfb_ms = None
+        _tracker = inflight.Tracker()
 
         try:
-            async with httpx.AsyncClient(
-                    verify=verify,
-                    timeout=httpx.Timeout(500.0),
-                    trust_env=TRUST_ENV,
-            ) as client:
+            async with shared_client(_upstream_base, verify, TRUST_ENV) as client:
                 for attempt in range(MAX_RETRIES):
                     upstream_attempts += 1
                     try:
+                        _tracker.switch("waiting_upstream")
                         async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
                             up_chunks.append({
                                 "type": "openai_passthrough_sse_meta",
@@ -1173,7 +1334,7 @@ async def openai_chat_completions(req: Request):
                                 _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} non-200 (openai stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
-                                    await asyncio.sleep(0.5)
+                                    await asyncio.sleep(_retry_delay(attempt))
                                     retry_token = await get_x_auth_token(req)
                                     retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                 continue
@@ -1183,6 +1344,9 @@ async def openai_chat_completions(req: Request):
                             # Pure pass-through: tee raw bytes to client and capture for logging
                             raw_buf = bytearray()
                             async for raw in r.aiter_bytes():
+                                if _t_ttfb_ms is None:
+                                    _t_ttfb_ms = int((time.perf_counter() - _t_start) * 1000)
+                                    _tracker.switch("streaming")
                                 raw_buf.extend(raw)
                                 yield raw
 
@@ -1199,12 +1363,12 @@ async def openai_chat_completions(req: Request):
 
                     except Exception as e:
                         if connection_established:
-                            logging.warning(f"Stream interrupted (openai stream): {e}")
+                            logging.warning(f"Stream interrupted (openai stream): {type(e).__name__}: {e}")
                             return
                         last_exception = e
-                        logging.warning(f"Attempt {attempt} upstream error (openai stream): {e}")
+                        logging.warning(f"Attempt {attempt} upstream error (openai stream): {type(e).__name__}: {e}")
                         if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(_retry_delay(attempt))
                             retry_token = await get_x_auth_token(req)
                             retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
 
@@ -1221,8 +1385,9 @@ async def openai_chat_completions(req: Request):
             yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
             yield b"data: [DONE]\n\n"
         finally:
+            _tracker.done()
             # 无论正常/异常/客户端断开，尽最大努力落盘
-            _dump_json(res_path, {"type": "openai_passthrough_sse_capture", "chunks": up_chunks})
+            await _dump_json_async(res_path, {"type": "openai_passthrough_sse_capture", "chunks": up_chunks})
             # 统计 token（从 usage chunk 提取）
             _tok_in, _tok_out = 0, 0
             _usage_raw = {}
@@ -1233,7 +1398,8 @@ async def openai_chat_completions(req: Request):
                         _usage_raw.update(_u)
                     _tok_in = _tok_in or (_u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("completion_tokens") or 0)
-            append_index_openai(ts, req_path, LOGS_DIR, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "")
+            _timing = {"t_ttfb_ms": _t_ttfb_ms, "t_total_ms": int((time.perf_counter() - _t_start) * 1000)}
+            await append_index_openai_async(ts, req_path, LOGS_DIR, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, messages=body.get("messages", []), channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "", timing=_timing)
 
     return StreamingResponse(
         sse_passthrough(),
@@ -1291,6 +1457,7 @@ async def openai_responses(req: Request):
 
     _upstream_base = _channel["upstream_url"].rstrip("/") if _channel and _channel.get("upstream_url") else os.environ['UPSTREAM_URL'].rstrip('/')
     upstream_url = f"{_upstream_base}/responses"
+    upstream_url = _append_query(upstream_url, req)  # 原样透传客户端 query
     verify = _ssl_verify()
 
     x_auth_token = await get_x_auth_token(req)
@@ -1307,8 +1474,8 @@ async def openai_responses(req: Request):
 
     headers = dict()
     headers.update(upstream_headers)
-    _dump_json(head_path, headers)
-    _dump_json(req_path, body)
+    await _dump_json_async(head_path, headers)
+    await _dump_json_async(req_path, body)
 
     input_data = body.get("input")
 
@@ -1318,16 +1485,18 @@ async def openai_responses(req: Request):
         last_exception = None
         success = False
         upstream_attempts = 0
+        _t_upstream_ms = None
+        _tracker = inflight.Tracker()
         try:
-            async with httpx.AsyncClient(
-                    verify=verify,
-                    timeout=httpx.Timeout(500.0),
-                    trust_env=TRUST_ENV,
-            ) as client:
+            async with shared_client(_upstream_base, verify, TRUST_ENV) as client:
                 for attempt in range(MAX_RETRIES):
                     upstream_attempts += 1
                     try:
+                        _t_up0 = time.perf_counter()
+                        _tracker.enter("waiting_upstream")
                         r = await client.post(upstream_url, headers=upstream_headers, json=body)
+                        _tracker.done()
+                        _t_upstream_ms = int((time.perf_counter() - _t_up0) * 1000)
                         last_exception = None
                         if r.status_code == 200:
                             success = True
@@ -1335,23 +1504,27 @@ async def openai_responses(req: Request):
                         _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", r.text[:2000])
                         logging.warning(f"Attempt {attempt} non-200 (responses non-stream): {r.status_code} {r.text[:200]}" + (f" -> debug: {_dbg}" if _dbg else ""))
                     except Exception as e:
+                        _tracker.done()
                         last_exception = e
-                        logging.warning(f"Attempt {attempt} upstream error (responses non-stream): {e}")
+                        logging.warning(f"Attempt {attempt} upstream error (responses non-stream): {type(e).__name__}: {e}")
 
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_retry_delay(attempt))
                         x_auth_token = await get_x_auth_token(req)
                         upstream_headers = build_upstream_headers(x_auth_token, model, upstream_key_override=_key_override)
         except Exception as e:
+            _tracker.done()
             last_exception = e
             logging.error(f"Failed to create httpx client (responses non-stream): {e}")
+
+        _timing = {"t_upstream_ms": _t_upstream_ms, "t_total_ms": int((time.perf_counter() - _t_start) * 1000)}
 
         if not success:
             if r is not None:
                 error_msg = f"HTTP {r.status_code}"
                 logging.error(f"All retries exhausted (responses non-stream), passing through: {error_msg}")
-                _dump_json(res_path, _resp_to_obj(r))
-                append_index_responses(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key, debug_file=debug_filename(ts, model))
+                await _dump_json_async(res_path, _resp_to_obj(r))
+                await append_index_responses_async(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key, debug_file=debug_filename(ts, model), timing=_timing)
                 return Response(
                     content=r.content,
                     status_code=r.status_code,
@@ -1360,14 +1533,14 @@ async def openai_responses(req: Request):
             else:
                 error_msg = str(last_exception) if last_exception else "unknown"
                 logging.error(f"All retries exhausted (responses non-stream): {error_msg}")
-                _dump_json(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
-                append_index_responses(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key, debug_file=debug_filename(ts, model))
+                await _dump_json_async(res_path, {"error": "max_retries_exceeded", "detail": error_msg})
+                await append_index_responses_async(ts, req_path, LOGS_DIR, model=model, success=False, api_key=_api_key, input_data=input_data, channel_key=_channel_key, debug_file=debug_filename(ts, model), timing=_timing)
                 return JSONResponse(
                     status_code=502,
                     content={"error": {"message": f"上游多次失败({MAX_RETRIES}次): {error_msg}", "type": "max_retries_exceeded"}},
                 )
 
-        _dump_json(res_path, _resp_to_obj(r))
+        await _dump_json_async(res_path, _resp_to_obj(r))
         tok_in, tok_out = 0, 0
         usage = {}
         try:
@@ -1377,7 +1550,7 @@ async def openai_responses(req: Request):
             tok_out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
         except Exception:
             pass
-        append_index_responses(ts, req_path, LOGS_DIR, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=usage)
+        await append_index_responses_async(ts, req_path, LOGS_DIR, model=model, tok_in=tok_in, tok_out=tok_out, success=r.status_code < 400, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=usage, timing=_timing)
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -1394,16 +1567,15 @@ async def openai_responses(req: Request):
         last_retry_status = None
         retry_headers = upstream_headers
         retry_token = x_auth_token
+        _t_ttfb_ms = None
+        _tracker = inflight.Tracker()
 
         try:
-            async with httpx.AsyncClient(
-                    verify=verify,
-                    timeout=httpx.Timeout(500.0),
-                    trust_env=TRUST_ENV,
-            ) as client:
+            async with shared_client(_upstream_base, verify, TRUST_ENV) as client:
                 for attempt in range(MAX_RETRIES):
                     upstream_attempts += 1
                     try:
+                        _tracker.switch("waiting_upstream")
                         async with client.stream("POST", upstream_url, headers=retry_headers, json=body) as r:
                             up_chunks.append({
                                 "type": "responses_passthrough_sse_meta",
@@ -1419,7 +1591,7 @@ async def openai_responses(req: Request):
                                 _dbg = await write_debug_async(LOGS_DEBUG, ts, attempt, model, f"http_{r.status_code}", last_retry_err_text[:2000])
                                 logging.warning(f"Attempt {attempt} non-200 (responses stream): {r.status_code}" + (f" -> debug: {_dbg}" if _dbg else ""))
                                 if attempt < MAX_RETRIES - 1:
-                                    await asyncio.sleep(0.5)
+                                    await asyncio.sleep(_retry_delay(attempt))
                                     retry_token = await get_x_auth_token(req)
                                     retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
                                 continue
@@ -1429,6 +1601,9 @@ async def openai_responses(req: Request):
                             # Pure pass-through: tee raw bytes to client and capture for logging
                             raw_buf = bytearray()
                             async for raw in r.aiter_bytes():
+                                if _t_ttfb_ms is None:
+                                    _t_ttfb_ms = int((time.perf_counter() - _t_start) * 1000)
+                                    _tracker.switch("streaming")
                                 raw_buf.extend(raw)
                                 yield raw
 
@@ -1445,12 +1620,12 @@ async def openai_responses(req: Request):
 
                     except Exception as e:
                         if connection_established:
-                            logging.warning(f"Stream interrupted (responses stream): {e}")
+                            logging.warning(f"Stream interrupted (responses stream): {type(e).__name__}: {e}")
                             return
                         last_exception = e
-                        logging.warning(f"Attempt {attempt} upstream error (responses stream): {e}")
+                        logging.warning(f"Attempt {attempt} upstream error (responses stream): {type(e).__name__}: {e}")
                         if attempt < MAX_RETRIES - 1:
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(_retry_delay(attempt))
                             retry_token = await get_x_auth_token(req)
                             retry_headers = build_upstream_headers(retry_token, model, upstream_key_override=_key_override)
 
@@ -1467,7 +1642,8 @@ async def openai_responses(req: Request):
             yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n".encode("utf-8")
             yield b"data: [DONE]\n\n"
         finally:
-            _dump_json(res_path, {"type": "responses_passthrough_sse_capture", "chunks": up_chunks})
+            _tracker.done()
+            await _dump_json_async(res_path, {"type": "responses_passthrough_sse_capture", "chunks": up_chunks})
             _tok_in, _tok_out = 0, 0
             _usage_raw = {}
             for _c in up_chunks:
@@ -1477,7 +1653,8 @@ async def openai_responses(req: Request):
                         _usage_raw.update(_u)
                     _tok_in = _tok_in or (_u.get("input_tokens") or _u.get("prompt_tokens") or 0)
                     _tok_out = _tok_out or (_u.get("output_tokens") or _u.get("completion_tokens") or 0)
-            append_index_responses(ts, req_path, LOGS_DIR, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "")
+            _timing = {"t_ttfb_ms": _t_ttfb_ms, "t_total_ms": int((time.perf_counter() - _t_start) * 1000)}
+            await append_index_responses_async(ts, req_path, LOGS_DIR, model=model, tok_in=_tok_in, tok_out=_tok_out, success=connection_established, api_key=_api_key, input_data=input_data, channel_key=_channel_key, usage=_usage_raw, debug_file=debug_filename(ts, model) if not connection_established else "", timing=_timing)
 
     return StreamingResponse(
         responses_sse_passthrough(),
@@ -1643,6 +1820,73 @@ register_debug_routes(app, LOGS_DEBUG, STARTUP_DATE_TAG)
 register_reflection_routes(app, templates)
 
 
+# ---------------------------------------------------------------------------
+# catch-all 透传路由：必须在所有具体路由注册之后。FastAPI「先注册先匹配」，
+# 已定义的具体路径会优先命中，只有未定义路径落到这里。
+# ---------------------------------------------------------------------------
+@app.api_route(
+    "/{full_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+)
+async def passthrough(full_path: str, req: Request):
+    """未定义路径 → 原样反向代理到上游域名根 + 该路径（仍鉴权 + 换上游 key）。"""
+    if not _should_passthrough(full_path):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+    # 1) 客户端鉴权（与 /v1/messages 一致，不过返回 401）
+    _api_key = await validate_api_key(req)
+    # 2) 选渠道 + 离线回退
+    _channel = resolve_upstream_channel(_api_key)
+    if _channel and _channel.get("_error"):
+        return JSONResponse(
+            {"error": {"type": "channel_error", "message": "所有绑定渠道均已离线"}},
+            status_code=503,
+        )
+
+    # 3) 上游域名根 + 原始路径 + 原始 query
+    root = _upstream_root(_channel)
+    target = f"{root}/{full_path}"
+    target = _append_query(target, req)
+
+    # 4) 原样透传 method + body + headers（换上游 key、剔逐跳头）
+    upstream_key = _channel.get("upstream_key", "") if _channel else os.getenv("UPSTREAM_API_KEY", "")
+    fwd_headers = _filter_forward_headers(req.headers, upstream_key)
+    body = await req.body()
+    verify = _ssl_verify()
+
+    ts = datetime.now().strftime("%H:%M:%S")
+    _t0 = time.perf_counter()
+    try:
+        client = await get_client(root, verify, TRUST_ENV)
+        upstream_req = client.build_request(
+            req.method, target, headers=fwd_headers, content=body or None,
+        )
+        r = await client.send(upstream_req, stream=True)
+    except Exception as ex:
+        logging.warning("passthrough %s %s -> upstream error: %s", req.method, full_path, ex)
+        return JSONResponse(
+            {"error": {"type": "upstream_error", "message": str(ex)}}, status_code=502,
+        )
+
+    async def _body_iter():
+        try:
+            async for chunk in r.aiter_raw():
+                yield chunk
+        finally:
+            await r.aclose()
+            logging.info(
+                "passthrough %s /%s -> %s [%s] %dms",
+                req.method, full_path, target, r.status_code,
+                int((time.perf_counter() - _t0) * 1000),
+            )
+
+    return StreamingResponse(
+        _body_iter(),
+        status_code=r.status_code,
+        headers=_filter_response_headers(r.headers),
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     import argparse
@@ -1690,4 +1934,23 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    uvicorn.run("app:app", host=host, port=port, log_level="info")
+    # 多 worker：PROXY_WORKERS 控制进程数，默认 1（行为与单 worker 完全一致）。
+    # >1 时 uvicorn 用 import string "app:app" fork 多个 worker 进程，吃满多核。
+    workers = int(os.getenv("PROXY_WORKERS", "1"))
+    if workers > 1:
+        logging.info("starting with %d workers", workers)
+
+    # 连接阀门（默认不限制，行为与旧版一致；配置后才生效）：
+    #   PROXY_MAX_CONNS       并发连接上限，超出的新连接直接 503，防止无限收连接拖垮事件循环
+    #   PROXY_KEEPALIVE_TIMEOUT 空闲 keep-alive 连接回收秒数（默认 uvicorn 为 5s）
+    run_kwargs = {}
+    _max_conns = os.getenv("PROXY_MAX_CONNS", "").strip()
+    if _max_conns.isdigit() and int(_max_conns) > 0:
+        run_kwargs["limit_concurrency"] = int(_max_conns)
+        logging.info("limit_concurrency=%s", _max_conns)
+    _ka = os.getenv("PROXY_KEEPALIVE_TIMEOUT", "").strip()
+    if _ka.isdigit() and int(_ka) > 0:
+        run_kwargs["timeout_keep_alive"] = int(_ka)
+        logging.info("timeout_keep_alive=%s", _ka)
+
+    uvicorn.run("app:app", host=host, port=port, log_level="info", workers=workers, **run_kwargs)

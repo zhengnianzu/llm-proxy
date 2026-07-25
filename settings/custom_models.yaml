@@ -23,6 +23,26 @@ prefixes:
         display: summarized
       output_config:
         effort: high
+  # TK:<模型名> -> 注入 adaptive thinking + 顶层 effort=high
+  # 对应 SDK 调用：thinking={"type":"adaptive"}, effort="high"
+  TK:
+    params:
+      thinking:
+        type: adaptive
+      effort: high
+  # OpenAI 兼容思考（走 /v1/chat/completions 上游）：
+  # OAI:<模型名> -> 注入顶层 reasoning_effort=high
+  # 对应请求 body：{"reasoning_effort": "high"}
+  OAI:
+    params:
+      reasoning_effort: high
+  # OpenAI Responses API（走 /v1/responses 上游）：
+  # OAIR:<模型名> -> 注入 reasoning={"effort": "high"}
+  # 对应请求 body：{"reasoning": {"effort": "high"}}
+  OAIR:
+    params:
+      reasoning:
+        effort: high
 
 # 精确别名示例（如需把某别名映射到不同名的上游模型，在此配置）：
 # models:

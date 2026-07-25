@@ -56,24 +56,33 @@ def _migrate_add_is_default():
     conn = _conn
     cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
     if "is_default" not in cols:
-        conn.execute("ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
+        try:
+            conn.execute("ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # 多 worker 并发迁移，另一进程已加列
 
 
 def _migrate_add_invite_code():
     conn = _conn
     cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
     if "invite_code" not in cols:
-        conn.execute("ALTER TABLE channels ADD COLUMN invite_code TEXT NOT NULL DEFAULT ''")
-        conn.commit()
+        try:
+            conn.execute("ALTER TABLE channels ADD COLUMN invite_code TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 def _migrate_add_channel_type():
     conn = _conn
     cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
     if "channel_type" not in cols:
-        conn.execute("ALTER TABLE channels ADD COLUMN channel_type TEXT NOT NULL DEFAULT ''")
-        conn.commit()
+        try:
+            conn.execute("ALTER TABLE channels ADD COLUMN channel_type TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 def _auto_import_env_channel():
@@ -83,15 +92,17 @@ def _auto_import_env_channel():
     key = os.getenv("UPSTREAM_API_KEY", "").strip()
     if not url or not key:
         return
-    existing = conn.execute(
-        "SELECT id FROM channels WHERE upstream_key = ?", (key,)
-    ).fetchone()
-    if existing:
-        return
-    has_default = conn.execute("SELECT 1 FROM channels WHERE is_default = 1").fetchone()
+    # 多 worker 并发启动：用单条原子 INSERT ... WHERE NOT EXISTS 防重复导入。
+    # WAL 下写串行化，第二个 worker 的 NOT EXISTS 会看到第一个已提交的行 → 不会重复插入。
+    # is_default 也在同一语句内判定：库中已有默认渠道则为 0，否则为 1。
     conn.execute(
-        "INSERT INTO channels (name, upstream_url, upstream_key, is_default) VALUES (?, ?, ?, ?)",
-        ("env-default", url, key, 0 if has_default else 1),
+        """
+        INSERT INTO channels (name, upstream_url, upstream_key, is_default)
+        SELECT 'env-default', ?, ?,
+               CASE WHEN EXISTS (SELECT 1 FROM channels WHERE is_default = 1) THEN 0 ELSE 1 END
+        WHERE NOT EXISTS (SELECT 1 FROM channels WHERE upstream_key = ?)
+        """,
+        (url, key, key),
     )
     conn.commit()
 

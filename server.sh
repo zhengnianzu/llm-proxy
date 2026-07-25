@@ -49,7 +49,9 @@ do_start() {
         return 0
     fi
     echo "[server] Starting on ${PROXY_HOST}:${PROXY_PORT} ..."
-    nohup python "$APP" >> "$LOG_FILE" 2>&1 &
+    # setsid: 让 master 成为独立进程组组长（PGID == master PID），
+    # 这样多 worker（PROXY_WORKERS>1）时 stop 能按进程组把 master + 所有 worker 一起停掉。
+    setsid python "$APP" >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     sleep 1
     if is_running; then
@@ -85,14 +87,18 @@ do_stop() {
     fi
     PID=$(cat "$PID_FILE")
     echo "[server] Stopping PID $PID ..."
-    kill "$PID"
+    # 按进程组发信号（负号 = 整个进程组）：master 是组长，master + 所有 worker 一起收到。
+    # 取不到进程组或非组长时退回只对 master 发信号。
+    PGID=$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')
+    _sig() { if [ -n "$PGID" ]; then kill -"$1" -"$PGID" 2>/dev/null || kill -"$1" "$PID" 2>/dev/null; else kill -"$1" "$PID" 2>/dev/null; fi; }
+    _sig TERM
     for i in $(seq 1 10); do
         sleep 0.5
         kill -0 "$PID" 2>/dev/null || break
     done
     if kill -0 "$PID" 2>/dev/null; then
-        echo "[server] Force-killing PID $PID"
-        kill -9 "$PID"
+        echo "[server] Force-killing PID $PID (group $PGID)"
+        _sig KILL
     fi
     rm -f "$PID_FILE"
     wait_port_free

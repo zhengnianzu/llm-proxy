@@ -34,6 +34,9 @@ MODEL_ID=
 PROXY_HOST=127.0.0.1
 PROXY_PORT=4000
 
+# 进程数：默认 1（单 worker）。多核机器可调大以吃满 CPU，详见「多 Worker（多进程）」章节
+PROXY_WORKERS=1
+
 # 其他参数
 SSL_VERIFY=false
 BAN_EXPLORE=false
@@ -240,6 +243,47 @@ services:
 2. CLI 按 env 文件区分服务
 3. stop / restart / logs 可通过 --env 精确作用到某个服务
 ```
+
+## 多 Worker（多进程）
+
+单 worker 是单事件循环、单核，高并发（约 1000+）下 CPU 会跑满成为瓶颈。多核机器可以用多 worker 吃满 CPU。
+
+### 开启方式
+
+在 `.env` 里设置进程数（不设或设为 1 时行为与旧版完全一致）：
+
+```text
+PROXY_WORKERS=4
+```
+
+底层用 `uvicorn.run(..., workers=N)` fork 出 N 个 worker 进程共同监听同一个 `PROXY_PORT`，由内核分发连接。经验值：设为 CPU 核数的一半到全部，例如 16 核先试 `4`~`8`，压测看 CPU 和吞吐再调。
+
+### 多 worker 下的行为说明
+
+改造后多个 worker 之间已做好协调，无需额外配置：
+
+```text
+1. 后台 metrics 扫描线程只在抢到文件锁的那个进程里跑（scanner.lock），
+   避免 N 个进程重复写 rpm.log / rate.log / scanner_state.json
+2. 请求日志文件名带进程号后缀，多 worker 并发落盘不会互相覆盖
+3. /metrics/index-stats 的首次/总体/有效计数改为读磁盘 index 聚合，
+   反映所有 worker 的全局真值（不再只统计单进程）
+4. /metrics/live 的实时在途请求聚合所有存活 worker 的心跳，
+   死掉的 worker 会被自动跳过
+5. 导出任务全局串行执行，取消操作跨 worker 生效
+```
+
+### 停止 / 重启
+
+多 worker 下一个服务是「1 个 master + N 个 worker」共 N+1 个进程。`./app stop`、`./app restart`
+（以及 `server.sh stop/restart`）会按**进程组**停止，master 和所有 worker 一起退出，不会残留
+占端口的孤儿进程 —— 服务启动时用独立 session（master 是进程组组长），停止时对整个进程组发信号。
+
+### 注意
+
+- 多 worker 只在直接 `python app.py` 或 CLI 启动时生效；`PROXY_WORKERS` 通过 `.env` 传入。
+- 每个 worker 是独立进程、独立内存，共享状态都落在磁盘/SQLite 上，因此调大 worker 数不会导致统计错乱。
+- 内存占用大致随 worker 数线性增长，调大前留意机器内存。
 
 ## Session 导出与同步
 
