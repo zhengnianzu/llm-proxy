@@ -403,10 +403,30 @@ class ReflectionService:
         self.workers.stop(run_id)
         db.delete_run(self.config.db_path, run_id)
 
-    def trajectory_list(self, run_id: str, offset: int = 0, limit: int = 0) -> dict:
+    def trajectory_list(self, run_id: str, offset: int = 0, limit: int = 0,
+                        search: str = "") -> dict:
         export_id = db.resolve_export_id(self.config.db_path, run_id)
         if export_id is None:
             return {"items": [], "total": 0}
+        needle = (search or "").strip().lower()
+        if needle:
+            # 跨全部轨迹按首句 q1 / session_id 过滤：一次取全、构建 q1 映射后过滤再分页
+            items = db.list_trajectories(self.config.db_path, export_id, run_id=run_id,
+                                         offset=0, limit=0)
+            q1map: dict = {}
+            try:
+                for s in self.dataset_sessions(export_id, 0, 10 ** 9).get("items", []):
+                    q1map[s.get("session_id", "")] = s.get("q1", "") or ""
+            except Exception:
+                q1map = {}
+            items = [
+                it for it in items
+                if needle in (it.get("session_id", "") or "").lower()
+                or needle in (q1map.get(it.get("session_id", ""), "") or "").lower()
+            ]
+            total = len(items)
+            paged = items[offset:offset + limit] if limit > 0 else items[offset:]
+            return {"items": paged, "total": total}
         total = db.count_trajectories(self.config.db_path, export_id)
         items = db.list_trajectories(self.config.db_path, export_id, run_id=run_id,
                                      offset=offset, limit=limit)
@@ -500,12 +520,24 @@ class ReflectionService:
                        "session_report.html", "session_report.md", "session_report.xlsx"}
 
     def dataset_sessions(self, record_id: int, offset: int = 0, limit: int = 50,
-                         force: bool = False) -> dict:
+                         force: bool = False, search: str = "") -> dict:
         record = get_record(record_id)
         if not record:
             raise ValueError("记录不存在")
         root = Path(record["local_copy_dir"])
         cache_path = root / ".session_cache.json"
+
+        needle = (search or "").strip().lower()
+
+        def _finalize(sessions: list) -> dict:
+            # 按首句 q1 / session_id 过滤（覆盖全部会话后再分页），与 chat-viewer 一致
+            if needle:
+                sessions = [
+                    s for s in sessions
+                    if needle in (s.get("q1", "") or "").lower()
+                    or needle in (s.get("session_id", "") or "").lower()
+                ]
+            return {"items": sessions[offset:offset + limit], "total": len(sessions)}
 
         # 自动穿透：如果 root 下没有 session_analysis.json，但只有一个子目录（同名嵌套），
         # 则往下一层查找（obsutil cp 上传目录时会把目录名本身复制进去造成双层嵌套）
@@ -528,8 +560,7 @@ class ReflectionService:
                 meta = cache.get("_meta", {})
                 if meta.get("source_mtime") == source_mtime:
                     sessions = cache.get("sessions", [])
-                    total = len(sessions)
-                    return {"items": sessions[offset:offset + limit], "total": total}
+                    return _finalize(sessions)
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -555,8 +586,7 @@ class ReflectionService:
         except OSError:
             pass
 
-        total = len(sessions)
-        return {"items": sessions[offset:offset + limit], "total": total}
+        return _finalize(sessions)
 
     @staticmethod
     def _order_by_trace_list(disk_names: list, trace_list) -> tuple:

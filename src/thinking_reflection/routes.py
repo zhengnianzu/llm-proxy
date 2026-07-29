@@ -71,8 +71,8 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     def analysis(record_id: int): return call(service.analysis, record_id)
 
     @app.get("/api/reflection/datasets/{record_id}/sessions")
-    def dataset_sessions(record_id: int, offset: int = 0, limit: int = 50, force: bool = False):
-        return call(service.dataset_sessions, record_id, offset, limit, force)
+    def dataset_sessions(record_id: int, offset: int = 0, limit: int = 50, force: bool = False, search: str = ""):
+        return call(service.dataset_sessions, record_id, offset, limit, force, search)
 
     @app.get("/api/reflection/datasets/{record_id}/session-trajectory")
     def session_trajectory(record_id: int, session_id: str, file_name: str):
@@ -127,8 +127,8 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     def run_snapshot(run_id: str): return call(db.get_run_snapshot, service.config.db_path, run_id)
 
     @app.get("/api/reflection/runs/{run_id}/trajectories")
-    def run_trajectories(run_id: str, offset: int = 0, limit: int = 0):
-        return service.trajectory_list(run_id, offset, limit)
+    def run_trajectories(run_id: str, offset: int = 0, limit: int = 0, search: str = ""):
+        return service.trajectory_list(run_id, offset, limit, search)
 
     @app.patch("/api/reflection/runs/{run_id}/config")
     async def update_run_config(run_id: str, request: Request):
