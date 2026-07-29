@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 from utils.logs_config import (
     get_active_base,
-    get_history_paths,
+    get_history_entries,
     add_history_path,
     remove_history_path,
     dir_size,
@@ -41,7 +41,7 @@ def _is_admin(request: Request) -> bool:
     return role == "admin"
 
 
-def _describe(path: str, active: bool, active_env_dir: str = "") -> dict:
+def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "default") -> dict:
     exists = os.path.isdir(path)
     fmt = detect_format(path) if exists else "missing"
     leaf_count = 0
@@ -52,6 +52,7 @@ def _describe(path: str, active: bool, active_env_dir: str = "") -> dict:
             leaf_count = 0
     return {
         "path": path,
+        "name": name or "default",
         "active": active,
         "exists": exists,
         "format": fmt,
@@ -87,17 +88,18 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         active_base = get_active_base()
         rows = []
 
-        # 活跃：进程实际写入的 env_dir
-        active_row = _describe(active_env_dir, active=True)
+        # 活跃：进程实际写入的 env_dir（名称固定 default）
+        active_row = _describe(active_env_dir, active=True, name="default")
         active_row["base"] = active_base
         rows.append(active_row)
 
-        # 历史
-        for p in get_history_paths():
+        # 历史（带名称）
+        for e in get_history_entries():
+            p = e["path"]
             # 跳过与活跃 env_dir 相同的路径
             if os.path.normpath(p) == os.path.normpath(active_env_dir):
                 continue
-            rows.append(_describe(p, active=False))
+            rows.append(_describe(p, active=False, name=e.get("name") or "default"))
 
         if with_size:
             for r in rows:
@@ -125,7 +127,8 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
 
         body = await request.json()
         path = (body.get("path") or "").strip()
-        ok, msg = add_history_path(path)
+        name = (body.get("name") or "").strip()
+        ok, msg = add_history_path(path, name)
         return JSONResponse({"ok": ok, "msg": msg})
 
     @app.post("/api/logs-admin/remove")

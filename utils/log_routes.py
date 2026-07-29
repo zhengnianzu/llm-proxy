@@ -830,6 +830,7 @@ def register_log_routes(app: FastAPI) -> None:
         from utils.stats_index import refresh_index, get_dir_counts
         from utils.token_index import refresh_token_index
         from utils.log_scan import dir_key_for
+        from utils.logs_config import get_path_name
         current_tag = Path(_current_log_dir).name
         roots = _all_roots()
         multi = len(roots) > 1
@@ -841,6 +842,9 @@ def register_log_routes(app: FastAPI) -> None:
             if not root_path.is_dir():
                 continue
             root_base = os.path.basename(os.path.normpath(root))
+            # 活跃 env_dir 名称固定 default；历史根取配置名称
+            is_active_root = (os.path.normpath(root) == os.path.normpath(_env_dir))
+            root_label = "default" if is_active_root else get_path_name(root)
             index = refresh_index(root_path)
             tok_index = refresh_token_index(root)
             counts = get_dir_counts(index, tok_index)
@@ -855,6 +859,7 @@ def register_log_routes(app: FastAPI) -> None:
                     "current": is_current,
                     "count": count,
                     "root": root_base,
+                    "root_label": root_label,
                 })
         # 当前目录优先，其余按名称倒序
         dirs.sort(key=lambda d: (not d["current"], d["name"]), reverse=False)

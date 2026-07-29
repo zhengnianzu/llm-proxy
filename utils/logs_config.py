@@ -6,8 +6,9 @@ utils/logs_config.py — 多日志路径配置
 结构:
     active_base: logs_all          # 进程写入的 base，写路径 {active_base}/{env-key}/{hour}
     history:                       # 参与统计/预览的历史根目录（env-key 层或 details 层）
-      - /sdc/data/newapi/logs/details
-      - /mnt/path1
+      - path: /sdc/data/newapi/logs/details   # 带名称（新格式）
+        name: new-api数据
+      - /mnt/path1                            # 纯字符串（旧格式，名称回退 default）
 
 统计聚合的根 = [活跃 env_dir] + [history 中每个根]，去重。
 每个根下面用可变深度扫描找到含 index.jsonl 的叶子目录（见 log_scan.py），
@@ -26,6 +27,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_CONFIG_PATH = PROJECT_ROOT / "settings" / "logs_dirs.yaml"
 _DEFAULT_BASE = "logs_all"
+_DEFAULT_NAME = "default"
 
 _lock = threading.Lock()
 
@@ -88,24 +90,47 @@ def get_active_base() -> str:
     return base or _default_active_base()
 
 
-def get_history_paths() -> List[str]:
-    """配置的历史根目录列表（原样返回，去空/去重）。"""
+def _entry_path_name(item) -> tuple[str, str]:
+    """把一条 history 记录（新格式 dict 或旧格式 str）规整为 (path, name)。"""
+    if isinstance(item, dict):
+        p = str(item.get("path") or "").strip()
+        n = str(item.get("name") or "").strip() or _DEFAULT_NAME
+        return p, n
+    return str(item or "").strip(), _DEFAULT_NAME
+
+
+def get_history_entries() -> List[dict]:
+    """历史根目录列表，含名称：[{"path","name"}]，去空/去重（按路径）。"""
     data = _load_raw()
     raw = data.get("history") or []
-    out: List[str] = []
+    out: List[dict] = []
     seen = set()
     for item in raw:
-        if not item:
-            continue
-        p = str(item).strip()
+        p, n = _entry_path_name(item)
         if not p:
             continue
         key = os.path.normpath(p)
         if key in seen:
             continue
         seen.add(key)
-        out.append(p)
+        out.append({"path": p, "name": n})
     return out
+
+
+def get_history_paths() -> List[str]:
+    """配置的历史根目录列表（原样返回，去空/去重）。"""
+    return [e["path"] for e in get_history_entries()]
+
+
+def get_path_name(path: str) -> str:
+    """某根目录的展示名称；未配置或活跃目录回退 "default"。"""
+    if not path:
+        return _DEFAULT_NAME
+    norm = os.path.normpath(path)
+    for e in get_history_entries():
+        if os.path.normpath(e["path"]) == norm:
+            return e["name"]
+    return _DEFAULT_NAME
 
 
 def _ensure_config() -> dict:
@@ -118,9 +143,10 @@ def _ensure_config() -> dict:
     return data
 
 
-def add_history_path(path: str) -> tuple[bool, str]:
-    """新增历史路径。返回 (成功, 消息)。"""
+def add_history_path(path: str, name: str = "") -> tuple[bool, str]:
+    """新增历史路径（可带名称）。返回 (成功, 消息)。"""
     p = (path or "").strip()
+    n = (name or "").strip() or _DEFAULT_NAME
     if not p:
         return False, "路径不能为空"
     if not os.path.isdir(p):
@@ -129,11 +155,11 @@ def add_history_path(path: str) -> tuple[bool, str]:
     with _lock:
         data = _ensure_config()
         norm = os.path.normpath(p)
-        existing = {os.path.normpath(x) for x in data["history"]}
+        existing = {os.path.normpath(_entry_path_name(x)[0]) for x in data["history"]}
         if norm in existing:
             return False, "路径已存在"
         # 不允许与活跃 base 的 env_dir 重复（活跃目录本就在统计中）
-        data["history"].append(p)
+        data["history"].append({"path": p, "name": n})
         _save_raw(data)
     return True, "已添加"
 
@@ -144,7 +170,8 @@ def remove_history_path(path: str) -> tuple[bool, str]:
     with _lock:
         data = _ensure_config()
         norm = os.path.normpath(p)
-        new_list = [x for x in data["history"] if os.path.normpath(x) != norm]
+        new_list = [x for x in data["history"]
+                    if os.path.normpath(_entry_path_name(x)[0]) != norm]
         if len(new_list) == len(data["history"]):
             return False, "路径不存在"
         data["history"] = new_list

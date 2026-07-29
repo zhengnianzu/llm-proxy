@@ -655,7 +655,12 @@ async function loadLogDirs() {
         _allDirs = data.dirs || [];
         // 去重来源，保持首次出现顺序（当前目录所在来源已被后端排在最前）
         const roots = [];
-        _allDirs.forEach(d => { const r = d.root || ''; if (!roots.includes(r)) roots.push(r); });
+        const rootLabels = {};   // root(basename) -> 展示名称（配置名，默认 default）
+        _allDirs.forEach(d => {
+            const r = d.root || '';
+            if (!roots.includes(r)) roots.push(r);
+            if (rootLabels[r] === undefined) rootLabels[r] = d.root_label || 'default';
+        });
         const rootLabel = document.getElementById('rootSelectLabel');
         const rootSel = document.getElementById('rootSelect');
         if (roots.length > 1) {
@@ -666,7 +671,7 @@ async function loadLogDirs() {
             roots.forEach(r => {
                 const opt = document.createElement('option');
                 opt.value = r;
-                opt.textContent = r || '(默认)';
+                opt.textContent = rootLabels[r] || 'default';
                 if (r === curRoot) opt.selected = true;
                 rootSel.appendChild(opt);
             });

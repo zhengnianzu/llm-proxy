@@ -1,0 +1,4 @@
+active_base: logs_all
+history:
+- path: /sdc/data/newapi/logs/details
+  name: new-api数据

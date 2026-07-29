@@ -27,6 +27,13 @@
 .msg-ok { color: #16a34a; }
 .msg-err { color: #dc2626; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal-box { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-lg); box-shadow: var(--shadow); width: min(520px, 92vw); padding: 22px; }
+.modal-box h6 { font-weight: 700; margin: 0 0 14px; font-size: 1rem; color: var(--foreground); }
+.modal-field { margin-bottom: 14px; }
+.modal-field label { display: block; font-size: .82rem; color: var(--muted-foreground); margin-bottom: 5px; }
+.modal-field input { width: 100%; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 {% endblock %}
 
 {% block content %}
@@ -37,12 +44,33 @@
         <div class="hint">
             添加参与统计与预览的历史日志根目录。路径应到 <span class="mono">env-key</span> 层级，
             或指向包含 <span class="mono">index.jsonl</span> 的目录（支持 <span class="mono">天/小时</span> 两层，如 new-api 的 details）。<br>
+            可为每个路径起一个名称（如 <span class="mono">new-api数据</span>），会展示在列表与预览页的「来源地址」中；留空默认 <span class="mono">default</span>。<br>
             移除路径只会将其从统计中排除，<strong>不会删除磁盘文件</strong>。活跃写入目录由进程配置决定，不可在此移除。
         </div>
         <div class="add-row">
-            <input type="text" class="input input-sm mono" v-model="newPath" placeholder="/mnt/path1 或 /sdc/data/newapi/logs/details" @keyup.enter="addPath">
-            <button class="btn btn-primary btn-sm" @click="addPath" :disabled="adding">添加</button>
+            <button class="btn btn-primary btn-sm" @click="openAdd">新增日志路径</button>
             <span class="msg" :class="msgOk ? 'msg-ok' : 'msg-err'" v-if="msg">{{ msg }}</span>
+        </div>
+    </div>
+
+    <!-- 新增日志路径弹窗 -->
+    <div class="modal-overlay" v-if="showAdd" @click.self="closeAdd">
+        <div class="modal-box">
+            <h6>新增日志路径</h6>
+            <div class="modal-field">
+                <label>日志路径</label>
+                <input type="text" class="input input-sm mono" v-model="newPath"
+                    placeholder="/mnt/path1 或 /sdc/data/newapi/logs/details" @keyup.enter="addPath">
+            </div>
+            <div class="modal-field">
+                <label>名称（可选，默认 default）</label>
+                <input type="text" class="input input-sm" v-model="newName"
+                    placeholder="如 new-api数据" @keyup.enter="addPath">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline btn-sm" @click="closeAdd">取消</button>
+                <button class="btn btn-primary btn-sm" @click="addPath" :disabled="adding">{{ adding ? '添加中…' : '添加' }}</button>
+            </div>
         </div>
     </div>
 
@@ -57,6 +85,7 @@
         <table class="dir-table">
             <thead>
                 <tr>
+                    <th>名称</th>
                     <th>路径</th>
                     <th>状态</th>
                     <th>格式</th>
@@ -68,6 +97,7 @@
             </thead>
             <tbody>
                 <tr v-for="r in rows" :key="r.path">
+                    <td><span class="badge badge-fmt">{{ r.name || 'default' }}</span></td>
                     <td class="mono">
                         {{ r.path }}
                         <span v-if="r.base && r.active" style="color:var(--muted-foreground);">（base: {{ r.base }}）</span>
@@ -108,7 +138,7 @@
                     </td>
                 </tr>
                 <tr v-if="rows.length === 0">
-                    <td :colspan="withSize ? 7 : 6" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
+                    <td :colspan="withSize ? 8 : 7" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
                 </tr>
             </tbody>
         </table>
@@ -124,6 +154,8 @@ new Vue({
     data: {
         rows: [],
         newPath: '',
+        newName: '',
+        showAdd: false,
         msg: '',
         msgOk: false,
         adding: false,
@@ -153,6 +185,14 @@ new Vue({
                 }.bind(this))
                 .catch(function() { this.loading = false; }.bind(this));
         },
+        openAdd: function() {
+            this.newPath = '';
+            this.newName = '';
+            this.showAdd = true;
+        },
+        closeAdd: function() {
+            this.showAdd = false;
+        },
         addPath: function() {
             var p = (this.newPath || '').trim();
             if (!p) { this.showMsg('路径不能为空', false); return; }
@@ -160,13 +200,13 @@ new Vue({
             fetch('/api/logs-admin/add', {
                 method: 'POST',
                 headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: p })
+                body: JSON.stringify({ path: p, name: (this.newName || '').trim() })
             })
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     this.adding = false;
                     this.showMsg(data.msg, data.ok);
-                    if (data.ok) { this.newPath = ''; this.load(); }
+                    if (data.ok) { this.newPath = ''; this.newName = ''; this.showAdd = false; this.load(); }
                 }.bind(this))
                 .catch(function() { this.adding = false; this.showMsg('请求失败', false); }.bind(this));
         },

@@ -102,9 +102,23 @@ def _read_session_index_meta(logs_dir: str) -> Optional[dict]:
 
 
 def _refresh_session_cache(logs_dir: str) -> bool:
-    """从 index.jsonl 增量刷新 .session_cache.jsonl。
-    复用 log_routes 中的 session 聚合逻辑。
+    """导出前把 session 缓存追平 index.jsonl 当前状态，确保导出完整。
+
+    new-api：叶子 index.db 是唯一来源，同步调用 ensure_fresh（有变化才构建；含尾部未落盘行的
+    有界重试），返回后 sessions 覆盖所有已落盘请求。native：复用 log_routes 的增量聚合。
     """
+    if _is_newapi(logs_dir):
+        index_path = Path(logs_dir) / "index.jsonl"
+        if not index_path.is_file():
+            return False
+        try:
+            import utils.newapi_index_db as nidb
+            st = nidb.ensure_fresh(logs_dir)
+            return st.get("sessions", 0) > 0
+        except Exception:
+            logger.warning("new-api ensure_fresh 失败: %s", logs_dir)
+            return False
+
     from utils.log_routes import _refresh_state
 
     index_path = Path(logs_dir) / "index.jsonl"

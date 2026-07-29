@@ -27,6 +27,10 @@ from typing import Any, Dict, List, Optional, Tuple
 _INDEX_NAME = "index.jsonl"
 _DB_NAME = "index.db"
 
+# enrich 失败重试上限：合并文件「尚未落盘」是活跃叶子的常态瞬态失败，
+# 保持 q1_hash=NULL 让后续构建重扫重试；累计到此上限仍失败才标死（q1_hash=''）永久跳过。
+_MAX_ENRICH_ATTEMPTS = 3
+
 # 每叶子一把写锁（同进程内串行写；跨实例互斥由上层 dispatcher + leader_lock 负责）
 _leaf_locks: Dict[str, threading.Lock] = {}
 _leaf_locks_guard = threading.Lock()
@@ -62,7 +66,8 @@ CREATE TABLE IF NOT EXISTS requests (
     user_turns  INTEGER,
     q1_preview  TEXT,
     chain_key   TEXT,
-    has_res     INTEGER
+    has_res     INTEGER,
+    attempts    INTEGER DEFAULT 0   -- enrich 尝试次数；瞬态失败累计到 _MAX_ENRICH_ATTEMPTS 才标死
 );
 CREATE INDEX IF NOT EXISTS requests_pending ON requests(q1_hash) WHERE q1_hash IS NULL;
 CREATE INDEX IF NOT EXISTS requests_lookup  ON requests(api_key, q1_hash);
@@ -115,7 +120,16 @@ def _connect(leaf_dir: str, write: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
     if write:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """对既有 db 做轻量列迁移（CREATE TABLE IF NOT EXISTS 不会给旧表补列）。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(requests)")}
+    if "attempts" not in cols:
+        conn.execute("ALTER TABLE requests ADD COLUMN attempts INTEGER DEFAULT 0")
+        conn.commit()
 
 
 def _db_exists(leaf_dir: str) -> bool:
@@ -299,15 +313,28 @@ def enrich(leaf_dir: str, workers: int = 8, progress_cb=None) -> Dict[str, Any]:
 
     def _apply(rows: List[tuple]) -> None:
         nonlocal done
+        ok_rows = [r for r in rows if r[2] >= 0]     # msg_count>=0：解析成功
+        fail_rows = [r for r in rows if r[2] < 0]    # msg_count==-1：文件缺失/损坏
         with _leaf_lock(leaf_dir):
             w = _connect(leaf_dir, write=True)
             try:
-                w.executemany(
-                    "UPDATE requests SET q1_hash=?, msg_count=?, user_turns=?, q1_preview=?, "
-                    "chain_key=?, has_res=?, success=?, model=COALESCE(NULLIF(?,''), model), "
-                    "ts=COALESCE(NULLIF(?,''), ts) WHERE req_file=?",
-                    [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[0]) for r in rows],
-                )
+                if ok_rows:
+                    w.executemany(
+                        "UPDATE requests SET q1_hash=?, msg_count=?, user_turns=?, q1_preview=?, "
+                        "chain_key=?, has_res=?, success=?, model=COALESCE(NULLIF(?,''), model), "
+                        "ts=COALESCE(NULLIF(?,''), ts) WHERE req_file=?",
+                        [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[0]) for r in ok_rows],
+                    )
+                if fail_rows:
+                    # 瞬态失败（合并文件多为「尚未落盘」）：累加 attempts，q1_hash 仍留 NULL 下轮重扫重试；
+                    # 累计到 _MAX_ENRICH_ATTEMPTS 才标死（q1_hash='' + msg_count=-1）永久跳过，避免无限重扫。
+                    w.executemany(
+                        "UPDATE requests SET attempts = COALESCE(attempts,0) + 1, "
+                        "q1_hash = CASE WHEN COALESCE(attempts,0) + 1 >= ? THEN '' ELSE q1_hash END, "
+                        "msg_count = CASE WHEN COALESCE(attempts,0) + 1 >= ? THEN -1 ELSE msg_count END "
+                        "WHERE req_file = ?",
+                        [(_MAX_ENRICH_ATTEMPTS, _MAX_ENRICH_ATTEMPTS, r[0]) for r in fail_rows],
+                    )
                 _meta_set(w, "sessions_dirty", "1")
                 w.commit()
             finally:
@@ -501,26 +528,33 @@ def needs_build(leaf_dir: str) -> bool:
     return cur_size != offset or pending > 0 or dirty
 
 
-def ensure_fresh(leaf_dir: str) -> None:
-    """视图侧轻量刷新：仅摄取新增行 + 若无待补且脏则重建 sessions。绝不触发解析。
+def ensure_fresh(leaf_dir: str, workers: int = 8) -> Dict[str, Any]:
+    """把叶子 index.db 同步追平 index.jsonl 当前状态，供「导出/统计」确保数据完整。
 
-    注意：这会写库（摄取/重建），跨实例并发由 _leaf_lock + SQLite busy_timeout 兜底；
-    真正贵的 enrich 只走批量路径。
+    有变化才构建（needs_build 判据：无 db / index.jsonl 有新增 / 有待补 meta / sessions 脏）。
+    对活跃叶子尾部「合并文件尚未落盘」的行，enrich 会标为瞬态失败并保留待补状态；这里按
+    _MAX_ENRICH_ATTEMPTS 轮循环 ingest→enrich→rebuild（轮间短暂 sleep 给落盘时间），
+    直到 pending 归零（含落盘成功补齐 + 持续缺失被标死）或达轮次上限。返回 status()。
+
+    注意：这会开进程池做真正的解析补 meta，属「贵操作」，只应在后台任务（导出/回填）里同步调用，
+    绝不放到请求视图热路径上。跨实例并发由 _leaf_lock + SQLite busy_timeout 兜底。
     """
     if not os.path.isfile(os.path.join(leaf_dir, _INDEX_NAME)):
-        return
+        return status(leaf_dir)
+    if not needs_build(leaf_dir):
+        return status(leaf_dir)
     try:
-        ingest(leaf_dir)
-        if pending_count(leaf_dir) == 0:
-            conn = _connect(leaf_dir, write=True)
-            try:
-                dirty = _meta_get(conn, "sessions_dirty", "0") == "1"
-            finally:
-                conn.close()
-            if dirty:
-                rebuild_sessions(leaf_dir)
+        build_leaf(leaf_dir, workers=workers)  # 第 1 轮：ingest + enrich + rebuild
+        rounds = 1
+        while pending_count(leaf_dir) > 0 and rounds < _MAX_ENRICH_ATTEMPTS:
+            time.sleep(0.5)          # 给活跃叶子未落盘的合并文件一点落盘时间
+            ingest(leaf_dir)         # 期间 index.jsonl 可能又追加了新行
+            enrich(leaf_dir, workers=workers)
+            rebuild_sessions(leaf_dir)
+            rounds += 1
     except Exception:
         pass
+    return status(leaf_dir)
 
 
 # ── 状态 / 读 API（供视图）─────────────────────────────────────────────────
