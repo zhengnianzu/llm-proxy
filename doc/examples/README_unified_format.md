@@ -4,6 +4,10 @@
 既有质检的分析字段，又不丢导出独有的信息。
 
 - 统一后的示例数据见同目录 [`unified_session_analysis.json`](./unified_session_analysis.json)。
+- 配套的样例轨迹（每条 session 的 `-req.json`）见 [`trajectories/`](./trajectories/README.md)，
+  演示「查看」页如何从磁盘读取轨迹并渲染 `response` 回复。
+- 数据集在磁盘上的组织方式（必须项 / 路径拼接 / `<session>` 文件夹含义）见
+  [`README_Dataset.md`](./README_Dataset.md)。
 - 顶层沿用 `session_analysis.json` 的封装（`save_analysis_json`，`utils/eval/eval.py:1053`），
   仅把 `version` 从 `1` 升到 `2` 以区分含导出字段的新记录。
 

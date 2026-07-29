@@ -461,7 +461,8 @@ methods:{
         this.selectedSessionId=s.session_id;this.selectedTrajId='';
         var files=s.trajectory_files||[];
         if(!files.length){this.mergedData=null;this.currentTasks=[];return}
-        var fname=files[0];
+        // 默认展示一连串 API 调用的“最后一次”（消息最全）：优先后端给的 latest_file，否则取排序末个
+        var fname=s.latest_file||files[files.length-1];
         try{
             var data=await this.json('/api/reflection/datasets/'+this.recordId+'/session-trajectory?session_id='+encodeURIComponent(s.session_id)+'&file_name='+encodeURIComponent(fname));
             this.mergedData=data.merged;this.currentTasks=data.tasks||[];

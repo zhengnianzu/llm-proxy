@@ -1,0 +1,31 @@
+{
+  "model": "tokenfly-01/glm-5.2-thinking",
+  "messages": [
+    {
+      "role": "user",
+      "content": "[Tue 2026-07-28 09:10 GMT+8] 帮我把这份 CSV 里 2025 年的订单按省份汇总成一张表"
+    }
+  ],
+  "header": {},
+  "response": {
+    "status_code": 200,
+    "id": "msg_demo_0110_0001",
+    "type": "message",
+    "role": "assistant",
+    "model": "glm-5.2-thinking",
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "用户想按省份汇总 2025 年的订单，但还没有把 CSV 文件给我，也没告诉我列名。我需要先确认文件在哪、有哪些列（尤其是日期列和省份列的名字），否则无法动手。先礼貌地请用户提供文件路径或粘贴表头。",
+        "signature": "demo-sig-0110-0001"
+      },
+      {
+        "type": "text",
+        "text": "好的，我来帮你按省份汇总 2025 年的订单。开始前需要确认两点：\n\n1. CSV 文件放在哪个路径？（或直接把前几行贴给我）\n2. 里面表示「下单日期」和「省份」的列名分别是什么？\n\n拿到这些我就能筛出 2025 年的记录并按省份汇总。"
+      }
+    ],
+    "usage": {"input_tokens": 320, "output_tokens": 156}
+  }
+}

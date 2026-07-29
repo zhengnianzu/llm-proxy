@@ -1,32 +1,35 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
+
+# JSONPath 片段：.key 或 [index]，用于把 "$.messages[1].content[0]" 拆成 token 序列
+_PATH_TOKEN = re.compile(r"\.([^.\[\]]+)|\[(\d+)\]")
 
 
 def _resolve(root: Any, path: str) -> dict | None:
-    node = root
-    cursor = path[1:]
-    while cursor:
-        if cursor.startswith("."):
-            cursor = cursor[1:]
-            key, sep, rest = cursor.partition(".")
-            bracket = key.find("[")
-            if bracket >= 0:
-                rest = key[bracket:] + (("." + rest) if sep else "")
-                key = key[:bracket]
+    """按 block_path（如 $.messages[1].content[0] 或 $.response.content[0]）定位节点。
+
+    注意：response 侧的 signature 任务 block_path 形如 $.response.content[0]
+    （连续点号、中间无括号），必须与 messages 侧同样支持。
+    """
+    if not path.startswith("$"):
+        return None
+    node: Any = root
+    for m in _PATH_TOKEN.finditer(path[1:]):
+        key, idx = m.group(1), m.group(2)
+        if key is not None:
             if not isinstance(node, dict) or key not in node:
                 return None
             node = node[key]
-            cursor = rest if sep or bracket >= 0 else ""
-        elif cursor.startswith("["):
-            end = cursor.find("]")
-            if end < 0 or not isinstance(node, list): return None
-            try: node = node[int(cursor[1:end])]
-            except (ValueError, IndexError): return None
-            cursor = cursor[end + 1:]
         else:
-            return None
+            if not isinstance(node, list):
+                return None
+            i = int(idx)
+            if i < 0 or i >= len(node):
+                return None
+            node = node[i]
     return node if isinstance(node, dict) else None
 
 

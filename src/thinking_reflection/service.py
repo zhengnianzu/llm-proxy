@@ -355,7 +355,8 @@ class ReflectionService:
                 out = root / row["session_id"] / (Path(row["trajectory_path"]).stem + "--thinking.json")
                 out.parent.mkdir(parents=True, exist_ok=True)
                 raw = self._load_raw_json(row)
-                out.write_text(json.dumps(merge(raw, tasks, run_id), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                merged = merge(raw, tasks, run_id)
+                out.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 db.record_run_output(self.config.db_path, run_id, export_id,
                                      row["trajectory_id"], out.as_posix())
                 outputs.append(out.as_posix())
@@ -557,6 +558,36 @@ class ReflectionService:
         total = len(sessions)
         return {"items": sessions[offset:offset + limit], "total": total}
 
+    @staticmethod
+    def _order_by_trace_list(disk_names: list, trace_list) -> tuple:
+        """按 trace_list 的调用顺序给磁盘轨迹文件排序，返回 (ordered_names, latest_file)。
+
+        trace_list 是权威的调用顺序（末个 = 一连串 API 调用的最后一次）。规则：
+        - 交集排序：先按 trace_list 里 filename 的顺序取出磁盘上存在的文件；
+        - 补漏：磁盘上有、但 trace_list 没提到的文件，按文件名排序追加到末尾（不丢文件）；
+        - latest_file 取 trace_list 里最后一个「磁盘存在」的 filename；trace_list 全部缺失时
+          回退到排序后的末个磁盘文件。
+        trace_list 为空/非法时返回 (None, None)，由调用方走 glob 排序的退化路径。
+        """
+        if not isinstance(trace_list, list) or not trace_list:
+            return None, None
+        disk_set = set(disk_names)
+        seen = set()
+        ordered = []
+        latest_from_trace = ""
+        for tr in trace_list:
+            fn = tr.get("filename", "") if isinstance(tr, dict) else ""
+            if fn in disk_set and fn not in seen:
+                ordered.append(fn)
+                seen.add(fn)
+            if fn in disk_set:
+                latest_from_trace = fn  # trace_list 里最后一个磁盘存在的文件
+        # 补漏：磁盘多出来、trace_list 未提及的文件，按文件名排序追加
+        extras = sorted(n for n in disk_names if n not in seen)
+        ordered.extend(extras)
+        latest_file = latest_from_trace or (ordered[-1] if ordered else "")
+        return ordered, latest_file
+
     def _build_sessions_from_analysis(self, root: Path, analysis_path: Path) -> list:
         payload = json.loads(analysis_path.read_text(encoding="utf-8"))
         raw_sessions = payload.get("sessions", []) if isinstance(payload, dict) else payload
@@ -569,6 +600,15 @@ class ReflectionService:
             traj_files = sorted(session_dir.glob("*.json")) if session_dir.is_dir() else []
             traj_files = [f for f in traj_files
                           if f.name not in self._EXCLUDED_FILES and not f.name.endswith("--thinking.json")]
+            glob_names = [f.name for f in traj_files]
+            # 定位轨迹顺序与 latest_file：trace_list 是权威调用顺序，优先用它。
+            names, latest_file = self._order_by_trace_list(glob_names, s.get("trace_list"))
+            if names is None:
+                # 无 trace_list：退化到按文件名（时间戳前缀）排序；latest_file 优先 analysis 显式声明，
+                # 否则取排序末个（字典序即时间序，末个即最后一次调用）。
+                names = glob_names
+                declared_latest = s.get("latest_file") or ""
+                latest_file = declared_latest if declared_latest in names else (names[-1] if names else "")
             items.append({
                 "session_id": sid,
                 "q1": s.get("q1", ""),
@@ -578,8 +618,9 @@ class ReflectionService:
                 "api_call_count": s.get("api_call_count", 0),
                 "completed": s.get("completed", 0),
                 "completed_note": s.get("completed_note", ""),
-                "trajectory_count": len(traj_files),
-                "trajectory_files": [f.name for f in traj_files],
+                "trajectory_count": len(names),
+                "trajectory_files": names,
+                "latest_file": latest_file,
             })
         return items
 
@@ -623,6 +664,8 @@ class ReflectionService:
                 "completed_note": "",
                 "trajectory_count": len(traj_files),
                 "trajectory_files": [f.name for f in traj_files],
+                # 无 analysis，直接取排序后最后一个（= 一连串调用的最后一次）
+                "latest_file": traj_files[-1].name,
             })
         return items
 

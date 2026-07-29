@@ -1,0 +1,32 @@
+{
+  "model": "tokenfly-01/deepseek-v4-pro",
+  "messages": [
+    {
+      "role": "user",
+      "content": "[Tue 2026-07-28 09:40 GMT+8] 搜一下深圳今天的天气，顺便看看周末适不适合爬山"
+    }
+  ],
+  "header": {},
+  "response": {
+    "status_code": 200,
+    "id": "msg_demo_0940_0001",
+    "type": "message",
+    "role": "assistant",
+    "model": "deepseek-v4-pro",
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "content": [
+      {
+        "type": "text",
+        "text": "我查一下深圳的实时天气和周末预报。"
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_demo_0940_fetch1",
+        "name": "web_fetch",
+        "input": {"url": "https://weather.example.com/shenzhen"}
+      }
+    ],
+    "usage": {"input_tokens": 210, "output_tokens": 64}
+  }
+}
