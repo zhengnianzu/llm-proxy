@@ -92,6 +92,8 @@ def init_db(db_dir: str):
             "mode TEXT NOT NULL DEFAULT 'export'",
             "analysis_json TEXT NOT NULL DEFAULT ''",
             "source_export_id INTEGER",
+            "in_manage INTEGER NOT NULL DEFAULT 0",
+            "manage_name TEXT NOT NULL DEFAULT ''",
         ]:
             try:
                 _conn.execute(f"ALTER TABLE export_records ADD COLUMN {col_def}")
@@ -204,15 +206,58 @@ def latest_quality_record(source_export_id: int) -> Optional[dict]:
 
 _SLIM_COLS = "id, key_slot, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message"
 
-_DS_COLS = "id, key_slot, api_key, status, mode, created_at, total_sessions, obs_dst, error_message, local_copy_dir"
+_DS_COLS = "id, key_slot, api_key, status, mode, created_at, total_sessions, obs_dst, error_message, local_copy_dir, in_manage, manage_name"
 
 
-def list_records_for_datasets(limit: int = 1000) -> list:
+def list_records_for_datasets(limit: int = 1000, in_manage: Optional[bool] = None) -> list:
+    """列出数据集候选记录。
+
+    in_manage=None: 全部；True: 仅已加入管理列表；False: 仅未加入。
+    """
     conn = _get_conn()
-    rows = conn.execute(
-        f"SELECT {_DS_COLS} FROM export_records ORDER BY created_at DESC LIMIT ?", (limit,)
-    ).fetchall()
+    sql = f"SELECT {_DS_COLS} FROM export_records"
+    params: list = []
+    if in_manage is not None:
+        sql += " WHERE in_manage = ?"
+        params.append(1 if in_manage else 0)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def set_in_manage(record_id: int, flag: bool) -> None:
+    """设置单条记录是否在 Session 管理列表中（仅解绑/加入，不删数据）。"""
+    conn = _get_conn()
+    with _lock:
+        conn.execute("UPDATE export_records SET in_manage = ? WHERE id = ?",
+                     (1 if flag else 0, record_id))
+        conn.commit()
+
+
+def set_manage_name(record_id: int, name: str) -> None:
+    """设置该记录在管理列表中的自定义显示名（留空表示回退原 key_slot）。"""
+    conn = _get_conn()
+    with _lock:
+        conn.execute("UPDATE export_records SET manage_name = ? WHERE id = ?",
+                     (name or "", record_id))
+        conn.commit()
+
+
+def set_in_manage_bulk(record_ids: list, flag: bool) -> int:
+    """批量设置 in_manage，返回受影响行数。"""
+    ids = [int(x) for x in (record_ids or [])]
+    if not ids:
+        return 0
+    conn = _get_conn()
+    placeholders = ",".join("?" for _ in ids)
+    with _lock:
+        cur = conn.execute(
+            f"UPDATE export_records SET in_manage = ? WHERE id IN ({placeholders})",
+            [1 if flag else 0, *ids],
+        )
+        conn.commit()
+    return cur.rowcount
 
 
 def get_records_summary() -> tuple:

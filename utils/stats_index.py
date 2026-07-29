@@ -30,24 +30,42 @@ _lock = threading.Lock()
 QUALIFIED_THRESHOLD_DEFAULT = 5
 
 # ---------------------------------------------------------------------------
-# 进程级内存缓存 — 目录扫描索引
+# 进程级内存缓存 — 目录扫描索引（按 env_dir 分槽，避免多目录轮询互相驱逐）
 # ---------------------------------------------------------------------------
 _MEM_TTL = 10  # 秒
-_mem_index: Optional[dict] = None
-_mem_index_ts: float = 0
-_mem_env_dir: Optional[str] = None  # 绑定的 env_dir，切换时失效
+_mem_index_map: Dict[str, dict] = {}       # env_dir_str -> index dict
+_mem_index_ts_map: Dict[str, float] = {}   # env_dir_str -> 最后刷新时间
 
 # ---------------------------------------------------------------------------
-# 进程级内存缓存 — key 聚合表
+# 进程级内存缓存 — key 聚合表（按 env_dir 分槽）
 # ---------------------------------------------------------------------------
 _KEY_CACHE_FILE = ".session_key_cache.json"
 _KEY_CACHE_VERSION = 2
-_mem_key_cache: Optional[dict] = None
-_mem_key_cache_env: Optional[str] = None
+_mem_key_cache_map: Dict[str, dict] = {}   # env_dir_str -> key cache dict
+_current_key_cache_env: Optional[str] = None  # 最近一次 build 的 env（供 export 读取）
+
+# 只读挂载的 root 无法在原地写缓存，退回项目内目录
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_FALLBACK_CACHE_DIR = _PROJECT_ROOT / "logs" / ".stats_index_cache"
+
+
+def _writable_cache_path(env_dir: Path, filename: str) -> str:
+    """缓存文件路径：env_dir 可写则存原地（兼容旧行为），否则退回项目内。"""
+    try:
+        if env_dir.is_dir() and os.access(str(env_dir), os.W_OK):
+            return str(env_dir / filename)
+    except OSError:
+        pass
+    h = hashlib.md5(os.path.normpath(str(env_dir)).encode()).hexdigest()[:16]
+    try:
+        os.makedirs(str(_FALLBACK_CACHE_DIR), exist_ok=True)
+    except OSError:
+        pass
+    return str(_FALLBACK_CACHE_DIR / f"{h}-{filename}")
 
 
 def _index_path(env_dir: Path) -> str:
-    return str(env_dir / _INDEX_FILE)
+    return _writable_cache_path(env_dir, _INDEX_FILE)
 
 
 def _load_index(env_dir: Path) -> dict:
@@ -124,6 +142,57 @@ def _count_req_files(dir_path: Path) -> int:
         return 0
 
 
+def _sessions_from_index(leaf: Path) -> dict:
+    """无会话链信息的 root（如 new-api）时，直接从 index.jsonl 按 api_key×date 聚合。
+
+    每条请求算 1 个 session（total），qualified 无法判定 → 记 0。
+    返回 {"{api_key}|{date}": {"total": n, "qualified": 0}}。
+    """
+    from utils.log_scan import normalize_entry
+    buckets: Dict[str, Dict[str, int]] = {}
+    index_file = leaf / "index.jsonl"
+    try:
+        with open(index_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("_meta"):
+                    continue
+                e = normalize_entry(obj)
+                api_key = e["api_key"] or "(empty)"
+                bucket_key = f"{api_key}|{e['date']}"
+                if bucket_key not in buckets:
+                    buckets[bucket_key] = {"total": 0, "qualified": 0}
+                buckets[bucket_key]["total"] += 1
+    except OSError:
+        pass
+    return buckets
+
+
+def _sessions_lazy_backfill(leaf: Path, threshold: int) -> dict:
+    """new-api 叶子的统计：DB 有数据走 q1 归并口径；无数据时给裸计数近似（不阻塞）。
+
+    DB 已回填 → get_session_stats（真实归并值）。
+    DB 未回填 → 返回裸计数（每请求算 1 session，近似偏大），并依赖 refresh_index
+    头部已把该 root 入了后台串行回填队列——绝不在此同步 consume_leaf（那会让
+    页面请求阻塞几十秒，正是「导出一直加载中」的根因）。回填在后台跑完后，
+    下次刷新 DB 有数据即自动收敛为归并值。
+    """
+    try:
+        import utils.session_store as _ss
+        if _ss.get_session_count_by_root(str(leaf)) > 0:
+            return _ss.get_session_stats(str(leaf), threshold)
+    except Exception:
+        pass
+    # 未回填：裸计数近似（前端在回填运行时会标「聚合中·近似」），不阻塞
+    return _sessions_from_index(leaf)
+
+
 def _get_active_tag() -> str:
     try:
         from utils.log_paths import STARTUP_DATE_TAG
@@ -155,38 +224,46 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
     index["_changed_buckets"] 记录本次刷新中变化的 bucket 列表，
     供 build_stats_from_index 做定向增量更新。
     """
-    global _mem_index, _mem_index_ts, _mem_env_dir
+    from utils.log_scan import iter_index_dirs, dir_key_for
 
-    env_dir_str = str(env_dir)
+    env_dir_str = os.path.normpath(str(env_dir))
     now = time.time()
 
-    if (not force
-            and _mem_index is not None
-            and _mem_env_dir == env_dir_str
-            and (now - _mem_index_ts) < _MEM_TTL):
-        _mem_index["_changed_buckets"] = []
-        return _mem_index
+    cached = _mem_index_map.get(env_dir_str)
+    if (not force and cached is not None
+            and (now - _mem_index_ts_map.get(env_dir_str, 0)) < _MEM_TTL):
+        cached["_changed_buckets"] = []
+        return cached
 
     with _lock:
-        if (not force
-                and _mem_index is not None
-                and _mem_env_dir == env_dir_str
-                and (time.time() - _mem_index_ts) < _MEM_TTL):
-            _mem_index["_changed_buckets"] = []
-            return _mem_index
+        cached = _mem_index_map.get(env_dir_str)
+        if (not force and cached is not None
+                and (time.time() - _mem_index_ts_map.get(env_dir_str, 0)) < _MEM_TTL):
+            cached["_changed_buckets"] = []
+            return cached
 
-        index = _mem_index if (_mem_env_dir == env_dir_str and _mem_index) else _load_index(env_dir)
+        index = cached if cached else _load_index(env_dir)
         dirs_cache = index.get("dirs", {})
         changed = False
         active_tag = _get_active_tag()
         changed_buckets: list = []
 
+        # 访问时懒回填（new-api，异步）：发现该 root 有 db 无数据的新叶子时，
+        # 在后台多进程并行聚合进 session_cache.db——不阻塞本次页面请求。
+        # 本次刷新未回填的叶子先走裸计数近似（下方 use_index 分支），后台跑完后
+        # 下次刷新即 db_count>0 走归并快路径，数字自动收敛。start_backfill 幂等，
+        # 已在跑/无新叶子时几乎零成本。
+        try:
+            from utils.log_scan import detect_format as _detect_fmt
+            if _detect_fmt(env_dir_str) == "newapi":
+                from utils.newapi_backfill import start_backfill
+                start_backfill(env_dir_str, force=False)
+        except Exception:
+            pass
+
         current_dirs = set()
-        if env_dir.is_dir():
-            for sub in env_dir.iterdir():
-                if not sub.is_dir():
-                    continue
-                dir_name = sub.name
+        for sub in iter_index_dirs(env_dir):
+                dir_name = dir_key_for(env_dir, sub)
                 current_dirs.add(dir_name)
 
                 prev = dirs_cache.get(dir_name)
@@ -244,29 +321,41 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                         changed = True
                         continue
 
-                    # DB 无数据：沿用原有 req 文件计数占位逻辑
-                    if prev and not force and dir_name != active_tag:
-                        if not prev.get("frozen"):
+                    # DB 无数据。区分两种情况：
+                    #   1) 有 -req.json（本项目目录，会话尚未消费）→ 仅 req 计数占位
+                    #   2) 无 -req.json 但有 index.jsonl（new-api）→ 从 index 聚合 sessions
+                    req_count = _count_req_files(sub)
+                    index_file = sub / "index.jsonl"
+                    use_index = (req_count == 0 and index_file.is_file())
+
+                    try:
+                        dir_mt = os.path.getmtime(str(sub))
+                        idx_mt = index_file.stat().st_mtime if use_index else dir_mt
+                    except OSError:
+                        dir_mt = 0
+                        idx_mt = 0
+
+                    marker_mt = idx_mt if use_index else dir_mt
+                    if prev and not force and prev.get("req_count_mtime") == marker_mt:
+                        if dir_name != active_tag and not prev.get("frozen"):
                             prev["frozen"] = True
                             changed = True
                         continue
-                    try:
-                        dir_mt = os.path.getmtime(str(sub))
-                    except OSError:
-                        dir_mt = 0
-                    if prev and not force and prev.get("req_count_mtime") == dir_mt:
-                        continue
+
                     old_sessions = prev.get("sessions", {}) if prev else {}
-                    new_sessions: dict = {}
+                    # new-api（use_index）：懒回填——consume_leaf 进 DB 后按 q1 归并口径读，
+                    # 而非裸计数（每请求 1 session）。首次访问会稍慢，之后走 db_count>0 快路径。
+                    new_sessions = _sessions_lazy_backfill(sub, threshold) if use_index else {}
                     changed_buckets.extend(_diff_sessions(old_sessions, new_sessions, dir_name))
-                    req_count = _count_req_files(sub)
+                    if use_index:
+                        req_count = sum(v["total"] for v in new_sessions.values())
                     dirs_cache[dir_name] = {
                         "cache_mtime": 0,
                         "cache_size": 0,
                         "req_count": req_count,
-                        "req_count_mtime": dir_mt,
+                        "req_count_mtime": marker_mt,
                         "frozen": dir_name != active_tag,
-                        "sessions": {},
+                        "sessions": new_sessions,
                     }
                     changed = True
                     continue
@@ -328,9 +417,8 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
 
         index["_changed_buckets"] = changed_buckets
 
-        _mem_index = index
-        _mem_index_ts = time.time()
-        _mem_env_dir = env_dir_str
+        _mem_index_map[env_dir_str] = index
+        _mem_index_ts_map[env_dir_str] = time.time()
 
         return index
 
@@ -340,7 +428,7 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
 # ---------------------------------------------------------------------------
 
 def _key_cache_path(env_dir: Path) -> str:
-    return str(env_dir / _KEY_CACHE_FILE)
+    return _writable_cache_path(env_dir, _KEY_CACHE_FILE)
 
 
 def _load_key_cache(env_dir: Path) -> Optional[dict]:
@@ -365,7 +453,7 @@ def _load_key_cache(env_dir: Path) -> Optional[dict]:
 def _save_key_cache(env_dir: Path, cache: dict) -> None:
     path = _key_cache_path(env_dir)
     try:
-        os.makedirs(str(env_dir), exist_ok=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False)
@@ -523,6 +611,63 @@ def _build_rows(cache: dict, threshold: int) -> dict:
     }
 
 
+def build_stats_multi(roots: List[str], threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
+                      force: bool = False) -> dict:
+    """跨多个 root 刷新 + 构建 session 统计，合并 rows / dates / totals。
+
+    每个 root 独立走 refresh_index + build_stats_from_index（各自缓存），
+    再按 api_key 合并 cells / mtime_cells / 总数。
+    """
+    merged_rows: Dict[str, dict] = {}
+    all_dates: set = set()
+    total_sessions = 0
+    qualified_sessions = 0
+
+    for root in roots:
+        env_path = Path(root)
+        index = refresh_index(env_path, threshold, force=force)
+        stats = build_stats_from_index(index, threshold, env_dir=env_path)
+
+        total_sessions += stats.get("total_sessions", 0)
+        qualified_sessions += stats.get("qualified_sessions", 0)
+        all_dates.update(stats.get("dates", []))
+
+        for row in stats.get("rows", []):
+            api_key = row["api_key"]
+            if api_key not in merged_rows:
+                merged_rows[api_key] = {
+                    "api_key": api_key,
+                    "cells": {},
+                    "mtime_cells": {},
+                    "row_total": 0,
+                    "row_qualified": 0,
+                }
+            m = merged_rows[api_key]
+            m["row_total"] += row.get("row_total", 0)
+            m["row_qualified"] += row.get("row_qualified", 0)
+            for d, c in row.get("cells", {}).items():
+                cell = m["cells"].setdefault(d, {"total": 0, "qualified": 0})
+                cell["total"] += c.get("total", 0)
+                cell["qualified"] += c.get("qualified", 0)
+            # mtime_cells 的 key 已是相对 root 的 dir_key，可能跨 root 重名，
+            # 加 root 前缀防冲突
+            prefix = os.path.basename(os.path.normpath(root))
+            for mt, c in row.get("mtime_cells", {}).items():
+                key = f"{prefix}/{mt}" if len(roots) > 1 else mt
+                cell = m["mtime_cells"].setdefault(key, {"total": 0, "qualified": 0})
+                cell["total"] += c.get("total", 0)
+                cell["qualified"] += c.get("qualified", 0)
+
+    rows = sorted(merged_rows.values(), key=lambda r: r["row_total"], reverse=True)
+    return {
+        "total_sessions": total_sessions,
+        "qualified_sessions": qualified_sessions,
+        "threshold": threshold,
+        "dates": sorted(all_dates),
+        "rows": rows,
+    }
+
+
 def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                            env_dir: Optional[Path] = None) -> dict:
     """从索引数据构建统计结果，支持 bucket 级增量更新 + 磁盘持久化。
@@ -532,27 +677,30 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
       B) _changed_buckets 非空 → 定向增量更新 key cache，持久化后构建 rows
       C) 首次 / env 切换 → 全量构建，持久化后构建 rows
     """
-    global _mem_key_cache, _mem_key_cache_env
+    global _current_key_cache_env
 
     changed_buckets = index.get("_changed_buckets")
     _env_dir = env_dir
     if _env_dir is None:
-        _env_dir = Path(_mem_env_dir) if _mem_env_dir else None
-    env_dir_str = str(_env_dir) if _env_dir else ""
+        _env_dir = Path(_current_key_cache_env) if _current_key_cache_env else None
+    env_dir_str = os.path.normpath(str(_env_dir)) if _env_dir else ""
 
-    is_same_env = (_mem_key_cache is not None and _mem_key_cache_env == env_dir_str)
+    mem_cache = _mem_key_cache_map.get(env_dir_str)
+    is_same_env = mem_cache is not None
 
     if is_same_env and changed_buckets is not None and len(changed_buckets) == 0:
-        return _build_rows(_mem_key_cache, threshold)
+        _current_key_cache_env = env_dir_str
+        return _build_rows(mem_cache, threshold)
 
     if is_same_env and changed_buckets:
         for dir_name, bk, old_c, new_c in changed_buckets:
-            _apply_delta(_mem_key_cache, dir_name, bk, old_c, new_c)
-        _cleanup_zeros(_mem_key_cache)
-        _mem_key_cache["updated_at"] = time.time()
+            _apply_delta(mem_cache, dir_name, bk, old_c, new_c)
+        _cleanup_zeros(mem_cache)
+        mem_cache["updated_at"] = time.time()
         if _env_dir:
-            _save_key_cache(_env_dir, _mem_key_cache)
-        return _build_rows(_mem_key_cache, threshold)
+            _save_key_cache(_env_dir, mem_cache)
+        _current_key_cache_env = env_dir_str
+        return _build_rows(mem_cache, threshold)
 
     if _env_dir and not is_same_env:
         disk_cache = _load_key_cache(_env_dir)
@@ -565,19 +713,19 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
                 disk_cache = None
 
         if disk_cache:
-            _mem_key_cache = disk_cache
-            _mem_key_cache_env = env_dir_str
+            _mem_key_cache_map[env_dir_str] = disk_cache
+            _current_key_cache_env = env_dir_str
             if changed_buckets:
                 for dir_name, bk, old_c, new_c in changed_buckets:
-                    _apply_delta(_mem_key_cache, dir_name, bk, old_c, new_c)
-                _cleanup_zeros(_mem_key_cache)
-                _mem_key_cache["updated_at"] = time.time()
-                _save_key_cache(_env_dir, _mem_key_cache)
-            return _build_rows(_mem_key_cache, threshold)
+                    _apply_delta(disk_cache, dir_name, bk, old_c, new_c)
+                _cleanup_zeros(disk_cache)
+                disk_cache["updated_at"] = time.time()
+                _save_key_cache(_env_dir, disk_cache)
+            return _build_rows(disk_cache, threshold)
 
     cache = _full_build_key_cache(index)
-    _mem_key_cache = cache
-    _mem_key_cache_env = env_dir_str
+    _mem_key_cache_map[env_dir_str] = cache
+    _current_key_cache_env = env_dir_str
     if _env_dir:
         _save_key_cache(_env_dir, cache)
     return _build_rows(cache, threshold)
@@ -589,7 +737,9 @@ def build_stats_from_index(index: dict, threshold: int = QUALIFIED_THRESHOLD_DEF
 
 def get_current_key_cache() -> Optional[dict]:
     """返回当前内存中的 key cache（引用，非拷贝），供外部读取 key_meta / key_records。"""
-    return _mem_key_cache
+    if _current_key_cache_env is None:
+        return None
+    return _mem_key_cache_map.get(_current_key_cache_env)
 
 
 def _key_slot(api_key: str) -> str:

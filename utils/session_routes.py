@@ -14,10 +14,12 @@ from utils.log_paths import get_service_log_dir
 from utils.stats_index import (
     refresh_index,
     build_stats_from_index,
+    build_stats_multi,
     get_last_refresh_ts,
     start_stats_warmer,
     QUALIFIED_THRESHOLD_DEFAULT,
 )
+from utils.logs_config import get_stats_roots
 
 
 def _build_stats_json(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT) -> dict:
@@ -43,13 +45,15 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/sessions/stats")
     def sessions_stats(threshold: int = QUALIFIED_THRESHOLD_DEFAULT, refresh: bool = False):
-        if not Path(env_dir).is_dir():
+        roots = get_stats_roots(str(env_dir))
+        existing = [r for r in roots if Path(r).is_dir()]
+        if not existing:
             return JSONResponse({"error": f"directory not found: {env_dir}"}, status_code=404)
 
-        index = refresh_index(env_dir, threshold, force=refresh)
-        stats = build_stats_from_index(index, threshold, env_dir=env_dir)
+        stats = build_stats_multi(existing, threshold, force=refresh)
 
-        stats["_dir"] = str(env_dir)
+        stats["_dir"] = " + ".join(existing)
+        stats["_roots"] = existing
         stats["_threshold"] = threshold
         stats["last_refresh_ts"] = get_last_refresh_ts()
 

@@ -32,10 +32,11 @@ from utils.key_store import list_keys, mask_key
 from utils.log_paths import get_service_log_dir
 from utils.obs_utils import load_obs_base, load_sync_config, obsutil_ls
 from utils.stats_index import (
-    refresh_index, build_stats_from_index, get_date_to_mtime_map,
+    refresh_index, build_stats_from_index, build_stats_multi, get_date_to_mtime_map,
     get_current_key_cache, update_key_meta, update_key_records,
     get_last_refresh_ts, start_stats_warmer,
 )
+from utils.logs_config import get_stats_roots
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ def _queue_runner():
         lock_fp = None
         try:
             # 阻塞式全局锁：等到其它 worker 的导出任务结束再执行本任务
+            os.makedirs(os.path.dirname(_EXPORT_LOCK_PATH), exist_ok=True)
             lock_fp = open(_EXPORT_LOCK_PATH, "w")
             fcntl.flock(lock_fp, fcntl.LOCK_EX)
             # 拿到锁后再确认一次是否在等待期间被取消
@@ -137,6 +139,66 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
     env_key_name = env_dir.name
     templates = Jinja2Templates(directory="templates")
 
+    def _all_roots() -> list:
+        """活跃 env_dir + 配置的历史路径（去重）。"""
+        return get_stats_roots(str(env_dir))
+
+    def _existing_roots() -> list:
+        """只保留实际存在的 root。与 build_stats_multi 收到的列表一致，
+        决定 mtime key 是否带 <root_basename>/ 前缀（多 root 才带）。"""
+        return [r for r in _all_roots() if Path(r).is_dir()]
+
+    def _list_all_mtimes() -> list:
+        """列出所有 root 下含 index.jsonl 的叶子目录，多 root 时带 <root_basename>/ 前缀。
+
+        与 build_stats_multi 的 mtime_cells key 格式一致，供前端 mtime 选择。
+        """
+        from utils.log_scan import iter_index_dirs, dir_key_for
+        roots = _existing_roots()
+        multi = len(roots) > 1
+        out = []
+        for root in roots:
+            rp = Path(root)
+            base = os.path.basename(os.path.normpath(root))
+            for leaf in iter_index_dirs(rp):
+                rel = dir_key_for(rp, leaf)
+                out.append(f"{base}/{rel}" if multi else rel)
+        return sorted(set(out), reverse=True)
+
+    def _resolve_mt(mt: str) -> Optional[str]:
+        """把 mtime key（<root_basename>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。"""
+        roots = _existing_roots()
+        multi = len(roots) > 1
+        for root in roots:
+            rp = Path(root)
+            base = os.path.basename(os.path.normpath(root))
+            if multi and mt.startswith(base + "/"):
+                cand = rp / mt[len(base) + 1:]
+                if cand.is_dir():
+                    return str(cand)
+            cand2 = rp / mt
+            if cand2.is_dir():
+                return str(cand2)
+        # 兜底：活跃 env_dir 下直接拼
+        cand = env_dir / mt
+        return str(cand) if cand.is_dir() else None
+
+    def _log_dir_key(mt_src: str) -> str:
+        """把叶子目录绝对路径解析为相对 root 的 dir_key（如 "260728/26072813"）。
+
+        与 stats_index / log_scan 的 dir_key 一致，供报告生成 /history 链接。
+        找不到归属 root 时退回叶子目录名（单级 native 布局下即正确）。"""
+        from utils.log_scan import dir_key_for
+        p = Path(mt_src)
+        for root in _existing_roots():
+            rp = Path(root)
+            try:
+                if p == rp or rp in p.parents:
+                    return dir_key_for(rp, p)
+            except (OSError, ValueError):
+                continue
+        return p.name
+
     @app.get("/keys/export")
     def export_page(request: Request):
         return templates.TemplateResponse(request, "export.html", context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
@@ -151,16 +213,14 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if denied:
             return denied
         port = os.getenv("PROXY_PORT", "")
-        mtimes = sorted(
-            [d.name for d in env_dir.iterdir() if d.is_dir()],
-            reverse=True,
-        ) if env_dir.is_dir() else []
+        mtimes = _list_all_mtimes()
         sync_cfg = _load_sync_config()
         return JSONResponse({
             "port": port,
             "env_key": env_key_name,
             "env_dir": str(env_dir),
             "current_logs_dir": logs_dir,
+            "roots": _all_roots(),
             "obs_base": load_obs_base(),
             "workers": sync_cfg.get("workers", 4),
             "interval": sync_cfg.get("interval", 600),
@@ -168,48 +228,91 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             "mtimes": mtimes,
         })
 
+    @app.get("/api/export/backfill-status")
+    def export_backfill_status(request: Request):
+        """new-api 会话回填的后台队列状态：正在跑哪个 root、排队哪些、各自进度。
+
+        供导出页透明展示——回填串行执行，一个 root 跑完再跑下一个。
+        """
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        try:
+            from utils.newapi_backfill import get_queue_snapshot, get_backfill_status
+        except Exception:
+            return JSONResponse({"enabled": False, "current": None, "queued": [], "roots": []})
+
+        snap = get_queue_snapshot()
+        # 汇总每个 new-api root 的进度（total/done 叶子）
+        roots_prog = []
+        for r in _existing_roots():
+            try:
+                from utils.log_scan import detect_format as _df
+                if _df(r) != "newapi":
+                    continue
+            except Exception:
+                continue
+            st = get_backfill_status(r)
+            roots_prog.append({
+                "root": r,
+                "name": Path(r).name,
+                "status": st.get("status", "idle"),
+                "total_leaves": st.get("total_leaves", 0),
+                "done_leaves": st.get("done_leaves", 0),
+                "last_error": st.get("last_error", ""),
+            })
+        return JSONResponse({
+            "enabled": True,
+            "current": snap.get("current"),
+            "current_name": Path(snap["current"]).name if snap.get("current") else None,
+            "current_status": snap.get("current_status"),
+            "queued": [Path(q).name for q in snap.get("queued", [])],
+            "queue_len": snap.get("queue_len", 0),
+            "running": snap.get("running", False),
+            "roots": roots_prog,
+        })
+
     @app.get("/api/export/keys")
     def export_keys(request: Request, threshold: int = 5):
         denied = _require_key_api(request)
         if denied:
             return denied
-        if not env_dir.is_dir():
+        roots = [r for r in _all_roots() if Path(r).is_dir()]
+        if not roots:
             return JSONResponse({"keys": [], "mtimes": []})
 
-        index = refresh_index(env_dir, threshold)
-        stats = build_stats_from_index(index, threshold, env_dir=env_dir)
-        cache = get_current_key_cache()
+        # 跨 root 合并 session 统计（rows 的 mtime_cells key 已带 <root>/ 前缀）
+        stats = build_stats_multi(roots, threshold)
+
+        # 每个 key 的模型分布（{api_key: {model: session_count}}）。DB 已按 service 绑定，
+        # 一次查询覆盖全部叶子，避免逐叶重扫 index.jsonl（那是「导出一直加载中」的根因）。
+        try:
+            import utils.session_store as _ss
+            model_stats = _ss.get_model_stats_by_key()
+        except Exception:
+            model_stats = {}
+        all_models = sorted({m for dist in model_stats.values() for m in dist})
 
         db_keys_list = list_keys()
-        if cache:
-            update_key_meta(cache, db_keys_list)
-            update_key_records(cache, env_dir)
+
+        # 名称/slot/创建时间：直接用 DB key 列表按后 4 位匹配（多 root 不复用单 env 的 key_meta 缓存）
+        def _match_meta(api_key: str):
+            slot = _key_slot(api_key if api_key != "(empty)" else "")
+            matched_name = ""
+            created_at = ""
+            for k in db_keys_list:
+                masked = k.get("key", "")
+                if api_key != "(empty)" and masked.endswith(api_key[-4:]):
+                    matched_name = k.get("name", "")
+                    created_at = k.get("created_at", "")
+                    break
+            return matched_name, slot, created_at
 
         keys_result = []
         for row in stats.get("rows", []):
             api_key = row["api_key"]
-            mtime_dist = row.get("mtime_cells", {})
-
-            if cache and cache.get("key_meta"):
-                meta = cache["key_meta"].get("mapping", {}).get(api_key, {})
-                matched_name = meta.get("key_name", "")
-                slot = meta.get("key_slot", _key_slot(api_key))
-                created_at = meta.get("created_at", "")
-            else:
-                matched_name = ""
-                created_at = ""
-                slot = _key_slot(api_key if api_key != "(empty)" else "")
-                for k in db_keys_list:
-                    masked = k.get("key", "")
-                    if api_key != "(empty)" and masked.endswith(api_key[-4:]):
-                        matched_name = k.get("name", "")
-                        created_at = k.get("created_at", "")
-                        break
-
-            if cache and cache.get("key_records"):
-                records = cache["key_records"].get("records", {}).get(slot, [])
-            else:
-                records = list_records_by_key(slot, limit=10)
+            matched_name, slot, created_at = _match_meta(api_key)
+            records = list_records_by_key(slot, limit=10)
 
             keys_result.append({
                 "api_key": api_key,
@@ -218,18 +321,15 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 "created_at": created_at,
                 "total_sessions": row["row_total"],
                 "qualified_sessions": row["row_qualified"],
-                "mtime_distribution": mtime_dist,
+                "mtime_distribution": row.get("mtime_cells", {}),
+                "model_distribution": model_stats.get(api_key, {}),
                 "records": records,
             })
 
         keys_result.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
-        mtimes = sorted(
-            [d.name for d in env_dir.iterdir() if d.is_dir()],
-            reverse=True,
-        )
-
-        return JSONResponse({"keys": keys_result, "mtimes": mtimes, "last_refresh_ts": get_last_refresh_ts()})
+        return JSONResponse({"keys": keys_result, "mtimes": _list_all_mtimes(),
+                             "models": all_models, "last_refresh_ts": get_last_refresh_ts()})
 
     # -----------------------------------------------------------------
     # 统一任务执行（导出 / 质检）
@@ -310,7 +410,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         all_entries = []
 
         for mt in mtime_dirs:
-            mt_src = str(_env_dir / mt)
+            mt_src = _resolve_mt(mt) or str(_env_dir / mt)
             try:
                 _log(f"[{mt}] 生成 session_index...")
                 exp_result = export_session_index(mt_src, force=force)
@@ -349,6 +449,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         src_dir=mt_src, out_dir=str(local_base),
                         session_entries=session_entries, api_key=api_key, workers=workers,
                         progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
+                        log_dir=_log_dir_key(mt_src),
                     )
                     all_results.extend(ra_result["results"])
                     all_entries.extend(session_entries)
@@ -389,7 +490,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 from utils.eval.reformat import write_eval_to_cache
                 for mt in mtime_dirs:
                     try:
-                        write_eval_to_cache(str(_env_dir / mt), all_results)
+                        write_eval_to_cache(_resolve_mt(mt) or str(_env_dir / mt), all_results)
                     except Exception:
                         logger.debug("write_eval_to_cache failed for %s", mt, exc_info=True)
             else:
@@ -444,7 +545,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if not mtime_dirs:
             return JSONResponse({"detail": "mtime_dirs is required"}, status_code=400)
         for mt in mtime_dirs:
-            if not (env_dir / mt).is_dir():
+            if _resolve_mt(mt) is None:
                 return JSONResponse({"detail": f"目录不存在: {mt}"}, status_code=400)
 
         slot = _key_slot(api_key)
@@ -640,8 +741,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if err:
             return err
 
-        index = refresh_index(env_dir)
-        stats = build_stats_from_index(index, env_dir=env_dir)
+        roots = [r for r in _all_roots() if Path(r).is_dir()]
+        stats = build_stats_multi(roots) if roots else {"rows": []}
         mtime_dirs = []
         for row in stats.get("rows", []):
             if row["api_key"] == key_value:

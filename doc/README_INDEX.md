@@ -434,6 +434,57 @@ logs_all/
 | `session_index.jsonl` | 导出快照 | 导出时生成 |
 | `.token_index.jsonl` / `.stats_index.json` / `.session_key_cache.json` | Web 统计加速缓存（旁路） | 按需增量刷新 |
 
+## new-api 格式接入（多路径统计 / 历史预览 / 导出）
+
+除本项目自身的 `logs_all`，「日志管理」页可加入其它日志根目录参与统计与预览。
+其中 **new-api** 格式（如 `/sdc/data/newapi/logs/details/{天}/{小时}/`）与本项目差异较大：
+
+| 维度 | 本项目 `logs_all` | new-api `details` |
+|------|-------------------|-------------------|
+| 配置路径下层级 | `{env-key}/{小时}` | `{天 YYMMDD}/{小时 YYMMDDH}`（深一层） |
+| 日志文件 | `-req/-res/-headers.json` 三元组分离 | 单个合并 `*.json`（`req`/`resp` 为字符串，`resp` 是原始 SSE） |
+| index.jsonl 字段 | 含 `tok_in/out`、`success`、`q1_hash`、`chain_key`、`msg_count`、`user_turns` | 仅 `ts/model/api_key/req_file/usage`（**缺**会话派生字段） |
+
+### 可变深度叶子发现 + 字段归一化（`utils/log_scan.py`）
+
+- `iter_index_dirs(root)`：递归找含 `index.jsonl` 的叶子目录，同时覆盖 `env-key/小时`（深 1）
+  与 `天/小时`（深 2），叶子 `dir_key` = 相对 root 的 posix 路径。
+- `normalize_entry(entry)`：把两种格式的 index 条目归一化。new-api 无 `success` 字段时，
+  **成功判定退化为 `tok_out > 0`**（否则所有 new-api 行会被算成失败）。
+- `detect_format(root)`：采样首条 index 判 `native`/`newapi`。
+
+Token/Key/Channel 统计（`token_index.py`）与 Session 统计（`stats_index.py`）的进程级缓存均改为
+**按 root 分槽**（避免多目录轮询互相驱逐），并新增跨 root 合并（`query_*` 接受 root 列表、
+`build_stats_multi`）。缓存文件在 root 不可写（只读挂载）时退回项目内 `logs/.token_index_cache`
+/ `logs/.stats_index_cache`。
+
+### 会话聚合：从合并文件重算缺失字段 → session_cache.db
+
+new-api 合并文件本身含 req+resp 全部信息，缺的只是会话派生字段。三个模块补齐：
+
+| 模块 | 职责 |
+|------|------|
+| `utils/newapi_format.py` | `parse_combined_file`：拆 `req`→messages、`resp`(SSE)→assistant；`compute_session_fields`：算 `q1_hash/msg_count/user_turns/chain_key`（复用 `message_common`） |
+| `utils/newapi_consumer.py` | `aggregate_leaf`（纯函数，供多进程）/ `consume_leaf`（增量，用 `index_progress` byte_offset）。会话归并逻辑对齐 `log_routes._process_req_row`（`lookup_key=api_key\|\|q1_hash`、latest_file 取消息最多/带响应者、user_turns 回落新会话），写入 **同一个 `session_cache.db`**（root_dir = 小时叶子绝对路径） |
+| `utils/newapi_backfill.py` | 多进程后台回填：worker 只解析（`ProcessPoolExecutor`），**主进程串行入库**（每叶子先 `delete_root` 再 `bulk_insert`，幂等）。进度经 `get_backfill_status(root)` 暴露，「日志管理」页轮询 |
+
+> **决策**：只写 DB + 旁路缓存，**不改动 new-api 原目录**。SQLite 单写，多进程仅并行解析。
+
+### 历史预览 / 导出复用
+
+- **预览**（`log_routes.py`）：`_refresh_state` 识别 new-api root 时改调 `consume_leaf`；
+  `/logs/file` 对合并文件走 `build_preview_payload`（返回 messages + 末尾 `_from_res` assistant + `_usage`，
+  与原生结构对齐）；`/logs/file/raw` 放开后缀校验（限定 new-api root）。
+- **导出**（`export_sync.py`）：`export_session_index` 经 DB 路径已兼容；`_collect_triplet_files`
+  对合并单文件只收集该文件（无三元组），OBS 上传该合并文件本身。
+
+### 前置：需先回填
+
+new-api 历史预览/导出前需先在「日志管理」页点「回填」（或调 `POST /api/logs-admin/backfill`）。
+首次冷扫每小时目录 8千~2万文件；按小时叶子分片 + 进度可见 + 增量续跑（活跃目录靠 byte_offset 续接）。
+
+---
+
 ### 「文件 → DB 迁移」遗留 bug（活跃目录暴露）
 
 以下三处都假设 `.session_cache.jsonl` 文件必然存在，在**活跃目录**（当前进程正在写、

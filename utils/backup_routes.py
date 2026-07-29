@@ -21,9 +21,12 @@ from fastapi.templating import Jinja2Templates
 
 from utils.backup_store import (
     append_log,
+    claim_next_job,
     clear_logs,
     clear_failed_files,
     count_unresolved_failed,
+    enqueue_job,
+    finish_job,
     get_dir,
     get_live_syncing_dirs,
     get_logs,
@@ -31,9 +34,11 @@ from utils.backup_store import (
     list_dirs,
     list_env_names,
     list_failed_files,
+    list_queue,
     mark_backed_up,
     mark_file_resolved,
     record_failed_files,
+    reset_running_on_startup,
     update_sync_pid,
     update_sync_status,
     upsert_dir,
@@ -53,6 +58,37 @@ logger = logging.getLogger(__name__)
 _sync_lock = threading.Lock()
 _syncing_dirs: set = set()
 _live_sync_procs: dict = {}
+
+# 手动上传串行队列：单 dispatcher 线程逐个消费 DB 里的 backup_queue
+_queue_cond = threading.Condition()
+_dispatcher_thread = None
+_dispatcher_ctx: dict = {}   # {logs_all, resolver} —— 由 register_backup_routes 填充
+
+# 自动备份守护线程的共享状态（供 /api/backup/auto-status 透明展示）
+_auto_lock = threading.Lock()
+_auto_state: dict = {
+    "enabled": False,
+    "running": False,        # 是否正在跑一轮上传
+    "disk_percent": None,
+    "threshold": None,
+    "queue": [],             # 待上传的 dir_path
+    "current": "",           # 正在上传的 dir_path
+    "uploaded": [],          # 本轮已成功上传（转 pending_delete）的 dir_path
+    "pending_delete_count": 0,
+    "last_check_ts": 0,
+    "message": "",
+}
+_auto_thread = None
+
+
+def _auto_set(**kw):
+    with _auto_lock:
+        _auto_state.update(kw)
+
+
+def _auto_snapshot() -> dict:
+    with _auto_lock:
+        return dict(_auto_state)
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -184,6 +220,44 @@ def _require_ajax(request: Request):
     return None
 
 
+def _human_size(nbytes: int) -> str:
+    val = float(nbytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if val < 1024 or unit == "TB":
+            return f"{int(val)}{unit}" if unit == "B" else f"{val:.1f}{unit}"
+        val /= 1024
+    return f"{val:.1f}TB"
+
+
+def _disk_usage(path: Path) -> dict:
+    """返回 path 所在挂载点的磁盘使用情况（df）。"""
+    try:
+        st = shutil.disk_usage(str(path))
+        return {
+            "total": st.total, "used": st.used, "free": st.free,
+            "total_h": _human_size(st.total), "used_h": _human_size(st.used),
+            "free_h": _human_size(st.free),
+            "percent": round(st.used / st.total * 100, 1) if st.total else 0,
+        }
+    except OSError:
+        return {}
+
+
+def _du_size(path: Path) -> int:
+    """递归统计目录字节数（du）。大目录可能较慢。"""
+    total = 0
+    try:
+        for dirpath, _dn, filenames in os.walk(str(path)):
+            for fn in filenames:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, fn))
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
 def _scan_data_dirs(logs_all: Path, env_name: str = None, port_env_map: dict = None) -> List[dict]:
     """扫描 logs_all 下有数据的 mtime 目录。可选只扫描指定 env。"""
     result = []
@@ -226,6 +300,37 @@ def _scan_data_dirs(logs_all: Path, env_name: str = None, port_env_map: dict = N
     return result
 
 
+def _scan_root_leaves(root: str) -> List[dict]:
+    """扫描一个非 logs_all 根（如 new-api 的 details）下含 index.jsonl 的叶子。
+
+    env_name = 根 basename；mtime_tag = 叶子相对根的路径（天/小时）；
+    dir_path = env_name/mtime_tag。
+    """
+    result = []
+    try:
+        from utils.log_scan import iter_index_dirs, dir_key_for
+    except Exception:
+        return result
+    rp = Path(root)
+    if not rp.is_dir():
+        return result
+    env_name = os.path.basename(os.path.normpath(root))
+    for leaf in iter_index_dirs(rp):
+        rel = dir_key_for(rp, leaf)
+        try:
+            file_count = sum(1 for f in leaf.iterdir() if f.is_file())
+        except OSError:
+            file_count = 0
+        result.append({
+            "dir_path": f"{env_name}/{rel}",
+            "env_name": env_name,
+            "mtime_tag": rel,
+            "file_count": file_count,
+            "port": "",
+        })
+    return result
+
+
 def _scan_obs_dirs(obs_base: str, env_name: str = None) -> List[dict]:
     """扫描 OBS 上 {obs_base}/raw/ 下的 env/mtime 目录结构。"""
     result = []
@@ -254,12 +359,17 @@ def _scan_obs_dirs(obs_base: str, env_name: str = None) -> List[dict]:
     return result
 
 
-def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int, upload_script: str):
-    """在后台线程中同步单个目录到 OBS，直接上传整个文件夹，流式输出日志。"""
+def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int, upload_script: str,
+                      resolver=None):
+    """在后台线程中同步单个目录到 OBS，直接上传整个文件夹，流式输出日志。
+
+    resolver: 可选 dir_path -> 真实磁盘 Path 的解析器（供 new-api 等非 logs_all 根）。
+    """
     import subprocess as sp
     from utils.obs_utils import DEFAULT_UPLOAD_SCRIPT
 
-    logs_dir = str(logs_all / dir_path)
+    real_dir = resolver(dir_path) if resolver else (logs_all / dir_path)
+    logs_dir = str(real_dir)
     env_name, mtime_tag = dir_path.split("/", 1)
     obs_dst = f"{obs_base.rstrip('/')}/raw/{env_name}/{mtime_tag}/"
     script = upload_script or DEFAULT_UPLOAD_SCRIPT
@@ -268,7 +378,7 @@ def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int
 
     try:
         # 本地目录不存在：已被清理，标记为 backed_up 跳过上传
-        if not (logs_all / dir_path).is_dir():
+        if not Path(real_dir).is_dir():
             dir_info = get_dir(dir_path)
             if dir_info and dir_info.get("obs_path"):
                 update_sync_status(dir_path, "backed_up", obs_path=dir_info["obs_path"])
@@ -332,24 +442,6 @@ def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int
         _syncing_dirs.discard(dir_path)
 
 
-def _run_sync_batch(dirs: List[str], logs_all: Path):
-    """后台批量同步。"""
-    cfg = load_sync_config()
-    obs_base = cfg.get("obs_base", "") or load_obs_base()
-    workers = cfg.get("workers", 4)
-    upload_script = cfg.get("upload_script", "")
-
-    if not obs_base:
-        for d in dirs:
-            update_sync_status(d, "error", error_msg="obs_base 未配置")
-            append_log(d, "同步失败: obs_base 未配置", level="error")
-            _syncing_dirs.discard(d)
-        return
-
-    for d in dirs:
-        _run_sync_for_dir(d, logs_all, obs_base, workers, upload_script)
-
-
 def _run_resync_failed(dir_path: str):
     """补同步：逐个重传该目录 obsutil 上报的失败文件。"""
     try:
@@ -399,6 +491,170 @@ def _run_resync_failed(dir_path: str):
         _syncing_dirs.discard(dir_path)
 
 
+def _queue_dispatch_loop():
+    """单 dispatcher：从 backup_queue 逐个领取手动上传任务，串行执行。"""
+    while True:
+        job = claim_next_job()
+        if not job:
+            with _queue_cond:
+                _queue_cond.wait(timeout=30)
+            continue
+
+        dir_path = job["dir_path"]
+        job_type = job.get("job_type", "sync")
+        _syncing_dirs.add(dir_path)
+        try:
+            if job_type == "resync":
+                _run_resync_failed(dir_path)
+            else:
+                cfg = load_sync_config()
+                obs_base = cfg.get("obs_base", "") or load_obs_base()
+                workers = cfg.get("workers", 4)
+                upload_script = cfg.get("upload_script", "")
+                if not obs_base:
+                    update_sync_status(dir_path, "error", error_msg="obs_base 未配置")
+                    append_log(dir_path, "同步失败: obs_base 未配置", level="error")
+                    _syncing_dirs.discard(dir_path)
+                else:
+                    logs_all = _dispatcher_ctx.get("logs_all")
+                    resolver = _dispatcher_ctx.get("resolver")
+                    _run_sync_for_dir(dir_path, logs_all, obs_base, workers,
+                                      upload_script, resolver=resolver)
+        except Exception:
+            logger.exception("queue dispatch failed for %s", dir_path)
+            _syncing_dirs.discard(dir_path)
+        finally:
+            finish_job(job["id"])
+
+
+def _ensure_dispatcher():
+    """懒启动单 dispatcher 线程（幂等）。"""
+    global _dispatcher_thread
+    with _queue_cond:
+        if _dispatcher_thread is not None and _dispatcher_thread.is_alive():
+            return
+        _dispatcher_thread = threading.Thread(
+            target=_queue_dispatch_loop, daemon=True, name="backup-queue-dispatcher"
+        )
+        _dispatcher_thread.start()
+
+
+def _notify_dispatcher():
+    with _queue_cond:
+        _queue_cond.notify()
+
+
+# ---------------------------------------------------------------------------
+# 自动备份：磁盘达阈值时自动上传未备份目录，成功后转 pending_delete（等人工确认删除）
+# ---------------------------------------------------------------------------
+
+def _auto_cfg() -> dict:
+    """从 sync_config(settings/obs_rl.yaml) 读自动备份配置。"""
+    cfg = load_sync_config()
+    return {
+        "enabled": bool(cfg.get("auto_backup_enabled", False)),
+        "threshold": float(cfg.get("auto_backup_disk_percent", 70) or 70),
+        "interval": max(30, int(cfg.get("auto_backup_check_interval", 120) or 120)),
+        "stop_percent": float(cfg.get("auto_backup_stop_percent", 0) or 0),
+        "workers": int(cfg.get("workers", 4) or 4),
+        "upload_script": cfg.get("upload_script", "") or "",
+        "obs_base": cfg.get("obs_base", "") or load_obs_base(),
+    }
+
+
+def _run_auto_backup_round(logs_all: Path, active_env: str, active_path: str,
+                           resolver, forced: bool = False) -> None:
+    """跑一轮自动上传：把 active_env 下未备份目录最旧优先逐个上传，成功转 pending_delete。
+
+    forced=True 时无视阈值直接跑（手动触发/立即备份）。
+    """
+    from utils.backup_store import list_backup_candidates, count_pending_delete
+
+    cfg = _auto_cfg()
+    if not cfg["obs_base"]:
+        _auto_set(running=False, message="未配置 OBS(obs_base)，无法自动备份")
+        return
+
+    candidates = list_backup_candidates(active_env)
+    queue = [d["dir_path"] for d in candidates]
+    _auto_set(running=True, queue=list(queue), current="", uploaded=[],
+              message=("手动触发，" if forced else "") + f"待上传 {len(queue)} 个目录")
+
+    if not queue:
+        _auto_set(running=False, current="", message="没有待备份的目录")
+        return
+
+    uploaded: List[str] = []
+    for dir_path in queue:
+        # 与手动同步互斥
+        with _sync_lock:
+            if dir_path in _syncing_dirs:
+                continue
+            _syncing_dirs.add(dir_path)
+        _auto_set(current=dir_path,
+                  queue=[d for d in queue if d not in uploaded and d != dir_path])
+        try:
+            _run_sync_for_dir(dir_path, logs_all, cfg["obs_base"], cfg["workers"],
+                              cfg["upload_script"], resolver=resolver)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("auto backup upload failed: %s", dir_path)
+            append_log(dir_path, f"自动备份上传异常: {e}", level="error")
+            continue
+
+        # 上传结果以 DB 状态为准：done 才转 pending_delete（partial/error 保留原状态待人工处理）
+        info = get_dir(dir_path)
+        if info and info.get("status") == "done" and info.get("obs_path"):
+            update_sync_status(dir_path, "pending_delete", obs_path=info["obs_path"])
+            append_log(dir_path, "自动备份上传成功，转入待确认删除")
+            uploaded.append(dir_path)
+            _auto_set(uploaded=list(uploaded),
+                      pending_delete_count=count_pending_delete(active_env))
+        else:
+            append_log(dir_path, "自动备份未成功（保留状态，需人工处理）", level="error")
+
+        # 每传完一个重查磁盘：若配置了 stop_percent 且已降到其下则提前结束本轮
+        disk = _disk_usage(Path(active_path))
+        pct = disk.get("percent")
+        _auto_set(disk_percent=pct)
+        if not forced and cfg["stop_percent"] and pct is not None and pct <= cfg["stop_percent"]:
+            _auto_set(message=f"磁盘已降至 {pct}% ≤ 停止阈值 {cfg['stop_percent']}%，本轮结束")
+            break
+
+    _auto_set(running=False, current="", queue=[],
+              pending_delete_count=count_pending_delete(active_env),
+              message=f"本轮完成：成功上传 {len(uploaded)} 个，待确认删除")
+
+
+def _auto_backup_loop(logs_all: Path, active_env: str, active_path: str, resolver) -> None:
+    """后台守护：定时查 df，达阈值则跑一轮自动上传。仅 leader worker 启动。"""
+    from utils.backup_store import count_pending_delete
+
+    logger.info("auto-backup daemon started (env=%s, path=%s)", active_env, active_path)
+    while True:
+        try:
+            cfg = _auto_cfg()
+            disk = _disk_usage(Path(active_path))
+            pct = disk.get("percent")
+            _auto_set(enabled=cfg["enabled"], threshold=cfg["threshold"],
+                      disk_percent=pct, last_check_ts=time.time(),
+                      pending_delete_count=count_pending_delete(active_env))
+
+            if not cfg["enabled"]:
+                _auto_set(message="自动备份未开启")
+            elif pct is None:
+                _auto_set(message="无法读取磁盘使用率")
+            elif pct < cfg["threshold"]:
+                _auto_set(message=f"磁盘 {pct}% < 阈值 {cfg['threshold']}%，无需自动备份")
+            else:
+                _auto_set(message=f"磁盘 {pct}% ≥ 阈值 {cfg['threshold']}%，开始自动上传")
+                _run_auto_backup_round(logs_all, active_env, active_path, resolver)
+
+            time.sleep(cfg["interval"])
+        except Exception:  # noqa: BLE001 — 守护线程不能崩
+            logger.exception("auto-backup loop error")
+            time.sleep(60)
+
+
 def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
     logs_all = Path(logs_dir).parent.parent
     templates = Jinja2Templates(directory="templates")
@@ -418,6 +674,52 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                         _port_env_map[env_d.name] = p
     if _active_env_name and port:
         _port_env_map[_active_env_name] = port
+
+    # --- 多根支持：把配置的历史路径（含 new-api）也纳入备份 ---
+    # env_name = 根目录 basename（如 logs_all 下是 env-xxx；new-api 根是 details）
+    # 对 new-api 根，其 basename 作为一个「env」，其 天/小时 叶子作为 mtime_tag。
+    def _extra_roots() -> list:
+        """配置的历史路径（排除活跃 logs_all 自身，那条已由 logs_all 扫描覆盖）。"""
+        try:
+            from utils.logs_config import get_history_paths
+            return [p for p in get_history_paths() if Path(p).is_dir()]
+        except Exception:
+            return []
+
+    def _root_env_name(root: str) -> str:
+        return os.path.basename(os.path.normpath(root))
+
+    def _extra_root_for_env(env_name: str):
+        for root in _extra_roots():
+            if _root_env_name(root) == env_name:
+                return root
+        return None
+
+    def _resolve_real_dir(dir_path: str) -> Path:
+        """把 dir_path（env_name/mtime_tag[/...]）解析为真实磁盘路径。
+
+        优先按 logs_all/{dir_path}；不存在时在配置的历史根里按 <root_basename>/<rel> 匹配。
+        """
+        cand = logs_all / dir_path
+        if cand.is_dir():
+            return cand
+        env_name = dir_path.split("/", 1)[0]
+        for root in _extra_roots():
+            if _root_env_name(root) == env_name:
+                rel = dir_path.split("/", 1)[1] if "/" in dir_path else ""
+                real = Path(root) / rel
+                if real.is_dir():
+                    return real
+        return cand  # 兜底：返回 logs_all 下的路径（可能不存在）
+
+    # 启动手动上传串行队列 dispatcher：登记上下文 + 恢复中断项 + 起线程
+    _dispatcher_ctx["logs_all"] = logs_all
+    _dispatcher_ctx["resolver"] = _resolve_real_dir
+    try:
+        reset_running_on_startup()
+    except Exception:
+        logger.exception("reset backup_queue running-on-startup failed")
+    _ensure_dispatcher()
 
     def _ctx(request: Request) -> dict:
         return {
@@ -442,10 +744,14 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             return denied
 
         env_name = request.query_params.get("env_name", "")
+        _newapi_root = _extra_root_for_env(env_name) if env_name else None
 
         # 只有该 env 在 DB 中完全没有记录时，才做一次性初始扫描（首次建立 DB 或 DB 丢失）
         if env_name and not has_any_dirs(env_name):
-            fs_dirs = _scan_data_dirs(logs_all, env_name=env_name, port_env_map=_port_env_map)
+            if _newapi_root:
+                fs_dirs = _scan_root_leaves(_newapi_root)
+            else:
+                fs_dirs = _scan_data_dirs(logs_all, env_name=env_name, port_env_map=_port_env_map)
             for d in fs_dirs:
                 upsert_dir(d["dir_path"], d["env_name"], d["mtime_tag"], d["file_count"],
                            port=d.get("port", ""), has_local=True)
@@ -453,12 +759,14 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         db_dirs = list_dirs(env_name=env_name if env_name else None)
 
         # 从 token_index 按 env 批量加载统计数据（内存缓存，无额外 IO）
+        # new-api env 的 token_index 以真实根为 key（mtime_tag 为 天/小时 相对路径）。
         _tok_cache: dict = {}
         def _get_tok_stats(env_n: str, mtime_t: str) -> dict:
             if env_n not in _tok_cache:
                 try:
                     from utils.token_index import refresh_token_index
-                    idx = refresh_token_index(str(logs_all / env_n))
+                    _root = _extra_root_for_env(env_n) or str(logs_all / env_n)
+                    idx = refresh_token_index(str(_root))
                     _tok_cache[env_n] = idx.get("dirs", {})
                 except Exception:
                     _tok_cache[env_n] = {}
@@ -507,20 +815,20 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         if not dirs:
             return JSONResponse({"detail": "没有选择目录"}, status_code=400)
 
-        new_dirs = []
+        enqueued = []
+        already = []
         for d in dirs:
-            if d in _syncing_dirs:
-                continue
-            _syncing_dirs.add(d)
-            new_dirs.append(d)
+            if enqueue_job(d, "sync"):
+                enqueued.append(d)
+            else:
+                already.append(d)
 
-        if not new_dirs:
-            return JSONResponse({"detail": "所选目录正在同步中"}, status_code=409)
+        if not enqueued:
+            return JSONResponse({"detail": "所选目录已在队列中", "already": already},
+                                status_code=409)
 
-        t = threading.Thread(target=_run_sync_batch, args=(new_dirs, logs_all), daemon=True)
-        t.start()
-
-        return JSONResponse({"started": new_dirs})
+        _notify_dispatcher()
+        return JSONResponse({"enqueued": enqueued, "already": already})
 
     @app.post("/api/backup/resync-failed")
     async def backup_resync_failed(request: Request):
@@ -541,14 +849,40 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         if not failed:
             return JSONResponse({"detail": "没有待补传的失败文件，请重新同步"}, status_code=400)
 
-        if dir_path in _syncing_dirs:
-            return JSONResponse({"detail": "该目录正在同步中"}, status_code=409)
-        _syncing_dirs.add(dir_path)
+        if not enqueue_job(dir_path, "resync"):
+            return JSONResponse({"detail": "该目录已在队列中", "already": dir_path},
+                                status_code=409)
 
-        t = threading.Thread(target=_run_resync_failed, args=(dir_path,), daemon=True)
-        t.start()
+        _notify_dispatcher()
+        return JSONResponse({"enqueued": dir_path, "total": len(failed)})
 
-        return JSONResponse({"started": dir_path, "total": len(failed)})
+    @app.get("/api/backup/queue-status")
+    def backup_queue_status(request: Request):
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        jobs = list_queue()
+        running = ""
+        queued = []
+        for j in jobs:
+            if j.get("state") == "running":
+                running = j["dir_path"]
+            else:
+                queued.append(j["dir_path"])
+        return JSONResponse({
+            "running": running,
+            "queued": queued,
+            "queue_len": len(queued),
+            "jobs": [
+                {
+                    "dir_path": j["dir_path"],
+                    "job_type": j.get("job_type", "sync"),
+                    "state": j.get("state", "queued"),
+                    "enqueued_at": j.get("enqueued_at", ""),
+                }
+                for j in jobs
+            ],
+        })
 
     @app.get("/api/backup/config")
     def backup_config_get(request: Request):
@@ -620,7 +954,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         if dir_info.get("status") != "done":
             return JSONResponse({"detail": "只能删除已同步完成的目录"}, status_code=400)
 
-        target = logs_all / dir_path
+        target = _resolve_real_dir(dir_path)
         if target.is_dir():
             try:
                 shutil.rmtree(str(target))
@@ -666,9 +1000,19 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             for d in logs_all.iterdir():
                 if d.is_dir() and not d.name.startswith("logs_") and not d.name.startswith("."):
                     env_set.add(d.name)
+        # new-api 等配置的历史根：basename 作为一个 env
+        newapi_envs = set()
+        for root in _extra_roots():
+            en = _root_env_name(root)
+            env_set.add(en)
+            newapi_envs.add(en)
         envs = []
         for name in sorted(env_set):
-            envs.append({"name": name, "port": _port_env_map.get(name, "")})
+            envs.append({
+                "name": name,
+                "port": _port_env_map.get(name, ""),
+                "newapi": name in newapi_envs,
+            })
         return JSONResponse({"envs": envs, "current_env": _active_env_name})
 
     @app.post("/api/backup/scan-obs")
@@ -723,7 +1067,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
 
         env_name, mtime_tag = dir_path.split("/", 1)
         obs_dst = f"{obs_base.rstrip('/')}/raw/{env_name}/{mtime_tag}/"
-        logs_dir_full = str(logs_all / dir_path)
+        logs_dir_full = str(_resolve_real_dir(dir_path))
         interval = cfg.get("interval", 600)
         workers = cfg.get("workers", 4)
         upload_script = cfg.get("upload_script")
@@ -776,6 +1120,152 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             return JSONResponse({"ok": True})
         return JSONResponse({"detail": result.get("detail", "停止失败")}, status_code=400)
 
+    # du 结果缓存：{path: (size_bytes, computed_at)}；du 在后台线程算，避免大目录阻塞请求
+    _du_cache: dict = {}
+    _du_inflight: set = set()
+    _du_lock = threading.Lock()
+    _DU_TTL = 600  # 秒
+
+    def _du_worker(path: str):
+        try:
+            sz = _du_size(Path(path))
+            with _du_lock:
+                _du_cache[path] = (sz, time.time())
+        finally:
+            with _du_lock:
+                _du_inflight.discard(path)
+
+    @app.get("/api/backup/storage")
+    def backup_storage(request: Request):
+        """返回各日志根所在磁盘用量（df，实时）+ 目录占用（du，后台计算带缓存）。
+
+        with_size=true 时：命中缓存直接返回；否则后台起线程计算，本次返回 size_pending=true，
+        前端轮询后续请求获取结果（不阻塞、不超时）。
+        """
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        with_size = request.query_params.get("with_size", "").lower() in ("1", "true", "yes")
+
+        # 参与备份的所有根：活跃 env 的父（logs_all）+ 各历史根
+        roots = []
+        active_root = str(logs_all)
+        _active_path = str((logs_all / _active_env_name)) if _active_env_name else active_root
+        # 活跃 env 目录尚未创建时，退回 logs_all（再退回项目根），保证 df 仍有值
+        if not Path(_active_path).exists():
+            _active_path = active_root if Path(active_root).exists() else _project_root
+        roots.append({"name": _active_env_name or os.path.basename(active_root),
+                      "path": _active_path,
+                      "active": True})
+        for r in _extra_roots():
+            roots.append({"name": _root_env_name(r), "path": r, "active": False})
+
+        out = []
+        for r in roots:
+            p = Path(r["path"])
+            info = {"name": r["name"], "path": r["path"], "active": r["active"],
+                    "disk": _disk_usage(p)}
+            if with_size and p.is_dir():
+                with _du_lock:
+                    cached = _du_cache.get(r["path"])
+                    fresh = cached and (time.time() - cached[1] < _DU_TTL)
+                    if fresh:
+                        info["size_bytes"] = cached[0]
+                        info["size_h"] = _human_size(cached[0])
+                    else:
+                        info["size_pending"] = True
+                        if r["path"] not in _du_inflight:
+                            _du_inflight.add(r["path"])
+                            threading.Thread(target=_du_worker, args=(r["path"],),
+                                             daemon=True, name="backup-du").start()
+            out.append(info)
+
+        return JSONResponse({"roots": out})
+
+    # -----------------------------------------------------------------
+    # 自动备份：透明状态 / 立即触发 / 待确认删除
+    # -----------------------------------------------------------------
+    def _auto_active_path() -> str:
+        active_root = str(logs_all)
+        p = str((logs_all / _active_env_name)) if _active_env_name else active_root
+        if not Path(p).exists():
+            p = active_root if Path(active_root).exists() else _project_root
+        return p
+
+    @app.get("/api/backup/auto-status")
+    def backup_auto_status(request: Request):
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        snap = _auto_snapshot()
+        # 补一份实时配置（阈值/开关可能刚改了 yaml）
+        cfg = _auto_cfg()
+        snap["enabled"] = cfg["enabled"]
+        snap["threshold"] = cfg["threshold"]
+        snap["obs_configured"] = bool(cfg["obs_base"])
+        return JSONResponse(snap)
+
+    @app.post("/api/backup/auto-trigger")
+    def backup_auto_trigger(request: Request):
+        """手动立即跑一轮自动上传（无视阈值，仍需 obs_base 已配置）。"""
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        with _auto_lock:
+            if _auto_state.get("running"):
+                return JSONResponse({"ok": False, "msg": "自动备份正在运行中"}, status_code=409)
+        env = _active_env_name
+        apath = _auto_active_path()
+        t = threading.Thread(
+            target=_run_auto_backup_round,
+            args=(logs_all, env, apath, _resolve_real_dir),
+            kwargs={"forced": True}, daemon=True, name="backup-auto-manual")
+        t.start()
+        return JSONResponse({"ok": True, "msg": "已开始自动上传"})
+
+    @app.get("/api/backup/pending-delete")
+    def backup_pending_delete_list(request: Request):
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        from utils.backup_store import list_pending_delete
+        env = request.query_params.get("env_name", "") or None
+        rows = list_pending_delete(env)
+        return JSONResponse({"dirs": rows})
+
+    @app.post("/api/backup/confirm-delete")
+    async def backup_confirm_delete(request: Request):
+        """人工确认删除：仅对 pending_delete 且已上传(has_obs)的目录，删本地并标 backed_up。"""
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        body = await request.json()
+        dirs = body.get("dirs", [])
+        if not dirs:
+            return JSONResponse({"detail": "没有选择目录"}, status_code=400)
+
+        deleted, skipped = [], []
+        for dir_path in dirs:
+            info = get_dir(dir_path)
+            # 安全校验：必须是待删状态 + 已上传 OBS，防止误删未备份数据
+            if not info or info.get("status") != "pending_delete" \
+                    or not info.get("has_obs") or not info.get("obs_path"):
+                skipped.append(dir_path)
+                append_log(dir_path, "确认删除被拒绝：非待删状态或未成功上传", level="error")
+                continue
+            target = _resolve_real_dir(dir_path)
+            if target.is_dir():
+                try:
+                    shutil.rmtree(str(target))
+                    append_log(dir_path, f"人工确认删除，本地目录已删除: {target}")
+                except Exception as e:  # noqa: BLE001
+                    append_log(dir_path, f"删除失败: {e}", level="error")
+                    skipped.append(dir_path)
+                    continue
+            mark_backed_up(dir_path)
+            deleted.append(dir_path)
+        return JSONResponse({"ok": True, "deleted": deleted, "skipped": skipped})
+
     _cleanup_stale_live_syncs()
 
     # 启动时将当前活跃 mtime 目录注册进 DB（append-only，不触发文件系统全量扫描）
@@ -790,3 +1280,18 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                 pass
         upsert_dir(_active_dir_path, _env_n, _mtime_t, _fcount,
                    port=_port_env_map.get(_env_n, port), has_local=True)
+
+    # 启动自动备份守护线程（仅 leader worker，避免多 worker 重复上传）
+    global _auto_thread
+    _is_leader = True
+    try:
+        from utils.leader_lock import is_leader
+        _is_leader = is_leader()
+    except Exception:
+        _is_leader = True
+    if _is_leader and _active_env_name and (_auto_thread is None or not _auto_thread.is_alive()):
+        _auto_thread = threading.Thread(
+            target=_auto_backup_loop,
+            args=(logs_all, _active_env_name, _auto_active_path(), _resolve_real_dir),
+            daemon=True, name="backup-auto-daemon")
+        _auto_thread.start()

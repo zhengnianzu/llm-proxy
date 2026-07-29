@@ -39,6 +39,7 @@
 .status-badge.partial { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
 .status-badge.deleted { background: var(--muted); color: var(--muted-foreground); text-decoration: line-through; }
 .status-badge.backed_up { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.status-badge.pending_delete { background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); }
 .status-badge.live_syncing { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); animation: pulse 1.5s infinite; border: 1px solid color-mix(in srgb, var(--success) 40%, transparent); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
 
@@ -118,11 +119,99 @@
         </div>
     </div>
 
+    <!-- Storage Panel -->
+    <div class="config-panel" v-if="storage.length">
+        <h6 style="cursor:default;">
+            存储用量
+            <button class="btn-xs" style="margin-left:auto;" @click="loadStorage(true)" :disabled="storageLoadingSize">
+                {{ storageLoadingSize ? '统计中...' : '统计目录大小' }}
+            </button>
+        </h6>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+            <div v-for="s in storage" :key="s.path" style="font-size:.84rem;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span class="mono" style="font-weight:600;">{{ s.name }}</span>
+                    <span v-if="s.active" style="font-size:.7rem;background:var(--success);color:#fff;padding:1px 6px;border-radius:99px;">当前</span>
+                    <span class="mono" style="color:var(--muted-foreground);font-size:.78rem;">{{ s.path }}</span>
+                    <span v-if="s.size_h" style="color:var(--primary);">目录占用 {{ s.size_h }}</span>
+                    <span v-else-if="s.size_pending" style="color:var(--muted-foreground);">目录占用统计中…</span>
+                </div>
+                <div v-if="s.disk && s.disk.total" style="margin-top:4px;">
+                    <div style="height:8px;background:var(--muted);border-radius:99px;overflow:hidden;max-width:420px;">
+                        <div :style="{width: s.disk.percent + '%', height:'100%', background: s.disk.percent > 90 ? 'var(--danger)' : 'var(--success)'}"></div>
+                    </div>
+                    <div style="color:var(--muted-foreground);font-size:.78rem;margin-top:2px;">
+                        磁盘 已用 {{ s.disk.used_h }} / 共 {{ s.disk.total_h }}（剩余 {{ s.disk.free_h }}，{{ s.disk.percent }}%）
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Auto-backup Panel -->
+    <div class="config-panel">
+        <h6 style="cursor:default;">
+            自动备份
+            <span style="margin-left:8px;font-size:.78rem;font-weight:400;"
+                  :style="{color: auto.enabled ? 'var(--success)' : 'var(--muted-foreground)'}">
+                {{ auto.enabled ? '已开启' : '未开启' }}
+            </span>
+            <button class="btn-xs" style="margin-left:auto;" @click="autoTrigger"
+                    :disabled="auto.running || !auto.obs_configured" title="无视阈值，立即上传所有未备份目录">
+                {{ auto.running ? '上传中...' : '立即备份' }}
+            </button>
+        </h6>
+        <div style="font-size:.84rem;">
+            <div style="margin-bottom:6px;">
+                <span v-if="auto.disk_percent != null">磁盘使用率 <strong>{{ auto.disk_percent }}%</strong>
+                    / 触发阈值 {{ auto.threshold }}%</span>
+                <span v-else style="color:var(--muted-foreground);">磁盘使用率读取中…</span>
+                <span v-if="!auto.obs_configured" class="msg-err" style="margin-left:8px;color:var(--danger);">未配置 OBS，无法自动备份</span>
+            </div>
+            <div style="color:var(--muted-foreground);">{{ auto.message || '—' }}</div>
+            <div v-if="auto.running || auto.current || (auto.queue && auto.queue.length)" style="margin-top:8px;">
+                <div v-if="auto.current"><span style="color:var(--info);">正在上传：</span><span class="mono">{{ auto.current }}</span></div>
+                <div v-if="auto.uploaded && auto.uploaded.length" style="color:var(--success);">
+                    本轮已上传 {{ auto.uploaded.length }}：<span class="mono" style="font-size:.78rem;">{{ auto.uploaded.join(', ') }}</span>
+                </div>
+                <div v-if="auto.queue && auto.queue.length" style="color:var(--muted-foreground);">
+                    排队中 {{ auto.queue.length }}：<span class="mono" style="font-size:.78rem;">{{ auto.queue.slice(0,10).join(', ') }}{{ auto.queue.length > 10 ? ' …' : '' }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pending-delete confirmation -->
+    <div class="config-panel" v-if="pendingDelete.length" style="border-color:var(--warning);">
+        <h6 style="cursor:default;">
+            待确认删除（已上传 OBS，确认后删除本地释放磁盘）
+            <span style="margin-left:8px;font-size:.78rem;font-weight:400;color:var(--muted-foreground);">{{ pendingDelete.length }} 个</span>
+            <button class="btn-xs" style="margin-left:auto;background:var(--danger);color:#fff;border-color:var(--danger);"
+                    @click="confirmDelete(pendingDelete.map(function(d){return d.dir_path}))">
+                批量确认删除
+            </button>
+        </h6>
+        <table class="dir-table">
+            <thead><tr><th>环境</th><th>目录</th><th>OBS 路径</th><th>操作</th></tr></thead>
+            <tbody>
+                <tr v-for="d in pendingDelete" :key="d.dir_path">
+                    <td class="mono">{{ d.env_name }}</td>
+                    <td class="mono">{{ d.mtime_tag }}</td>
+                    <td class="mono" style="font-size:.76rem;word-break:break-all;">{{ d.obs_path }}</td>
+                    <td>
+                        <button class="btn-xs" style="background:var(--danger);color:#fff;border-color:var(--danger);"
+                                @click="confirmDelete([d.dir_path])">确认删除</button>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
     <!-- Toolbar -->
     <div class="toolbar">
         <select class="form-input" v-model="envFilter" @change="refresh()" style="width:auto;min-width:180px;font-size:.84rem;">
             <option v-for="e in envList" :key="e.name" :value="e.name">
-                {{ e.name }}{{ e.port ? ' (port' + e.port + ')' : '' }}
+                {{ e.name }}{{ e.port ? ' (port' + e.port + ')' : '' }}{{ e.newapi ? ' [new-api]' : '' }}
             </option>
         </select>
         <button class="btn btn-primary btn-sm" @click="syncSelected" :disabled="selectedDirs.length === 0 || syncing">
@@ -140,6 +229,10 @@
             刷新
         </button>
         <span class="count">共 {{ dirs.length }} 个目录</span>
+        <span v-if="queue.running || queue.queue_len > 0" class="count" style="color:var(--info);">
+            <template v-if="queue.running">正在上传: <span class="mono">{{ queue.running }}</span></template>
+            <template v-if="queue.queue_len > 0"> · 排队中 {{ queue.queue_len }} 个</template>
+        </span>
     </div>
 
     <!-- Dir Table -->
@@ -178,7 +271,8 @@
                         <span v-if="d.has_obs"   class="src-badge obs">OBS</span>
                     </td>
                     <td>
-                        <span :class="['status-badge', d.status]">{{ statusLabel(d.status) }}</span>
+                        <span v-if="queuedSet.has(d.dir_path) && queue.running !== d.dir_path" class="status-badge syncing">排队中</span>
+                        <span v-else :class="['status-badge', d.status]">{{ statusLabel(d.status) }}</span>
                     </td>
                     <td>{{ d.sync_time || '-' }}</td>
                     <td class="mono" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="d.obs_path">
@@ -190,8 +284,8 @@
                             <button class="btn-xs" v-if="d.status !== 'live_syncing'" @click="startLiveSync(d)" :disabled="liveSyncing || d.status === 'syncing'" style="background:color-mix(in srgb, var(--success) 10%, transparent);border-color:var(--success);color:var(--success);">开启在线同步</button>
                             <button class="btn-xs danger" v-if="d.status === 'live_syncing'" @click="stopLiveSync(d)" :disabled="liveSyncing">停止在线同步</button>
                         </template>
-                        <button class="btn-xs" @click="syncOne(d)" :disabled="d.status === 'syncing' || d.status === 'live_syncing'" v-if="d.status !== 'live_syncing'">同步</button>
-                        <button class="btn-xs" v-if="(d.status === 'partial' || d.status === 'error') && d.failed_count > 0" @click="resyncFailed(d)" :disabled="d.status === 'syncing'" style="background:color-mix(in srgb, var(--warning) 12%, transparent);border-color:var(--warning);color:var(--warning);">补同步 ({{ d.failed_count }})</button>
+                        <button class="btn-xs" @click="syncOne(d)" :disabled="d.status === 'syncing' || d.status === 'live_syncing' || queuedSet.has(d.dir_path) || queue.running === d.dir_path" v-if="d.status !== 'live_syncing'">同步</button>
+                        <button class="btn-xs" v-if="(d.status === 'partial' || d.status === 'error') && d.failed_count > 0" @click="resyncFailed(d)" :disabled="d.status === 'syncing' || queuedSet.has(d.dir_path) || queue.running === d.dir_path" style="background:color-mix(in srgb, var(--warning) 12%, transparent);border-color:var(--warning);color:var(--warning);">补同步 ({{ d.failed_count }})</button>
                         <button class="btn-xs" @click="openLogs(d)">详情</button>
                         <button class="btn-xs danger" @click="deleteOne(d)" :disabled="d.status !== 'done'" v-if="d.status === 'done'">删除本地文件</button>
                     </td>
@@ -279,6 +373,12 @@ new Vue({
         envFilter: '',
         currentEnv: '',
         obsScanning: false,
+        storage: [],
+        storageLoadingSize: false,
+        auto: { enabled: false, running: false, disk_percent: null, threshold: null, queue: [], current: '', uploaded: [], message: '', obs_configured: true },
+        pendingDelete: [],
+        autoTimer: null,
+        queue: { running: '', queued: [], queue_len: 0 },
     },
     computed: {
         allChecked() {
@@ -296,6 +396,9 @@ new Vue({
         hasSyncing() {
             return this.dirs.some(d => d.status === 'syncing' || d.status === 'live_syncing');
         },
+        queuedSet() {
+            return new Set(this.queue.queued || []);
+        },
         obsParentPath() {
             if (!this.obsDrawerPath) return null;
             var p = this.obsDrawerPath.replace(/\/+$/, '');
@@ -306,8 +409,48 @@ new Vue({
     },
     methods: {
         statusLabel(s) {
-            var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', partial: '部分失败', deleted: '已删除', backed_up: '已备份' };
+            var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', partial: '部分失败', deleted: '已删除', backed_up: '已备份', pending_delete: '待删除' };
             return m[s] || s;
+        },
+        loadQueue() {
+            fetch('/api/backup/queue-status', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => { this.queue = data; })
+                .catch(e => console.error(e));
+        },
+        loadAuto() {
+            fetch('/api/backup/auto-status', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(d => { this.auto = d; })
+                .catch(() => {});
+            fetch('/api/backup/pending-delete' + (this.envFilter ? '?env_name=' + encodeURIComponent(this.envFilter) : ''),
+                  { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(d => { this.pendingDelete = d.dirs || []; })
+                .catch(() => {});
+        },
+        autoTrigger() {
+            fetch('/api/backup/auto-trigger', { method: 'POST', headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(d => { if (!d.ok) alert(d.msg || '触发失败'); else this.loadAuto(); })
+                .catch(() => alert('请求失败'));
+        },
+        confirmDelete(dirs) {
+            if (!dirs || !dirs.length) return;
+            if (!confirm('确认删除本地目录？(' + dirs.length + ' 个)\n这些目录已上传 OBS，删除后仅释放本地磁盘，不影响 OBS 备份。')) return;
+            fetch('/api/backup/confirm-delete', {
+                method: 'POST',
+                headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dirs: dirs })
+            })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.skipped && d.skipped.length) alert('已删除 ' + (d.deleted || []).length + ' 个，跳过 ' + d.skipped.length + ' 个（非待删/未上传）');
+                    this.loadAuto();
+                    this.refresh();
+                    this.loadStorage(false);
+                })
+                .catch(() => alert('请求失败'));
         },
         toggleAll(e) {
             if (e.target.checked) {
@@ -358,8 +501,8 @@ new Vue({
             })
                 .then(r => r.json())
                 .then(data => {
-                    if (data.started) {
-                        d.status = 'syncing';
+                    if (data.enqueued) {
+                        this.loadQueue();
                         this._startAutoRefresh();
                     } else if (data.detail) {
                         alert(data.detail);
@@ -380,12 +523,12 @@ new Vue({
             })
                 .then(r => r.json())
                 .then(data => {
-                    if (data.started) {
-                        data.started.forEach(dp => {
-                            var d = this.dirs.find(x => x.dir_path === dp);
-                            if (d) d.status = 'syncing';
-                        });
+                    if (data.enqueued && data.enqueued.length) {
+                        this.loadQueue();
                         this._startAutoRefresh();
+                        if (data.already && data.already.length) {
+                            alert('已加入队列 ' + data.enqueued.length + ' 个，另有 ' + data.already.length + ' 个已在队列中');
+                        }
                     } else if (data.detail) {
                         alert(data.detail);
                     }
@@ -458,7 +601,8 @@ new Vue({
         _startAutoRefresh() {
             if (this.refreshTimer) return;
             this.refreshTimer = setInterval(() => {
-                if (!this.hasSyncing) {
+                this.loadQueue();
+                if (!this.hasSyncing && this.queue.queue_len === 0 && !this.queue.running) {
                     clearInterval(this.refreshTimer);
                     this.refreshTimer = null;
                     return;
@@ -517,6 +661,23 @@ new Vue({
                     this.currentEnv = data.current_env || '';
                 })
                 .catch(e => console.error(e));
+        },
+        loadStorage(withSize) {
+            if (withSize) this.storageLoadingSize = true;
+            var url = '/api/backup/storage' + (withSize ? '?with_size=true' : '');
+            fetch(url, { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json())
+                .then(data => {
+                    this.storage = data.roots || [];
+                    // du 在后台计算：仍有 pending 则轮询直到全部完成
+                    var pending = (data.roots || []).some(function(r) { return r.size_pending; });
+                    if (withSize && pending) {
+                        setTimeout(function() { this.loadStorage(true); }.bind(this), 3000);
+                    } else {
+                        this.storageLoadingSize = false;
+                    }
+                })
+                .catch(e => { this.storageLoadingSize = false; console.error(e); });
         },
         loadEnvList() {
             fetch('/api/backup/env-list', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
@@ -595,10 +756,15 @@ new Vue({
         this.loadEnvList();
         this.loadConfig();
         this.loadActiveDir();
+        this.loadStorage(false);
+        this.loadAuto();
+        this.loadQueue();
+        this.autoTimer = setInterval(() => { this.loadAuto(); this.loadQueue(); }, 5000);
     },
     beforeDestroy() {
         this._stopLogPoll();
         if (this.refreshTimer) clearInterval(this.refreshTimer);
+        if (this.autoTimer) clearInterval(this.autoTimer);
     },
 });
 {% endraw %}

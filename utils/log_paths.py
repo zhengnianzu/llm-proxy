@@ -51,8 +51,20 @@ def get_service_log_dir() -> str:
     return os.path.join("logs", f"port{port}", segment)
 
 
+def _resolve_base(base_name: str) -> str:
+    """logs_all 的 base 可由配置覆盖（env LOGS_DIR 或 settings/logs_dirs.yaml）。
+    其它 base（logs_anthropic/logs_openai 等）保持原样。"""
+    if base_name != "logs_all":
+        return base_name
+    try:
+        from utils.logs_config import get_active_base
+        return get_active_base() or base_name
+    except Exception:
+        return base_name
+
+
 def get_log_dir(base_name: str) -> str:
-    return os.path.join(base_name, _env_key_segment(), STARTUP_DATE_TAG)
+    return os.path.join(_resolve_base(base_name), _env_key_segment(), STARTUP_DATE_TAG)
 
 
 def build_index_path(log_dir: str) -> str:

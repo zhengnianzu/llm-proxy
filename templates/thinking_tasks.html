@@ -48,6 +48,15 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
   <!-- Global config panel -->
   <div class="config-panel">
     <h4>任务配置</h4>
+    <div class="config-row" style="margin-bottom:10px">
+      <div class="config-field" style="min-width:320px">
+        <label>从 Run ID 加载参数</label>
+        <div style="display:flex;gap:6px">
+          <input v-model="loadRunId" placeholder="run_xxxxxxxx（粘贴历史 Run ID）" @keyup.enter="loadFromRun" style="flex:1">
+          <button class="btn" @click="loadFromRun" :disabled="loadRunBusy||!loadRunId">{{loadRunBusy?'加载中...':'加载'}}</button>
+        </div>
+      </div>
+    </div>
     <div class="config-row">
       <div class="config-field" style="min-width:280px">
         <label>Endpoint</label>
@@ -284,6 +293,7 @@ new Vue({el:'#tasksApp',data:{
   rows:[],loading:false,error:'',expanded:{},
   stats:{total:0,done:0,pending:0,processing:0,failed:0},
   globalConfig:{reflection_endpoint:'',reflection_api_key_id:'',reflection_model:'THINKING:claude-opus-4-8',method:'bulk',worker_count:4,max_retries:3,max_tokens:16384},
+  loadRunId:'',loadRunBusy:false,
   detailDrawer:false,detailRun:null,logEntries:[],logSinceId:0,logPolling:null,
   snapshotDrawer:false,snapshotRun:null,
   testDrawer:false,testPhase:'input',testSteps:[],testResult:null,testError:'',testLoading:false,
@@ -379,6 +389,39 @@ methods:{
       this.$set(item,'_tasks_total',r.total||item._tasks_total);
     }catch(e){}
     this.$set(item,'_tasks_loading_more',false);
+  },
+
+  async loadFromRun(){
+    var rid=(this.loadRunId||'').trim();
+    if(!rid||this.loadRunBusy)return;
+    this.loadRunBusy=true;
+    try{
+      // /runs/{id} 有 key id/掩码及大部分参数；/snapshot 补 max_tokens
+      var run=await this.json('/api/reflection/runs/'+encodeURIComponent(rid));
+      var snap={};
+      try{snap=await this.json('/api/reflection/runs/'+encodeURIComponent(rid)+'/snapshot')}catch(e){}
+      var g=this.globalConfig;
+      if(run.reflection_endpoint)g.reflection_endpoint=run.reflection_endpoint;
+      else if(snap.endpoint)g.reflection_endpoint=snap.endpoint;
+      if(run.reflection_model)g.reflection_model=run.reflection_model;
+      if(run.method)g.method=run.method;
+      if(run.worker_count)g.worker_count=Number(run.worker_count);
+      if(run.max_retries)g.max_retries=Number(run.max_retries);
+      if(snap.max_tokens)g.max_tokens=Number(snap.max_tokens);
+      // 自动匹配 API Key：优先按 run 存的 key id，其次按掩码在下拉里找
+      var keyNote='';
+      var keys=(this.config&&this.config.keys)||[];
+      var matched=false;
+      if(run.reflection_api_key_id){
+        for(var i=0;i<keys.length;i++){if(Number(keys[i].id)===Number(run.reflection_api_key_id)){g.reflection_api_key_id=keys[i].id;matched=true;break}}
+      }
+      if(!matched&&run.reflection_key_mask){
+        for(var j=0;j<keys.length;j++){if((keys[j].key||'')===run.reflection_key_mask){g.reflection_api_key_id=keys[j].id;matched=true;break}}
+      }
+      if(!matched)keyNote='\n注意：原 Key（'+(run.reflection_key_mask||'?')+'）已不在可选列表，请手动选择 API Key。';
+      alert('已从 '+rid+' 加载参数'+keyNote);
+    }catch(e){alert('加载失败: '+(e.message||e)+'（请确认 Run ID 存在）')}
+    finally{this.loadRunBusy=false}
   },
 
   async retryTask(t){

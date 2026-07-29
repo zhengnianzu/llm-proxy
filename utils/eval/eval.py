@@ -30,14 +30,21 @@ FNAME_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})_\d{3}$")
 
 def _parse_folder_ts(name: str) -> Optional[datetime]:
     m = FNAME_TS_RE.match(name)
-    if not m:
-        return None
+    if m:
+        try:
+            return datetime.strptime(
+                f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        except ValueError:
+            pass
+    # new-api 的 ISO 时间戳（如 2026-07-27T20:01:57.825+08:00）：去掉时区后解析
     try:
-        return datetime.strptime(
-            f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}",
-            "%Y-%m-%d %H:%M:%S",
-        )
-    except ValueError:
+        iso = name.strip()
+        # 去掉时区偏移（+08:00 / Z），只留本地时刻
+        iso = re.sub(r"(\+\d{2}:?\d{2}|Z)$", "", iso)
+        return datetime.fromisoformat(iso)
+    except (ValueError, TypeError):
         return None
 
 
@@ -1045,7 +1052,7 @@ def render_html_report_string(sessions: List[Dict], stats: Dict,
 
 def save_analysis_json(sessions: List[Dict], path: Path) -> None:
     payload = {
-        "version": 1,
+        "version": 2,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "session_count": len(sessions),
         "sessions": sessions,

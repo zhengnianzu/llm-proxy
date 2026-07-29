@@ -66,6 +66,22 @@ def init_db(db_dir: str):
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_failed_files_dir ON backup_failed_files(dir_path)"
         )
+        # backup_queue —— 手动上传的持久化 FIFO 队列（id 自增即先后顺序）
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS backup_queue (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                dir_path    TEXT NOT NULL,
+                job_type    TEXT NOT NULL DEFAULT 'sync',    -- 'sync' | 'resync'
+                state       TEXT NOT NULL DEFAULT 'queued',  -- 'queued' | 'running'
+                enqueued_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                started_at  TEXT
+            )
+        """)
+        # 同一目录同时只允许一个活动队列项 —— DB 层去重
+        _conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_backup_queue_active "
+            "ON backup_queue(dir_path) WHERE state IN ('queued','running')"
+        )
         for col, definition in [
             ("sync_pid", "INTEGER DEFAULT NULL"),
             ("port",     "TEXT NOT NULL DEFAULT ''"),
@@ -145,7 +161,7 @@ def update_sync_status(dir_path: str, status: str, obs_path: str = "", error_msg
         fields.append("synced = 1")
         fields.append("sync_time = ?")
         params.append(_now())
-    if status in ("done", "error", "pending", "partial"):
+    if status in ("done", "error", "pending", "partial", "pending_delete"):
         fields.append("sync_pid = NULL")
     if status == "backed_up":
         fields.append("has_local = 0")
@@ -171,6 +187,49 @@ def list_dirs(env_name: Optional[str] = None) -> List[dict]:
                 "SELECT * FROM backup_dirs ORDER BY env_name, mtime_tag"
             ).fetchall()
     return [dict(r) for r in rows]
+
+
+def list_backup_candidates(env_name: str) -> List[dict]:
+    """自动备份候选：某 env 下未备份（pending 且本地存在）的目录，最旧优先。"""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT * FROM backup_dirs "
+            "WHERE env_name = ? AND status = 'pending' AND has_local = 1 "
+            "ORDER BY mtime_tag ASC",
+            (env_name,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_pending_delete(env_name: Optional[str] = None) -> List[dict]:
+    """已成功上传、等待人工确认删除的目录。"""
+    with _lock:
+        if env_name:
+            rows = _conn.execute(
+                "SELECT * FROM backup_dirs WHERE status = 'pending_delete' AND env_name = ? "
+                "ORDER BY env_name, mtime_tag",
+                (env_name,),
+            ).fetchall()
+        else:
+            rows = _conn.execute(
+                "SELECT * FROM backup_dirs WHERE status = 'pending_delete' "
+                "ORDER BY env_name, mtime_tag"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_pending_delete(env_name: Optional[str] = None) -> int:
+    with _lock:
+        if env_name:
+            row = _conn.execute(
+                "SELECT COUNT(*) AS c FROM backup_dirs WHERE status='pending_delete' AND env_name=?",
+                (env_name,),
+            ).fetchone()
+        else:
+            row = _conn.execute(
+                "SELECT COUNT(*) AS c FROM backup_dirs WHERE status='pending_delete'"
+            ).fetchone()
+    return row["c"] if row else 0
 
 
 def list_env_names() -> List[str]:
@@ -316,3 +375,72 @@ def clear_failed_files(dir_path: str):
     with _lock:
         _conn.execute("DELETE FROM backup_failed_files WHERE dir_path = ?", (dir_path,))
         _conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# backup_queue — 手动上传的持久化串行队列，dispatcher 逐个消费
+# ---------------------------------------------------------------------------
+
+def enqueue_job(dir_path: str, job_type: str = "sync") -> bool:
+    """把目录加入上传队列。已在队列/运行中（唯一部分索引冲突）返回 False。"""
+    with _lock:
+        try:
+            _conn.execute(
+                "INSERT INTO backup_queue (dir_path, job_type, state, enqueued_at) "
+                "VALUES (?, ?, 'queued', ?)",
+                (dir_path, job_type, _now()),
+            )
+            _conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def claim_next_job() -> Optional[dict]:
+    """领取下一个待处理任务：一次只允许一个 running。
+    若已有 running 则返回 None；否则取最早 queued 置为 running 并返回该行。"""
+    with _lock:
+        running = _conn.execute(
+            "SELECT 1 FROM backup_queue WHERE state = 'running' LIMIT 1"
+        ).fetchone()
+        if running:
+            return None
+        row = _conn.execute(
+            "SELECT * FROM backup_queue WHERE state = 'queued' ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        _conn.execute(
+            "UPDATE backup_queue SET state = 'running', started_at = ? WHERE id = ?",
+            (_now(), row["id"]),
+        )
+        _conn.commit()
+        job = dict(row)
+        job["state"] = "running"
+        return job
+
+
+def finish_job(job_id: int):
+    """任务完成后出队。"""
+    with _lock:
+        _conn.execute("DELETE FROM backup_queue WHERE id = ?", (job_id,))
+        _conn.commit()
+
+
+def list_queue() -> List[dict]:
+    """按入队顺序返回全部活动队列项（queued + running）。"""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT * FROM backup_queue WHERE state IN ('queued','running') ORDER BY id ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def reset_running_on_startup():
+    """进程启动时把上次中断的 running 降回 queued，供 dispatcher 重新领取。"""
+    with _lock:
+        _conn.execute(
+            "UPDATE backup_queue SET state = 'queued', started_at = NULL WHERE state = 'running'"
+        )
+        _conn.commit()
+

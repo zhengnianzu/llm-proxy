@@ -41,6 +41,14 @@ _INTERNAL_REQUEST_PATTERNS = [
 
 _NOISE_PATTERNS = [
     re.compile(r"^\s*\[[^\]]*\]\s*"),
+    # new-api 信封：Conversation info (untrusted metadata): ```json {...} ```
+    # 与 Sender 信封对称，剥掉后才是真实用户诉求（否则整条 q1 塌缩到 chat_id 头，
+    # 导致本属不同会话的请求聚成一团 / 又被轮数回落规则反复切碎）。
+    re.compile(
+        r"^Conversation info\s*(?:\([^)]*\))?:\s*```json\s*\{[\s\S]*?\}\s*```\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^Conversation info\s*(?:\([^)]*\))?\s*:\s*", re.IGNORECASE),
     re.compile(
         r"^Sender\s*(?:\([^)]*\))?:\s*```json\s*\{[\s\S]*?\}\s*```\s*",
         re.IGNORECASE,
@@ -305,6 +313,117 @@ def parse_streaming_response_content(chunks: List[dict]) -> Optional[list]:
     msg = parse_streaming_response(chunks)
     content = msg.get("content")
     return content if content else None
+
+
+def _iter_openai_sse_chunks(resp_text: str):
+    """从 OpenAI 流式 SSE 文本抽出 chat.completion.chunk 列表。"""
+    for line in resp_text.split("\n"):
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            yield json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+
+def _openai_message_to_blocks(msg: dict) -> list:
+    """把 OpenAI 非流式 message（{content, reasoning_content, tool_calls}）
+    转成与 Anthropic 一致的 block 列表。"""
+    blocks: list = []
+    reasoning = msg.get("reasoning_content")
+    if reasoning:
+        blocks.append({"type": "thinking", "thinking": reasoning})
+    text = msg.get("content")
+    if text:
+        blocks.append({"type": "text", "text": text})
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function", {}) or {}
+        args = fn.get("arguments", "")
+        try:
+            inp = json.loads(args) if isinstance(args, str) and args else (args or {})
+        except json.JSONDecodeError:
+            inp = args
+        blocks.append({
+            "type": "tool_use",
+            "id": tc.get("id", ""),
+            "name": fn.get("name", "unknown"),
+            "input": inp,
+        })
+    return blocks
+
+
+def parse_openai_response_content(resp_text: str) -> Optional[list]:
+    """把 OpenAI 格式（流式 SSE 或非流式整块 JSON）的响应正文重建为
+    Anthropic 口径的 block 列表：{type:text}/{type:thinking}/{type:tool_use}。
+
+    供 new-api 评估路径复用——下游 analyze_best_data 已能消费 tool_use block。
+    无内容/无法解析返回 None。
+    """
+    if not isinstance(resp_text, str) or not resp_text:
+        return None
+
+    stripped = resp_text.lstrip()
+
+    # 非流式：整块 chat.completion JSON（不以 data: 开头）
+    if not stripped.startswith("data:"):
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        choices = obj.get("choices") if isinstance(obj, dict) else None
+        if not choices:
+            return None
+        msg = (choices[0] or {}).get("message") or {}
+        blocks = _openai_message_to_blocks(msg)
+        return blocks or None
+
+    # 流式：逐 chunk 累加 content / reasoning_content / tool_calls
+    text_buf = ""
+    reasoning_buf = ""
+    # tool_calls 按 index 聚合：{index: {"id","name","args"}}
+    tools: Dict[int, dict] = {}
+    for chunk in _iter_openai_sse_chunks(resp_text):
+        choices = chunk.get("choices")
+        if not choices:
+            continue
+        delta = (choices[0] or {}).get("delta") or {}
+        if delta.get("content"):
+            text_buf += delta["content"]
+        if delta.get("reasoning_content"):
+            reasoning_buf += delta["reasoning_content"]
+        for tc in delta.get("tool_calls") or []:
+            idx = tc.get("index", 0)
+            slot = tools.setdefault(idx, {"id": "", "name": "", "args": ""})
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["name"] = fn["name"]
+            if fn.get("arguments"):
+                slot["args"] += fn["arguments"]
+
+    blocks: list = []
+    if reasoning_buf:
+        blocks.append({"type": "thinking", "thinking": reasoning_buf})
+    if text_buf:
+        blocks.append({"type": "text", "text": text_buf})
+    for idx in sorted(tools):
+        slot = tools[idx]
+        try:
+            inp = json.loads(slot["args"]) if slot["args"] else {}
+        except json.JSONDecodeError:
+            inp = slot["args"]
+        blocks.append({
+            "type": "tool_use",
+            "id": slot["id"],
+            "name": slot["name"] or "unknown",
+            "input": inp,
+        })
+    return blocks or None
 
 
 def extract_res_usage(res_data: dict) -> Optional[dict]:

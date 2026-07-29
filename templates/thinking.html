@@ -34,7 +34,11 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
 <div id="thinkingApp">{% raw %}
   <div class="page-head">
     <div><h2>Session 管理</h2><p class="text-muted">已完成质检的数据集概览</p></div>
-    <button class="btn primary" @click="load">刷新</button>
+    <div style="display:flex;gap:8px">
+      <button class="btn primary" @click="openAdd">添加</button>
+      <button class="btn" @click="openRegister">注册外部数据集</button>
+      <button class="btn" @click="load">刷新</button>
+    </div>
   </div>
 
   <div class="stats">
@@ -50,13 +54,18 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
       <tbody>
         <tr v-for="d in allDatasets" :key="d.id">
           <td>
-            <div style="font-weight:600;font-size:.82rem">{{d.key_slot}}</div>
+            <div style="font-weight:600;font-size:.82rem">{{d.manage_name || d.key_slot}}<span v-if="d.mode==='external'" class="badge" style="margin-left:6px">外部</span></div>
+            <div v-if="d.manage_name" style="font-size:.72rem;color:var(--muted-foreground)">{{d.key_slot}}</div>
             <div style="font-size:.74rem;color:var(--muted-foreground)">{{d.created_at||'-'}}</div>
           </td>
           <td>{{d.total_sessions}}</td>
           <td>
-            <span v-if="!d.has_tasks" style="color:var(--muted-foreground)">-</span>
-            <span v-else class="badge" :class="datasetClass(d)">{{datasetLabel(d)}}</span>
+            <span v-if="d.has_tasks" class="badge" :class="datasetClass(d)">{{datasetLabel(d)}}</span>
+            <span v-else-if="d._previewing" style="color:var(--muted-foreground)">统计中...</span>
+            <span v-else-if="d._preview" class="badge warn" :title="d._preview.sessions+' session · '+d._preview.files+' 文件'+(d._preview.files_bad?(' · '+d._preview.files_bad+' 无法解析'):'')">
+              预估 {{d._preview.signatures}}
+            </span>
+            <span v-else style="color:var(--muted-foreground)">-</span>
           </td>
           <td><span v-if="d.obs_dst" class="obs-link" @click="openObsDrawer(d)">[OBS]</span><span v-else>-</span></td>
           <td>
@@ -71,16 +80,20 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
               <div class="dropdown" :class="{open:openDropdown===d.id}">
                 <button class="btn" @click.stop="toggleDropdown(d.id)" style="padding:6px 6px;font-size:.72rem">▼</button>
                 <div class="dropdown-menu">
-                  <button class="dropdown-item" @click="doImport(d)" :disabled="d.has_tasks||d._importing">
-                    {{d._importing?'导入中...':d.has_tasks?'已导入':'导入任务库'}}
+                  <button class="dropdown-item" @click="doPreview(d)" :disabled="d.has_tasks||d._previewing">
+                    {{d._previewing?'统计中...':d._preview?'重新统计':'统计 signature'}}
+                  </button>
+                  <button class="dropdown-item" @click="doImport(d)" :disabled="d.has_tasks||d._importing||!d._preview">
+                    {{d._importing?'导入中...':d.has_tasks?'已导入':(d._preview?'导入任务（'+d._preview.signatures+'）':'导入任务（先统计）')}}
                   </button>
                   <button class="dropdown-item" @click="doExport(d)" :disabled="!d.has_tasks||!(d.dataset_counts&&d.dataset_counts.done)">导出结果</button>
+                  <button class="dropdown-item" @click="doRemove(d)">从管理移除</button>
                 </div>
               </div>
             </div>
           </td>
         </tr>
-        <tr v-if="!allDatasets.length&&!loading"><td colspan="6" class="empty">暂无数据</td></tr>
+        <tr v-if="!allDatasets.length&&!loading"><td colspan="6" class="empty">暂无数据集，点击右上「添加」选择导出结果加入管理</td></tr>
       </tbody>
     </table>
   </div>
@@ -101,6 +114,65 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
           <span class="file-size">{{f.size||''}}</span>
         </div>
         <p v-if="!obsLoading&&!obsError&&!obsFiles.length" style="color:var(--muted-foreground)">无文件</p>
+      </div>
+    </div>
+  </template>
+
+  <!-- 添加数据集 Drawer -->
+  <template v-if="addDrawer">
+    <div class="drawer-bg" @click="closeAdd"></div>
+    <div class="drawer">
+      <div class="drawer-head"><h3>添加数据集到管理</h3><button class="btn" @click="closeAdd">关闭</button></div>
+      <div class="drawer-body">
+        <p style="font-size:.78rem;color:var(--muted-foreground);margin-bottom:10px">从下面的导出结果中勾选要加入 Session 管理的数据集（可多选）。</p>
+        <input v-model="availSearch" placeholder="搜索名称…" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font-size:.8rem;margin-bottom:8px">
+        <div style="display:flex;gap:12px;margin-bottom:8px;font-size:.76rem">
+          <a style="color:var(--primary);cursor:pointer" @click="selectAllAvail">全选</a>
+          <a style="color:var(--primary);cursor:pointer" @click="selectedIds=[]">清空</a>
+          <span style="color:var(--muted-foreground);margin-left:auto">已选 {{selectedIds.length}}</span>
+        </div>
+        <p v-if="availLoading" style="color:var(--muted-foreground)">加载中...</p>
+        <div v-for="a in filteredAvail" :key="a.id" class="file-item" style="align-items:center;cursor:pointer" @click="toggleSel(a.id)">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1" @click.stop>
+            <input type="checkbox" :checked="selectedIds.indexOf(a.id)!==-1" @change="toggleSel(a.id)">
+            <span>
+              <span style="font-weight:600;font-size:.82rem">{{a.key_slot}}</span>
+              <span v-if="a.mode==='external'" class="badge" style="margin-left:6px">外部</span>
+              <span style="font-size:.72rem;color:var(--muted-foreground);margin-left:6px">{{a.created_at||'-'}}</span>
+            </span>
+          </label>
+          <span class="file-size">{{a.total_sessions}} sessions</span>
+        </div>
+        <p v-if="!availLoading&&!filteredAvail.length" style="color:var(--muted-foreground)">没有可添加的数据集</p>
+        <button class="btn primary" @click="submitAdd" :disabled="addBusy||!selectedIds.length" style="width:100%;margin-top:14px">{{addBusy?'添加中...':'添加选中('+selectedIds.length+')'}}</button>
+      </div>
+    </div>
+  </template>
+
+  <!-- 注册外部数据集 Drawer -->
+  <template v-if="registerDrawer">
+    <div class="drawer-bg" @click="closeRegister"></div>
+    <div class="drawer">
+      <div class="drawer-head"><h3>注册外部数据集</h3><button class="btn" @click="closeRegister">关闭</button></div>
+      <div class="drawer-body">
+        <p style="font-size:.78rem;color:var(--muted-foreground);margin-bottom:14px">登记一个已上传到 OBS 的数据集（例如从其他平台导出）。注册后可在下拉菜单点"导入任务库"，系统会自动从 OBS 下载并导入。</p>
+        <div style="margin-bottom:12px">
+          <label style="display:block;font-size:.76rem;color:var(--muted-foreground);margin-bottom:4px">OBS 路径 *</label>
+          <input v-model="regObs" placeholder="obs://bucket/path/to/dataset/" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font-size:.8rem;font-family:var(--font-mono,monospace)">
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;font-size:.76rem;color:var(--muted-foreground);margin-bottom:4px">名称 *</label>
+          <input v-model="regName" placeholder="用于列表显示" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font-size:.8rem">
+        </div>
+        <div style="margin-bottom:14px">
+          <label style="display:block;font-size:.76rem;color:var(--muted-foreground);margin-bottom:4px">Session 数（可选）</label>
+          <input v-model.number="regSessions" type="number" min="0" placeholder="0（导入后自动统计）" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font-size:.8rem">
+        </div>
+        <p v-if="regError" class="bad" style="font-size:.8rem;margin-bottom:10px">{{regError}}</p>
+        <div style="display:flex;gap:8px">
+          <button class="btn" @click="browseRegisterObs" :disabled="!regObs">浏览 OBS</button>
+          <button class="btn primary" @click="submitRegister" :disabled="regBusy" style="flex:1">{{regBusy?'注册中...':'注册'}}</button>
+        </div>
       </div>
     </div>
   </template>
@@ -152,6 +224,8 @@ new Vue({el:'#thinkingApp',data:{
   stats:{exports:0,keys:0},
   openDropdown:null,
   obsDrawer:false,obsPath:'',obsFiles:[],obsLoading:false,obsError:'',
+  registerDrawer:false,regObs:'',regName:'',regSessions:null,regBusy:false,regError:'',
+  addDrawer:false,avail:[],availLoading:false,availSearch:'',selectedIds:[],addBusy:false,
   exportDrawer:false,exportRunId:'',exportLocalPath:'',exportObsDst:'',exportStep:'config',
   exportBusy:false,exportFileCount:-1,exportLogs:[],exportLogSinceId:0,exportLogTimer:null,
   exportObsRoot:'',exportError:''
@@ -159,6 +233,13 @@ new Vue({el:'#thinkingApp',data:{
   var self=this;
   document.addEventListener('click',function(){self.openDropdown=null});
   try{await this.load()}catch(e){this.error='初始化失败: '+e.message}
+},
+computed:{
+  filteredAvail:function(){
+    var q=(this.availSearch||'').trim().toLowerCase();
+    if(!q)return this.avail;
+    return this.avail.filter(function(a){return(a.key_slot||'').toLowerCase().indexOf(q)!==-1});
+  }
 },
 methods:{
   async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},
@@ -206,6 +287,8 @@ methods:{
       var keySet={};
       for(var i=0;i<all.length;i++){
         this.$set(all[i],'_importing',false);
+        this.$set(all[i],'_previewing',false);
+        this.$set(all[i],'_preview',null);
         keySet[all[i].key_slot]=true;
       }
       this.allDatasets=all;
@@ -214,8 +297,21 @@ methods:{
     }catch(e){this.error=e.message}finally{this.loading=false}
   },
 
+  async doPreview(d){
+    if(d.has_tasks||d._previewing)return;
+    this.$set(d,'_previewing',true);
+    try{
+      var body={source_export_id:d.id};
+      var r=await this.json('/api/reflection/preview-tasks',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
+      // 保持下拉展开，把统计结果显示在菜单里，供用户决定是否导入
+      this.$set(d,'_preview',{signatures:r.signatures||0,sessions:r.sessions||0,files:r.files||0,files_bad:r.files_bad||0});
+    }catch(e){alert('统计失败: '+e.message)}
+    finally{this.$set(d,'_previewing',false)}
+  },
+
   async doImport(d){
     if(d.has_tasks||d._importing)return;
+    if(!d._preview){alert('请先点击「统计 signature」确认规模');return}
     this.openDropdown=null;
     this.$set(d,'_importing',true);
     try{
@@ -307,6 +403,64 @@ methods:{
       if(this.exportLogTimer){clearInterval(this.exportLogTimer);this.exportLogTimer=null}
       this.openObsDrawer({obs_dst:this.exportObsRoot});
     }
+  },
+
+  openAdd:function(){
+    this.addDrawer=true;this.availSearch='';this.selectedIds=[];this.avail=[];this.availLoading=true;this.addBusy=false;
+    var self=this;
+    this.json('/api/reflection/datasets-available').then(function(list){
+      self.avail=list||[];self.availLoading=false;
+    }).catch(function(e){self.availLoading=false;alert('加载失败: '+e.message)});
+  },
+  closeAdd:function(){this.addDrawer=false},
+  toggleSel:function(id){
+    var i=this.selectedIds.indexOf(id);
+    if(i===-1)this.selectedIds.push(id);else this.selectedIds.splice(i,1);
+  },
+  selectAllAvail:function(){
+    this.selectedIds=this.filteredAvail.map(function(a){return a.id});
+  },
+  async submitAdd(){
+    if(!this.selectedIds.length)return;
+    this.addBusy=true;
+    try{
+      var r=await this.json('/api/reflection/datasets/add',{method:'POST',headers:this.headers(),body:JSON.stringify({ids:this.selectedIds})});
+      this.addDrawer=false;
+      await this.load();
+      alert('已添加 '+(r.added||0)+' 个数据集');
+    }catch(e){alert('添加失败: '+e.message)}finally{this.addBusy=false}
+  },
+  async doRemove(d){
+    this.openDropdown=null;
+    if(!confirm('从管理列表移除「'+d.key_slot+'」？\n（仅解除关联，不会删除导出记录或本地/OBS 数据）'))return;
+    try{
+      await this.json('/api/reflection/datasets/'+d.id+'/manage',{method:'DELETE',headers:this.headers()});
+      await this.load();
+    }catch(e){alert('移除失败: '+e.message)}
+  },
+
+  openRegister:function(){
+    this.regObs='';this.regName='';this.regSessions=null;this.regError='';this.regBusy=false;
+    this.registerDrawer=true;
+  },
+  closeRegister:function(){this.registerDrawer=false},
+  browseRegisterObs:function(){
+    var p=(this.regObs||'').trim();
+    if(p&&p.indexOf('obs://')===0)this.openObsDrawer({obs_dst:p});
+  },
+  async submitRegister(){
+    this.regError='';
+    var obs=(this.regObs||'').trim();
+    var name=(this.regName||'').trim();
+    if(!obs||obs.indexOf('obs://')!==0){this.regError='OBS 路径必须以 obs:// 开头';return}
+    if(!name){this.regError='名称不能为空';return}
+    this.regBusy=true;
+    try{
+      var body={obs_dst:obs,name:name,total_sessions:this.regSessions||0};
+      await this.json('/api/reflection/datasets/register',{method:'POST',headers:this.headers(),body:JSON.stringify(body)});
+      this.registerDrawer=false;
+      await this.load();
+    }catch(e){this.regError='注册失败: '+e.message}finally{this.regBusy=false}
   },
 
   openObsDrawer:function(d){

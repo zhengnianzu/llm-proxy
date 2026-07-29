@@ -65,6 +65,10 @@ def init_db(db_dir: str = "data") -> None:
 
             CREATE INDEX IF NOT EXISTS traces_session_key ON traces(session_key);
             CREATE INDEX IF NOT EXISTS traces_root_dir    ON traces(root_dir);
+            -- 覆盖索引：get_session_stats 的 (root_dir GROUP BY session_key) 计数走它，
+            -- 免 TEMP B-TREE 且不碰主数据页。大 traces 表（数百万行）上把
+            -- 导出/统计页的按叶子聚合从数十秒降到 ~1s，是「导出一直加载中」的根治。
+            CREATE INDEX IF NOT EXISTS traces_root_sess    ON traces(root_dir, session_key);
 
             CREATE TABLE IF NOT EXISTS chain_index (
                 lookup_key  TEXT PRIMARY KEY,
@@ -286,6 +290,48 @@ def get_session_count_by_root(root_dir: str) -> int:
     return row["c"] if row else 0
 
 
+def get_model_stats_by_key(root_dir: str = "") -> Dict[str, Dict[str, int]]:
+    """返回 {api_key: {model: session_count}}，供 Key 列表展示「主要模型」分布。
+
+    一个 session 的 models 是 JSON 数组（一次会话可能跨多 model），用 json_each
+    展开后按 (api_key, model) 计数。空串 model 跳过。与 mtime 分布同口径（按 session 计）。
+
+    root_dir 省略时聚合当前 DB 里所有叶子（DB 已按 service 绑定，Key 列表也是跨叶子的），
+    传入具体叶子路径则只统计该叶子。
+    """
+    conn = _get_conn()
+    sql = (
+        "SELECT sessions.api_key AS api_key, je.value AS model, COUNT(*) AS c "
+        "FROM sessions, json_each(sessions.models) je "
+        "WHERE je.value != ''"
+    )
+    params: list = []
+    if root_dir:
+        sql += " AND sessions.root_dir = ?"
+        params.append(root_dir)
+    sql += " GROUP BY sessions.api_key, je.value"
+    rows = conn.execute(sql, params).fetchall()
+    out: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        ak = r["api_key"] or "(empty)"
+        out.setdefault(ak, {})[r["model"]] = r["c"]
+    return out
+
+
+def delete_root(root_dir: str) -> None:
+    """删除某 root_dir 的全部聚合行（sessions/traces/chain_index/index_progress）。
+
+    用于回填前清空重建，保证幂等（避免 traces 裸 INSERT 重复插入）。
+    """
+    conn = _get_conn()
+    with _lock:
+        conn.execute("DELETE FROM sessions WHERE root_dir = ?", (root_dir,))
+        conn.execute("DELETE FROM traces WHERE root_dir = ?", (root_dir,))
+        conn.execute("DELETE FROM chain_index WHERE root_dir = ?", (root_dir,))
+        conn.execute("DELETE FROM index_progress WHERE root_dir = ?", (root_dir,))
+        conn.commit()
+
+
 def _row_to_session(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
     try:
@@ -496,3 +542,50 @@ def export_sessions(root_dir: str) -> List[Dict[str, Any]]:
         }
         result.append(out)
     return result
+
+
+def _fmt_ts(ts: str) -> Optional[str]:
+    """下划线时间戳 → 'YYYY-MM-DD HH:MM:SS'；解析失败返回 None。"""
+    if not ts:
+        return None
+    try:
+        from utils.eval.eval import _parse_folder_ts
+        dt = _parse_folder_ts(ts)
+        return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else None
+    except Exception:
+        return None
+
+
+def to_unified_record(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """把 export_sessions 的一条记录转成统一 schema（version 2，兼容超集）。
+
+    - 规范键：session/start_time/end_time/total_messages/api_call_count/
+      models(list)/api_key/q1/latest_file/trace_list
+    - 兼容别名：_key/first_ts/last_ts/msg_count（导出侧旧读取方仍依赖）
+    - 评估字段：纯导出不填（由质检链填充）；trace_list.ts 保留下划线格式
+
+    见 doc/examples/README_unified_format.md。
+    """
+    first_ts = entry.get("_key") or entry.get("first_ts", "")
+    last_ts = entry.get("last_ts", "")
+    trace_list = entry.get("trace_list", []) or []
+    msg_count = entry.get("msg_count", 0)
+    models = entry.get("models", []) or []
+    return {
+        # 规范键
+        "session": first_ts,
+        "api_key": entry.get("api_key", ""),
+        "q1": entry.get("q1", ""),
+        "models": models,
+        "latest_file": entry.get("latest_file", ""),
+        "start_time": _fmt_ts(first_ts),
+        "end_time": _fmt_ts(last_ts),
+        "total_messages": msg_count,
+        "api_call_count": len(trace_list) or 1,
+        "trace_list": trace_list,
+        # 兼容别名（导出侧旧读取方）
+        "_key": first_ts,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "msg_count": msg_count,
+    }

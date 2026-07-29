@@ -146,7 +146,11 @@ def export_session_index(logs_dir: str, force: bool = False) -> dict:
         logger.info("无 session 数据")
         return {"total_sessions": 0, "avg_msg_count": 0, "skipped": False}
 
-    total_msg = sum(s.get("msg_count", 0) for s in sessions)
+    # 统一记录格式（version 2，兼容超集）：规范键 + 旧别名，纯导出无评估字段
+    from utils.session_store import to_unified_record
+    sessions = [to_unified_record(s) for s in sessions]
+
+    total_msg = sum(s.get("total_messages", s.get("msg_count", 0)) for s in sessions)
     avg_msg = round(total_msg / total)
 
     index_path = Path(logs_dir) / SESSION_INDEX_NAME
@@ -156,6 +160,7 @@ def export_session_index(logs_dir: str, force: bool = False) -> dict:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
         meta_line = {
             "_meta": True,
+            "version": 2,
             "total_sessions": total,
             "avg_msg_count": avg_msg,
             "source_mtime": source_mtime,
@@ -190,6 +195,13 @@ def _load_session_index(logs_dir: str) -> List[dict]:
 
 def _collect_triplet_files(logs_dir: str, latest_file: str) -> List[Path]:
     base = Path(logs_dir)
+
+    # new-api：latest_file 是合并单文件（无 -req/-res/-headers 三元组），直接上传该文件
+    if latest_file.endswith(".json") and not latest_file.endswith("-req.json"):
+        p = base / latest_file
+        if p.is_file():
+            return [p]
+
     stem = latest_file
     if stem.endswith("-req.json"):
         stem = stem[: -len("-req.json")]
@@ -321,6 +333,15 @@ def sync_session_index(
             shutil.copy2(index_file, copy_dir / SESSION_INDEX_NAME)
 
     logger.info("已复制 %d 个文件到 %s", copied, copy_dir)
+
+    # 未指定 OBS 目标：仅本地复制，跳过上传（前端「留空仅本地复制」）
+    if not obs_dst:
+        uploaded_keys.update(new_keys)
+        slots = state.setdefault("slots", {})
+        slots[slot_key] = {"uploaded_keys": sorted(uploaded_keys)}
+        _save_sync_state(logs_dir, state)
+        logger.info("仅本地复制完成: %d 个文件, %d 个新 session", copied, len(new_keys))
+        return {"uploaded": copied, "skipped": len(uploaded_keys) - len(new_keys), "failed": 0, "total_files": copied, "matched_sessions": matched_sessions, "new_sessions": len(new_keys)}
 
     obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
     ok, msg = _run_upload_cmd(str(copy_dir), obs_parent, upload_script)

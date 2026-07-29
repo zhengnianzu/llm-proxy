@@ -33,8 +33,17 @@
 .key-slot-badge { font-size: .75rem; padding: 2px 10px; border-radius: 999px; font-weight: 600; }
 .key-slot-badge.all { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
 .key-slot-badge.key { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
-.mtime-pills { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.mtime-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pills-line { display: flex; align-items: flex-start; gap: 10px; margin-top: 6px; }
+.pills-clamp { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; overflow: hidden; max-height: 24px; transition: max-height .2s; }
+.pills-clamp.open { max-height: 2000px; }
+.pills-clamp > .mtime-pills { flex: 1 1 100%; }
+.pills-toggle { flex: 0 0 auto; font-size: .75rem; color: var(--primary); cursor: pointer; user-select: none; white-space: nowrap; line-height: 18px; }
+.pills-toggle:hover { text-decoration: underline; }
 .mtime-pill { font-size: .78rem; background: var(--muted); padding: 3px 10px; border-radius: 999px; color: var(--muted-foreground); }
+.model-pill { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); cursor: pointer; }
+.model-pill:hover { background: color-mix(in srgb, var(--primary) 20%, transparent); }
+.model-pill-active { background: var(--primary); color: #fff; font-weight: 600; }
 .record-row { font-size: .82rem; padding: 4px 0; display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
 .record-row:first-child { border-top: none; }
 
@@ -64,26 +73,44 @@
     <!-- summary: config left, stats right -->
     <div class="summary-grid">
         <div class="stat-card">
-            <h6>服务配置</h6>
-            <div class="stat-row">
-                <span class="label">端口</span>
-                <span class="value">{{ config.port || '-' }}</span>
-            </div>
-            <div class="stat-row">
-                <span class="label">Env Key</span>
-                <span class="value">{{ config.env_key || '-' }}</span>
-            </div>
-            <div class="stat-row">
-                <span class="label">OBS 路径</span>
-                <span class="value" style="word-break:break-all;text-align:right;max-width:60%">{{ obsPrefix || '-' }}</span>
-            </div>
-            <div class="stat-row">
-                <span class="label">Workers</span>
-                <span class="value">{{ config.workers || '-' }}</span>
-            </div>
-            <div class="stat-row">
-                <span class="label">同步间隔</span>
-                <span class="value">{{ config.interval ? config.interval + 's' : '-' }}</span>
+            <h6>会话同步</h6>
+            <div style="display:flex;align-items:center;gap:16px;">
+                <div style="position:relative;width:96px;height:96px;flex:0 0 auto;">
+                    <svg width="96" height="96" viewBox="0 0 96 96" style="transform:rotate(-90deg);">
+                        <circle cx="48" cy="48" r="42" fill="none" stroke="var(--muted,#eee)" stroke-width="10"></circle>
+                        <circle cx="48" cy="48" r="42" fill="none" stroke="#4f46e5" stroke-width="10"
+                                stroke-linecap="round"
+                                :stroke-dasharray="backfillRing.circumference"
+                                :stroke-dashoffset="backfillRing.dashOffset"
+                                style="transition:stroke-dashoffset .4s;"></circle>
+                    </svg>
+                    <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+                        <div style="font-size:20px;font-weight:700;line-height:1;">{{ backfillRing.pct }}%</div>
+                        <div style="font-size:11px;color:var(--muted-foreground,#888);margin-top:2px;">已回填</div>
+                    </div>
+                </div>
+                <div style="flex:1 1 auto;min-width:0;">
+                    <div class="stat-row">
+                        <span class="label">状态</span>
+                        <span class="value">
+                            <template v-if="backfillRing.running">聚合中</template>
+                            <template v-else-if="backfill.queue_len > 0">排队中</template>
+                            <template v-else>空闲</template>
+                        </span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="label">已回填</span>
+                        <span class="value">{{ backfillRing.done }} / {{ backfillRing.total || '-' }}</span>
+                    </div>
+                    <div class="stat-row" v-if="backfillRing.running && backfill.current_name">
+                        <span class="label">当前</span>
+                        <span class="value" style="word-break:break-all;text-align:right;max-width:60%">{{ backfill.current_name }}</span>
+                    </div>
+                    <div class="stat-row" v-if="backfill.queue_len > 0">
+                        <span class="label">排队</span>
+                        <span class="value">{{ backfill.queue_len }}</span>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="stat-card">
@@ -95,7 +122,11 @@
                 </div>
                 <div class="stat-num">
                     <div class="big">{{ totalSessions }}</div>
-                    <div class="sub">Session 总数</div>
+                    <div class="sub">
+                        Session 总数
+                        <span v-if="backfill.running" title="部分 new-api 目录尚在后台聚合，当前为近似值，完成后自动收敛"
+                              style="color:#d97706;font-weight:600;">· 聚合中</span>
+                    </div>
                 </div>
                 <div class="stat-num">
                     <div class="big">{{ qualifiedSessions }}</div>
@@ -121,7 +152,18 @@
             <h5 class="mb-0" style="font-weight:700;">Key 列表</h5>
             <input type="text" class="input input-sm" v-model="keyFilter"
                    placeholder="搜索 Key（名称 / slot / api_key）" style="max-width:300px">
-            <small class="text-muted" v-if="keyFilter">匹配 {{ filteredKeys.length }} / {{ keys.length }}</small>
+            <select class="input input-sm" v-model="modelFilter" v-if="models.length" style="max-width:240px">
+                <option value="">全部模型</option>
+                <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+            </select>
+            <input type="text" class="input input-sm" v-model="modelKw"
+                   placeholder="模型关键词（模糊）" style="max-width:180px">
+            <select class="input input-sm" v-model="logDirFilter" v-if="config.mtimes && config.mtimes.length" style="max-width:220px">
+                <option value="">全部 log_dir</option>
+                <option v-for="mt in config.mtimes" :key="mt" :value="mt">{{ mt }}</option>
+            </select>
+            <small class="text-muted" v-if="keyFilter || modelFilter || modelKw || logDirFilter">匹配 {{ filteredKeys.length }} / {{ keys.length }}</small>
+            <small class="text-muted" v-if="modelFilter || modelKw">· <strong>{{ modelFilter || modelKw }}</strong> 共 {{ modelFilterCount }} 条</small>
         </div>
 
         <div v-for="k in filteredKeys" :key="k.key_slot" class="key-card">
@@ -135,10 +177,31 @@
                 <button class="btn btn-primary btn-sm" style="background:var(--success);border-color:var(--success);" @click="openExportModal(k)">导出</button>
             </div>
 
-            <!-- mtime distribution -->
-            <div class="mtime-pills">
-                <span v-for="(info, mt) in k.mtime_distribution" :key="mt" class="mtime-pill">
-                    {{ mt }}: {{ info.total }}条
+            <!-- mtime + 模型标签：合并进单个 clamp 容器，按真实溢出决定是否折叠 -->
+            <div class="pills-line">
+                <div class="pills-clamp" :class="{open: isPillsOpen(k)}"
+                     v-pill-clamp="k.key_slot">
+                    <!-- mtime：仅 >1 个目录时才有筛选价值 -->
+                    <div class="mtime-pills" v-if="k.mtime_distribution && Object.keys(k.mtime_distribution).length > 1">
+                        <span v-for="(info, mt) in k.mtime_distribution" :key="mt" class="mtime-pill model-pill"
+                              :class="{'model-pill-active': logDirFilter && mt === logDirFilter}"
+                              @click="logDirFilter = (logDirFilter === mt ? '' : mt)"
+                              title="点击按此 log_dir 筛选 Key 列表">
+                            {{ mt }}: {{ info.total }}条
+                        </span>
+                    </div>
+                    <div class="mtime-pills" v-if="k.model_distribution && Object.keys(k.model_distribution).length">
+                        <span v-for="m in topModels(k.model_distribution)" :key="m.name" class="mtime-pill model-pill"
+                              :class="{'model-pill-active': modelFilter && m.name === modelFilter}"
+                              @click="modelFilter = (modelFilter === m.name ? '' : m.name)"
+                              title="点击按此模型筛选 Key 列表">
+                            {{ m.name }}: {{ m.count }}条
+                        </span>
+                    </div>
+                </div>
+                <span class="pills-toggle" @click="togglePills(k)"
+                      v-if="pillsOverflow[k.key_slot]">
+                    {{ isPillsOpen(k) ? '收起 ▲' : '详情 ▼' }}
                 </span>
             </div>
 
@@ -172,6 +235,17 @@
                     <span v-if="r.mode === 'eval' && r.status === 'success'"
                           style="cursor:pointer;font-size:.8rem;font-weight:600;color:var(--success)" @click="openReport(r.id)">
                         [报告]
+                    </span>
+                    <span v-if="r.mode === 'eval' && r.status === 'success' && r.in_manage"
+                          style="font-size:.8rem;font-weight:600;color:var(--muted-foreground)"
+                          title="该导出已在 Session 管理列表中">
+                        [已在管理]
+                    </span>
+                    <span v-else-if="r.mode === 'eval' && r.status === 'success'"
+                          style="cursor:pointer;font-size:.8rem;font-weight:600;color:var(--primary)"
+                          :style="r._importing ? 'opacity:.5;cursor:not-allowed' : ''"
+                          @click="openNameModal(r)">
+                        {{ r._importing ? '[导入中…]' : '[导入数据集管理]' }}
                     </span>
                     <span v-if="r.error_message" style="font-size:.78rem;color:var(--destructive)">{{ r.error_message }}</span>
                 </div>
@@ -226,6 +300,10 @@
                         </small>
                     </label>
                 </div>
+                <div class="text-muted" style="font-size:.76rem; margin-top:6px;" v-if="hasMultiRoot">
+                    带 <code>目录名/</code> 前缀的为其它日志路径（如 new-api）。导出时会自动补齐会话数据；
+                    大目录首次较慢，建议先在「日志管理」页完成回填。
+                </div>
             </div>
             <div class="mb-3">
                 <label class="form-label small">OBS 路径前缀</label>
@@ -248,6 +326,31 @@
                 <button class="btn btn-outline btn-sm" @click="showModal = false">取消</button>
                 <button class="btn btn-primary btn-sm" style="background:var(--success);border-color:var(--success);" @click="runExport" :disabled="exporting || !selectedMtimes.length">
                     {{ exporting ? '执行中…' : (autoEval ? '开始质检' : '开始导出') }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 导入数据集管理：命名 -->
+    <div v-if="nameModal" class="modal-backdrop-custom" @click.self="closeNameModal">
+        <div class="modal-box" style="width:420px;">
+            <h5>导入数据集管理</h5>
+            <div class="mb-3">
+                <label class="form-label small">数据集名称（可选）</label>
+                <input type="text" class="input input-sm" v-model="nameInput"
+                       :placeholder="nameTarget ? nameTarget.key_slot : ''"
+                       @keyup.enter="confirmName">
+                <div class="text-muted" style="font-size:.76rem;margin-top:6px;">
+                    留空则使用原始名称 {{ nameTarget ? nameTarget.key_slot : '' }}
+                </div>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="btn btn-outline btn-sm" @click="closeNameModal">取消</button>
+                <button class="btn btn-primary btn-sm"
+                        style="background:var(--success);border-color:var(--success);"
+                        @click="confirmName"
+                        :disabled="nameTarget && nameTarget._importing">
+                    {{ (nameTarget && nameTarget._importing) ? '导入中…' : '确定导入' }}
                 </button>
             </div>
         </div>
@@ -284,13 +387,20 @@
 new Vue({
     el: '#app',
     data: {
-        config: { port: '', env_key: '', env_dir: '', obs_base: '', workers: 0, interval: 0, mtimes: [] },
+        config: { port: '', env_key: '', env_dir: '', obs_base: '', workers: 0, interval: 0, mtimes: [], roots: [] },
+        hasMultiRoot: false,
         obsPrefix: '',
         keys: [],
         loading: false,
         lastRefreshTs: 0,
         error: '',
         keyFilter: '',
+        models: [],
+        modelFilter: '',
+        modelKw: '',
+        logDirFilter: '',
+        pillsOpen: {},
+        pillsOverflow: {},
 
         showModal: false,
         modalKey: null,
@@ -306,6 +416,10 @@ new Vue({
         drawerFiles: [],
         drawerLoading: false,
 
+        nameModal: false,
+        nameTarget: null,
+        nameInput: '',
+
         pollTimer: null,
         pollRecordId: null,
 
@@ -314,6 +428,29 @@ new Vue({
         logEntries: [],
         logLoading: false,
         logPollTimer: null,
+
+        backfill: { enabled: false, running: false, current_name: null, current_status: null, queued: [], queue_len: 0, roots: [] },
+        backfillTimer: null,
+    },
+    directives: {
+        pillClamp: {
+            // 元素插入/数据更新后测量真实溢出；窗口 resize 时重测
+            inserted: function(el, binding, vnode) {
+                var vm = vnode.context;
+                var slot = binding.value;
+                var measure = function() { vm.measurePillOverflow(el, slot); };
+                el.__pillMeasure = measure;
+                vm.$nextTick(measure);
+                window.addEventListener('resize', measure);
+            },
+            componentUpdated: function(el, binding, vnode) {
+                var vm = vnode.context;
+                vm.$nextTick(function() { vm.measurePillOverflow(el, binding.value); });
+            },
+            unbind: function(el) {
+                if (el.__pillMeasure) window.removeEventListener('resize', el.__pillMeasure);
+            },
+        },
     },
     computed: {
         lastRefreshTime: function() {
@@ -333,25 +470,113 @@ new Vue({
             return this.keys.reduce(function(s, k) { return s + (k.qualified_sessions || 0); }, 0);
         },
         filteredKeys: function() {
-            if (!this.keyFilter) return this.keys;
-            var q = this.keyFilter.toLowerCase();
+            var q = (this.keyFilter || '').toLowerCase();
+            var mf = this.modelFilter;
+            var kw = (this.modelKw || '').toLowerCase();
             return this.keys.filter(function(k) {
-                return (k.key_slot || '').toLowerCase().indexOf(q) !== -1 ||
+                var textOk = !q ||
+                       (k.key_slot || '').toLowerCase().indexOf(q) !== -1 ||
                        (k.key_name || '').toLowerCase().indexOf(q) !== -1 ||
                        (k.api_key || '').toLowerCase().indexOf(q) !== -1;
-            });
+                var md = k.model_distribution || {};
+                var modelOk = !mf || md[mf] > 0;
+                var kwOk = !kw || Object.keys(md).some(function(name) {
+                    return name.toLowerCase().indexOf(kw) !== -1 && md[name] > 0;
+                });
+                var ld = this.logDirFilter;
+                var logDirOk = !ld || (k.mtime_distribution && k.mtime_distribution[ld]);
+                return textOk && modelOk && kwOk && logDirOk;
+            }, this);
+        },
+        modelFilterCount: function() {
+            var mf = this.modelFilter;
+            var kw = (this.modelKw || '').toLowerCase();
+            if (!mf && !kw) return 0;
+            return this.filteredKeys.reduce(function(sum, k) {
+                var md = k.model_distribution || {};
+                if (mf) return sum + (md[mf] || 0);
+                // 关键词：累加所有匹配到的模型条数
+                return sum + Object.keys(md).reduce(function(s2, name) {
+                    return name.toLowerCase().indexOf(kw) !== -1 ? s2 + (md[name] || 0) : s2;
+                }, 0);
+            }, 0);
+        },
+        backfillRing: function() {
+            var bf = this.backfill || {};
+            var done = 0, total = 0;
+            // 优先聚合各 root 的叶子进度；缺失时退回 current_status
+            var roots = bf.roots || [];
+            for (var i = 0; i < roots.length; i++) {
+                total += roots[i].total_leaves || 0;
+                done += roots[i].done_leaves || 0;
+            }
+            if (total === 0 && bf.current_status && bf.current_status.total_leaves) {
+                total = bf.current_status.total_leaves || 0;
+                done = bf.current_status.done_leaves || 0;
+            }
+            // 无正在进行/排队的回填且无叶子信息时，视为已同步完成（100%）
+            var idle = !bf.running && !(bf.queue_len > 0);
+            var pct;
+            if (total > 0) pct = Math.min(100, Math.round(100 * done / total));
+            else pct = idle ? 100 : 0;
+            var circumference = 2 * Math.PI * 42;
+            return {
+                done: done,
+                total: total,
+                pct: pct,
+                running: !!bf.running,
+                circumference: circumference,
+                dashOffset: circumference * (1 - pct / 100),
+            };
         },
     },
     mounted: function() {
         this.fetchConfig();
         this.fetchKeys();
+        this.fetchBackfill();
+        // 回填在后台串行跑，页面轮询展示进度；跑完后自动刷新统计让数字收敛
+        var self = this;
+        this.backfillTimer = setInterval(function() { self.fetchBackfill(); }, 4000);
     },
     beforeDestroy: function() {
         if (this.pollTimer) clearInterval(this.pollTimer);
         if (this.logPollTimer) clearInterval(this.logPollTimer);
+        if (this.backfillTimer) clearInterval(this.backfillTimer);
     },
     methods: {
+        isPillsOpen: function(k) {
+            return !!this.pillsOpen[k.key_slot];
+        },
+        togglePills: function(k) {
+            // Vue2 对象新增属性需 $set 保证响应式
+            this.$set(this.pillsOpen, k.key_slot, !this.pillsOpen[k.key_slot]);
+        },
+        measurePillOverflow: function(el, slot) {
+            // 真实测量：clamp 收起态下 scrollHeight 超过 clientHeight 即溢出（放不下一行）
+            var wasOpen = el.classList.contains('open');
+            if (wasOpen) el.classList.remove('open');
+            var overflow = el.scrollHeight - el.clientHeight > 2;
+            if (wasOpen) el.classList.add('open');
+            if (!!this.pillsOverflow[slot] !== overflow) {
+                this.$set(this.pillsOverflow, slot, overflow);
+            }
+        },
         _h: function(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
+
+        fetchBackfill: function() {
+            var self = this;
+            var wasRunning = this.backfill.running;
+            fetch('/api/export/backfill-status', {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    self.backfill = d || self.backfill;
+                    // 回填从「在跑」变为「跑完」→ 自动刷新统计，让 session 数收敛到归并值
+                    if (wasRunning && !self.backfill.running) {
+                        self.fetchKeys();
+                    }
+                })
+                .catch(function() {});
+        },
 
         fetchConfig: function() {
             fetch('/api/export/config', {headers: this._h()}).then(function(r) {
@@ -359,8 +584,22 @@ new Vue({
                 return r.json();
             }).then(function(d) {
                 this.config = d;
+                this.hasMultiRoot = !!(d.roots && d.roots.length > 1);
                 if (d.obs_base && !this.obsPrefix) this.obsPrefix = d.obs_base;
             }.bind(this)).catch(function() {});
+        },
+
+        topModels: function(dist) {
+            // {model: count} → 按 count 降序数组，取前 6；保证当前筛选模型可见
+            var arr = Object.keys(dist || {}).map(function(name) {
+                return { name: name, count: dist[name] };
+            }).sort(function(a, b) { return b.count - a.count; });
+            var top = arr.slice(0, 6);
+            if (this.modelFilter && !top.some(function(m) { return m.name === this.modelFilter; }, this)) {
+                var hit = arr.filter(function(m) { return m.name === this.modelFilter; }, this);
+                if (hit.length) top = top.concat(hit);
+            }
+            return top;
         },
 
         fetchKeys: function() {
@@ -372,6 +611,7 @@ new Vue({
             }).then(function(d) {
                 this.keys = d.keys || [];
                 if (d.mtimes) this.config.mtimes = d.mtimes;
+                if (d.models) this.models = d.models;
                 if (d.last_refresh_ts) this.lastRefreshTs = d.last_refresh_ts;
             }.bind(this)).catch(function(e) {
                 if (e !== 'auth') this.error = '加载失败: ' + e;
@@ -536,6 +776,53 @@ new Vue({
 
         openReport: function(recordId) {
             window.open('/keys/export/report/' + recordId, '_blank');
+        },
+
+        openNameModal: function(r) {
+            if (r._importing) return;
+            this.nameTarget = r;
+            this.nameInput = '';
+            this.nameModal = true;
+        },
+
+        closeNameModal: function() {
+            if (this.nameTarget && this.nameTarget._importing) return;
+            this.nameModal = false;
+            this.nameTarget = null;
+            this.nameInput = '';
+        },
+
+        confirmName: function() {
+            var r = this.nameTarget;
+            if (!r || r._importing) return;
+            this.importToManage(r, (this.nameInput || '').trim());
+        },
+
+        importToManage: function(r, name) {
+            if (r._importing) return;
+            this.$set(r, '_importing', true);
+            fetch('/api/reflection/datasets/add', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({ids: [r.id], name: name || ''}),
+            }).then(function(res) { return res.json().then(function(d){ return {ok: res.ok, d: d}; }); })
+            .then(function(x) {
+                this.$set(r, '_importing', false);
+                if (x.ok && x.d.status === 'ok') {
+                    this.$set(r, 'in_manage', 1);
+                    this.nameModal = false;
+                    this.nameTarget = null;
+                    this.nameInput = '';
+                    alert('已加入数据集管理');
+                } else {
+                    this.error = (x.d && x.d.detail) || '导入失败';
+                    alert(this.error);
+                }
+            }.bind(this)).catch(function(e) {
+                this.$set(r, '_importing', false);
+                this.error = '请求失败: ' + e;
+                alert(this.error);
+            }.bind(this));
         },
 
         cancelTask: function(r) {

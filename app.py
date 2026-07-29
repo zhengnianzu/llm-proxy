@@ -36,6 +36,7 @@ from utils.metrics import (
     start_metrics_scanner,
 )
 from utils.log_paths import build_index_path, get_log_dir, get_log_task_tag, get_upstream_key_prefix, get_service_log_dir, STARTUP_DATE_TAG
+from utils.logs_config import get_stats_roots
 from utils.log_routes import register_log_routes
 from utils.session_routes import register_session_routes
 from utils.key_routes import register_key_routes
@@ -46,6 +47,7 @@ from utils.export_store import init_db as init_export_db, mark_interrupted as ma
 from utils.backup_store import init_db as init_backup_db
 from utils.backup_routes import register_backup_routes
 from utils.obs_routes import register_obs_routes
+from utils.logs_routes import register_logs_routes
 from utils.user_store import init_db as init_user_db, verify_user, create_user, get_user_permissions
 from utils.session_store import init_db as init_session_db
 from utils.message_common import build_chain_key, get_first_user_text, get_text_from_content
@@ -97,6 +99,7 @@ MONITOR_AUTH_EXACT_PATHS = {
     "/channels",
     "/users",
     "/backup",
+    "/logs-admin",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -116,6 +119,7 @@ MONITOR_AUTH_PREFIX_PATHS = (
     "/api/export/",
     "/api/backup/",
     "/api/reflection/",
+    "/api/logs-admin/",
 )
 MONITOR_AUTH_PUBLIC_PATHS = {
     "/hi",
@@ -126,8 +130,8 @@ MONITOR_AUTH_PUBLIC_PATHS = {
     "/history/shared",
 }
 
-MONITOR_ADMIN_ONLY_PATHS = {"/users"}
-MONITOR_ADMIN_ONLY_PREFIXES = ("/api/users",)
+MONITOR_ADMIN_ONLY_PATHS = {"/users", "/logs-admin"}
+MONITOR_ADMIN_ONLY_PREFIXES = ("/api/users", "/api/logs-admin")
 
 _PERM_PATH_MAP = {
     "/keys": "keys",
@@ -148,6 +152,11 @@ _PERM_PREFIX_MAP = (
 
 LOGS_DIR = get_log_dir("logs_all")
 ENV_DIR = os.path.dirname(LOGS_DIR)
+
+
+def _stats_roots():
+    """统计聚合的所有根目录：活跃 env_dir + 配置的历史路径。"""
+    return get_stats_roots(ENV_DIR)
 
 SERVICE_LOG_DIR = get_service_log_dir()
 
@@ -1716,7 +1725,7 @@ async def failure_viewer(request: Request):
 @app.get("/api/statistic")
 def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = '', status: str = '全部', refresh: str = '', channel_key: str = '', api_key: str = ''):
     res = query_token_stats(
-        ENV_DIR,
+        _stats_roots(),
         model=model,
         date_start=date_start or '2000-01-01',
         date_end=date_end or '9999-12-31',
@@ -1732,7 +1741,7 @@ def statistic_tokens_web(model: str = '', date_start: str = '', date_end: str = 
 @app.get("/api/statistic/keys")
 def statistic_keys_web(date_start: str = '', date_end: str = '', refresh: str = ''):
     res = query_key_stats(
-        ENV_DIR,
+        _stats_roots(),
         date_start=date_start or '2000-01-01',
         date_end=date_end or '9999-12-31',
         force=bool(refresh),
@@ -1744,7 +1753,7 @@ def statistic_keys_web(date_start: str = '', date_end: str = '', refresh: str = 
 @app.get("/api/statistic/channels")
 def statistic_channels_web(date_start: str = '', date_end: str = '', refresh: str = ''):
     res = query_channel_stats(
-        ENV_DIR,
+        _stats_roots(),
         date_start=date_start or '2000-01-01',
         date_end=date_end or '9999-12-31',
         force=bool(refresh),
@@ -1755,13 +1764,13 @@ def statistic_channels_web(date_start: str = '', date_end: str = '', refresh: st
 
 @app.get("/api/statistic/channel-keys")
 def statistic_channel_keys_list():
-    keys = query_channel_keys(ENV_DIR)
+    keys = query_channel_keys(_stats_roots())
     return JSONResponse({"channel_keys": keys})
 
 
 @app.get("/api/statistic/api-keys")
 def statistic_api_keys_list():
-    keys = query_api_keys(ENV_DIR)
+    keys = query_api_keys(_stats_roots())
     return JSONResponse({"api_keys": keys})
 
 
@@ -1815,6 +1824,7 @@ register_channel_routes(app, templates)
 register_export_routes(app, LOGS_DIR)
 register_backup_routes(app, LOGS_DIR, port=os.getenv("PROXY_PORT", "4000"))
 register_obs_routes(app, templates)
+register_logs_routes(app, templates, active_env_dir=ENV_DIR)
 register_user_routes(app, templates)
 register_debug_routes(app, LOGS_DEBUG, STARTUP_DATE_TAG)
 register_reflection_routes(app, templates)

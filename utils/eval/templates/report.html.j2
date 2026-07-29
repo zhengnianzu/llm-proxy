@@ -95,7 +95,8 @@
 {% macro session_list(items, colspan=4) %}
 {% if items %}
 <tr class="detail-row"><td colspan="{{ colspan }}"><ul>
-  {% for s in items %}<li><a href="/history?file={{ s.file }}{% if s.log_dir %}&log_dir={{ s.log_dir }}{% endif %}" target="_blank">{{ s.file or s.name }}</a></li>{% endfor %}
+  {% for s in items[:200] %}<li><a href="/history?file={{ s.file }}{% if s.log_dir %}&log_dir={{ s.log_dir }}{% endif %}" target="_blank">{{ s.file or s.name }}</a></li>{% endfor %}
+  {% if items|length > 200 %}<li style="color:#999">…还有 {{ items|length - 200 }} 个（已省略，避免报告过大）</li>{% endif %}
 </ul></td></tr>
 {% endif %}
 {% endmacro %}
@@ -128,6 +129,14 @@
       {% if obs_path %}<span>OBS：<code style="background:rgba(255,255,255,.15);color:#fff">{{ obs_path }}</code></span>{% endif %}
     </div>
   </div>
+
+  {% if total and quality.fail_count * 100 // total >= 90 %}
+  <div style="margin:12px 0;padding:12px 16px;background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;color:#92400e;font-size:.9rem;line-height:1.6">
+    ⚠️ 本报告失败率异常偏高（{{ quality.fail_pct }}%）。若数据源为 new-api 且这批报告生成较早，
+    可能是 OpenAI 格式响应的旧解析问题（正文被误判为空）已修复——
+    请回<strong>导出页</strong>对该 key <strong>重新导出一次</strong>，即可得到正确的质量判定。
+  </div>
+  {% endif %}
 
   <div class="tab-group">
     <input type="radio" name="tabs" id="tab-quality" checked>

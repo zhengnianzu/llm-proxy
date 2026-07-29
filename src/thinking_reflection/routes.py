@@ -58,6 +58,15 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     @app.get("/api/reflection/datasets-all")
     def datasets_all(): return service.datasets_all()
 
+    @app.get("/api/reflection/datasets-available")
+    def datasets_available(): return service.available_datasets()
+
+    @app.post("/api/reflection/datasets/add")
+    async def datasets_add(request: Request): return call(service.add_to_manage, await request.json())
+
+    @app.delete("/api/reflection/datasets/{record_id}/manage")
+    def datasets_remove(record_id: int): return call(service.remove_from_manage, record_id)
+
     @app.get("/api/reflection/datasets/{record_id}/analysis")
     def analysis(record_id: int): return call(service.analysis, record_id)
 
@@ -179,8 +188,14 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     # 新增：导入任务库 / OBS 下载 / 批量操作
     # ------------------------------------------------------------------
 
+    @app.post("/api/reflection/preview-tasks")
+    async def preview_tasks(request: Request): return call(service.preview_tasks, await request.json())
+
     @app.post("/api/reflection/import-tasks")
     async def import_tasks(request: Request): return call(service.import_tasks, await request.json())
+
+    @app.post("/api/reflection/datasets/register")
+    async def register_external(request: Request): return call(service.register_external, await request.json())
 
     @app.post("/api/reflection/datasets/{record_id}/download-obs")
     async def download_obs(record_id: int):

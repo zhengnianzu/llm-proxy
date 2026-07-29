@@ -357,6 +357,21 @@ _REFRESH_TTL = 10  # 秒：已初始化的目录在此时间内跳过重复刷�
 _INIT_LOCK: Dict[str, threading.Lock] = {}  # root_dir -> 首次初始化锁
 _INIT_LOCK_GUARD = threading.Lock()
 
+_FMT_CACHE: Dict[str, str] = {}  # root_dir -> 'native'/'newapi'（缓存 detect_format）
+
+
+def _root_format(root_dir: str) -> str:
+    key = os.path.normpath(root_dir)
+    fmt = _FMT_CACHE.get(key)
+    if fmt is None:
+        try:
+            from utils.log_scan import detect_format
+            fmt = detect_format(root_dir)
+        except Exception:
+            fmt = "native"
+        _FMT_CACHE[key] = fmt
+    return fmt
+
 
 def _get_init_lock(root_dir: str) -> threading.Lock:
     with _INIT_LOCK_GUARD:
@@ -366,6 +381,15 @@ def _get_init_lock(root_dir: str) -> threading.Lock:
 
 
 def _refresh_state(kind: str, root_dir: str, force: bool = False) -> None:
+    # new-api 叶子：走合并文件消费器（增量），不走三元组 + index 快速路径
+    if _root_format(root_dir) == "newapi":
+        try:
+            from utils.newapi_consumer import consume_leaf
+            consume_leaf(root_dir, force=force)
+        except Exception:
+            pass
+        return
+
     # 快速路径：TTL 内直接返回，只读内存变量，不需要全局锁
     with _CACHE_LOCK:
         state = _state(kind, root_dir)
@@ -684,16 +708,46 @@ def register_log_routes(app: FastAPI) -> None:
     _current_log_dir = get_log_dir("logs_all")
     _env_dir = str(Path(_current_log_dir).parent)
 
+    def _all_roots() -> list:
+        """活跃 env_dir + 配置的历史路径。"""
+        from utils.logs_config import get_stats_roots
+        return get_stats_roots(_env_dir)
+
     def unified_log_dir() -> str:
         return _current_log_dir
 
     def resolve_log_dir(log_dir: str = "") -> str:
         if not log_dir:
             return _current_log_dir
-        # 只允许选择同 env-key 下的时间戳子目录
+        # log_dir 形如 "26072520" 或跨 root 时 "<root_idx>::<rel_key>"
+        if "::" in log_dir:
+            root_part, _, rel = log_dir.partition("::")
+            for root in _all_roots():
+                if os.path.basename(os.path.normpath(root)) == root_part or os.path.normpath(root) == root_part:
+                    candidate = os.path.join(root, rel)
+                    if os.path.isdir(candidate):
+                        return candidate
+        # 兼容旧格式：同 env-key 下的时间戳子目录
         candidate = os.path.join(_env_dir, log_dir)
         if os.path.isdir(candidate):
             return candidate
+        # 再在所有 root 下按相对路径找
+        for root in _all_roots():
+            c = os.path.join(root, log_dir)
+            if os.path.isdir(c):
+                return c
+        # 兼容旧报告：new-api 布局 <root>/<day>/<hour>，但旧报告只存了裸 <hour>
+        # （历史 bug：log_dir=Path(src_dir).name 丢了日期层）。这里在每个 root
+        # 下一层里搜同名子目录补回。
+        if os.sep not in log_dir and "/" not in log_dir:
+            for root in _all_roots():
+                try:
+                    for day in os.listdir(root):
+                        c = os.path.join(root, day, log_dir)
+                        if os.path.isdir(c):
+                            return c
+                except OSError:
+                    continue
         return _current_log_dir
 
     def anthropic_log_dir() -> str:
@@ -704,28 +758,44 @@ def register_log_routes(app: FastAPI) -> None:
 
     @app.get("/logs/dirs")
     def logs_dirs():
-        """列出 env-key 目录下所有时间戳子目录，当前目录排在第一个。"""
+        """列出所有配置 root 下含 index.jsonl 的叶子目录，当前活跃目录排在第一个。
+
+        单 root（仅活跃目录）时 name 用叶子相对路径（兼容旧行为）；
+        多 root 时 name 用 "<root_basename>::<rel_key>" 以区分来源。
+        """
         from utils.stats_index import refresh_index, get_dir_counts
         from utils.token_index import refresh_token_index
+        from utils.log_scan import dir_key_for
         current_tag = Path(_current_log_dir).name
+        roots = _all_roots()
+        multi = len(roots) > 1
         dirs = []
-        total_count = 0
-        env_path = Path(_env_dir)
-        if env_path.is_dir():
-            index = refresh_index(env_path)
-            tok_index = refresh_token_index(str(env_path))
+        current_name = current_tag
+
+        for root in roots:
+            root_path = Path(root)
+            if not root_path.is_dir():
+                continue
+            root_base = os.path.basename(os.path.normpath(root))
+            index = refresh_index(root_path)
+            tok_index = refresh_token_index(root)
             counts = get_dir_counts(index, tok_index)
-            for sub in sorted(env_path.iterdir(), reverse=True):
-                if sub.is_dir():
-                    count = counts.get(sub.name, 0)
-                    total_count += count
-                    dirs.append({
-                        "name": sub.name,
-                        "current": sub.name == current_tag,
-                        "count": count,
-                    })
-        # __ALL__ 已移除：文件数过多时全目录聚合会导致超时
-        return JSONResponse({"dirs": dirs, "current": current_tag})
+            for rel_key, count in counts.items():
+                is_current = (os.path.normpath(root) == os.path.normpath(_env_dir)
+                              and rel_key == current_tag)
+                name = f"{root_base}::{rel_key}" if multi else rel_key
+                if is_current:
+                    current_name = name
+                dirs.append({
+                    "name": name,
+                    "current": is_current,
+                    "count": count,
+                    "root": root_base,
+                })
+        # 当前目录优先，其余按名称倒序
+        dirs.sort(key=lambda d: (not d["current"], d["name"]), reverse=False)
+        dirs[1:] = sorted(dirs[1:], key=lambda d: d["name"], reverse=True)
+        return JSONResponse({"dirs": dirs, "current": current_name})
 
     # --- 统一路由（新） ---
 
@@ -735,6 +805,20 @@ def register_log_routes(app: FastAPI) -> None:
 
     @app.get("/logs/file")
     def logs_file(filename: str, log_dir: str = ""):
+        # new-api：合并文件（文件名以 .json 结尾但非 -req.json），拆解为 messages + assistant
+        if (filename.endswith(".json") and not filename.endswith("-req.json")
+                and "/" not in filename and "\\" not in filename and ".." not in filename):
+            target_dir = resolve_log_dir(log_dir)
+            if _root_format(target_dir) == "newapi":
+                from utils.newapi_format import build_preview_payload
+                path = os.path.join(target_dir, filename)
+                if not os.path.isfile(path):
+                    return JSONResponse({"error": "file not found"}, status_code=404)
+                payload = build_preview_payload(Path(path))
+                if payload is None:
+                    return JSONResponse({"error": "parse failed"}, status_code=500)
+                return JSONResponse(payload)
+
         if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
         if log_dir == "__ALL__":
@@ -796,11 +880,22 @@ def register_log_routes(app: FastAPI) -> None:
 
     @app.get("/logs/file/raw")
     def logs_file_raw(filename: str, log_dir: str = ""):
-        """返回原始 JSON 文件内容（支持 req / headers / res 三种后缀）。"""
-        if not any(filename.endswith(s) for s in _RAW_SUFFIXES):
-            return JSONResponse({"error": "invalid filename suffix"}, status_code=400)
+        """返回原始 JSON 文件内容（支持 req / headers / res 三种后缀，及 new-api 合并文件）。"""
         if "/" in filename or "\\" in filename or ".." in filename:
             return JSONResponse({"error": "invalid filename"}, status_code=400)
+        # new-api 合并文件：文件名以 .json 结尾但非三元组后缀，限定 new-api root
+        if (not any(filename.endswith(s) for s in _RAW_SUFFIXES)
+                and filename.endswith(".json")):
+            target_dir = resolve_log_dir(log_dir)
+            if _root_format(target_dir) == "newapi":
+                path = os.path.join(target_dir, filename)
+                if not os.path.isfile(path):
+                    return JSONResponse({"error": "file not found"}, status_code=404)
+                with open(path, "r", encoding="utf-8") as f:
+                    return JSONResponse(json.load(f))
+            return JSONResponse({"error": "invalid filename suffix"}, status_code=400)
+        if not any(filename.endswith(s) for s in _RAW_SUFFIXES):
+            return JSONResponse({"error": "invalid filename suffix"}, status_code=400)
         if log_dir == "__ALL__":
             req_name = filename
             for s in _RAW_SUFFIXES:

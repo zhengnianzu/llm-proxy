@@ -1,0 +1,219 @@
+{% extends "_layout.html" %}
+
+{% block title %}日志管理{% endblock %}
+{% block mobile_title %}日志管理{% endblock %}
+
+{% block head_extra %}
+<script src="/static/js/vue.min.js"></script>
+{% endblock %}
+
+{% block page_styles %}
+.panel { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow); margin-bottom: 20px; }
+.panel h6 { font-weight: 700; margin-bottom: 12px; color: var(--foreground); font-size: .95rem; }
+.hint { font-size: .82rem; color: var(--muted-foreground); margin-bottom: 14px; line-height: 1.6; }
+.add-row { display: flex; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.add-row input { flex: 1; min-width: 260px; }
+.dir-table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+.dir-table th { text-align: left; padding: 10px 8px; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--muted-foreground); font-size: .82rem; white-space: nowrap; }
+.dir-table td { padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; word-break: break-all; }
+.dir-table tr:hover td { background: color-mix(in srgb, var(--primary) 4%, transparent); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: .74rem; font-weight: 600; }
+.badge-active { background: color-mix(in srgb, #22c55e 18%, transparent); color: #16a34a; }
+.badge-history { background: var(--muted); color: var(--muted-foreground); }
+.badge-fmt { background: color-mix(in srgb, var(--primary) 14%, transparent); color: var(--primary); }
+.badge-missing { background: color-mix(in srgb, #ef4444 18%, transparent); color: #dc2626; }
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.msg { font-size: .84rem; margin-left: 8px; }
+.msg-ok { color: #16a34a; }
+.msg-err { color: #dc2626; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+{% endblock %}
+
+{% block content %}
+{% raw %}
+<div id="app">
+    <div class="panel">
+        <h6>新增日志路径</h6>
+        <div class="hint">
+            添加参与统计与预览的历史日志根目录。路径应到 <span class="mono">env-key</span> 层级，
+            或指向包含 <span class="mono">index.jsonl</span> 的目录（支持 <span class="mono">天/小时</span> 两层，如 new-api 的 details）。<br>
+            移除路径只会将其从统计中排除，<strong>不会删除磁盘文件</strong>。活跃写入目录由进程配置决定，不可在此移除。
+        </div>
+        <div class="add-row">
+            <input type="text" class="input input-sm mono" v-model="newPath" placeholder="/mnt/path1 或 /sdc/data/newapi/logs/details" @keyup.enter="addPath">
+            <button class="btn btn-primary btn-sm" @click="addPath" :disabled="adding">添加</button>
+            <span class="msg" :class="msgOk ? 'msg-ok' : 'msg-err'" v-if="msg">{{ msg }}</span>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="toolbar">
+            <h6 style="margin:0;">日志路径列表</h6>
+            <label style="font-size:.82rem; display:flex; align-items:center; gap:5px;">
+                <input type="checkbox" v-model="withSize" @change="load"> 统计目录大小（慢）
+            </label>
+            <button class="btn btn-outline btn-sm" @click="load" :disabled="loading">{{ loading ? '加载中…' : '刷新' }}</button>
+        </div>
+        <table class="dir-table">
+            <thead>
+                <tr>
+                    <th>路径</th>
+                    <th>状态</th>
+                    <th>格式</th>
+                    <th class="text-center">叶子目录数</th>
+                    <th class="text-center" v-if="withSize">大小</th>
+                    <th class="text-center">会话回填</th>
+                    <th class="text-center">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr v-for="r in rows" :key="r.path">
+                    <td class="mono">
+                        {{ r.path }}
+                        <span v-if="r.base && r.active" style="color:var(--muted-foreground);">（base: {{ r.base }}）</span>
+                    </td>
+                    <td><span class="badge" :class="r.active ? 'badge-active' : 'badge-history'">{{ r.status }}</span></td>
+                    <td>
+                        <span class="badge badge-fmt" v-if="r.exists && r.format !== 'missing'">{{ fmtLabel(r.format) }}</span>
+                        <span class="badge badge-missing" v-if="!r.exists">目录不存在</span>
+                    </td>
+                    <td class="text-center">{{ r.leaf_count }}</td>
+                    <td class="text-center" v-if="withSize">{{ r.size || '-' }}</td>
+                    <td class="text-center">
+                        <template v-if="r.exists && r.format === 'newapi'">
+                            <template v-if="!bf[r.path] || bf[r.path].status === 'idle' || bf[r.path].status === 'done' || bf[r.path].status === 'error'">
+                                <button class="btn btn-outline btn-sm" @click="startBackfill(r.path, false)"
+                                    title="只处理首次/有新增的小时目录，跳过已完成的">
+                                    {{ (bf[r.path] && (bf[r.path].status === 'done' || bf[r.path].status === 'error')) ? '增量回填' : '回填' }}
+                                </button>
+                                <button class="btn btn-outline btn-sm" style="margin-left:4px;"
+                                    v-if="bf[r.path] && (bf[r.path].status === 'done' || bf[r.path].status === 'error')"
+                                    @click="startBackfill(r.path, true)"
+                                    title="全量重建该路径下所有小时目录（较慢）">全量</button>
+                            </template>
+                            <span v-if="bf[r.path] && bf[r.path].status === 'running'" style="font-size:.8rem;">
+                                {{ bf[r.path].done_leaves }}/{{ bf[r.path].total_leaves }} …<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }}）</span>
+                            </span>
+                            <span v-if="bf[r.path] && bf[r.path].status === 'done'" class="msg-ok" style="font-size:.78rem; margin-left:6px;">已完成<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }} 个已回填）</span></span>
+                            <span v-if="bf[r.path] && bf[r.path].status === 'error'" class="msg-err" style="font-size:.78rem;">失败</span>
+                        </template>
+                        <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
+                    </td>
+                    <td class="text-center">
+                        <button class="btn btn-danger btn-sm" v-if="!r.active" @click="removePath(r.path)">移除</button>
+                        <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
+                    </td>
+                </tr>
+                <tr v-if="rows.length === 0">
+                    <td :colspan="withSize ? 7 : 6" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endraw %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        rows: [],
+        newPath: '',
+        msg: '',
+        msgOk: false,
+        adding: false,
+        loading: false,
+        withSize: false,
+        activeBase: '',
+        bf: {},          // path -> backfill status
+        _pollTimer: null,
+    },
+    methods: {
+        fmtLabel: function(f) {
+            var m = { native: '本项目', newapi: 'new-api', unknown: '未知', empty: '空', missing: '缺失' };
+            return m[f] || f;
+        },
+        load: function() {
+            this.loading = true;
+            var url = '/api/logs-admin/list' + (this.withSize ? '?with_size=true' : '');
+            fetch(url, { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    this.rows = data.rows || [];
+                    this.activeBase = data.active_base || '';
+                    this.loading = false;
+                    this.rows.forEach(function(r) {
+                        if (r.exists && r.format === 'newapi') this.pollBackfill(r.path);
+                    }.bind(this));
+                }.bind(this))
+                .catch(function() { this.loading = false; }.bind(this));
+        },
+        addPath: function() {
+            var p = (this.newPath || '').trim();
+            if (!p) { this.showMsg('路径不能为空', false); return; }
+            this.adding = true;
+            fetch('/api/logs-admin/add', {
+                method: 'POST',
+                headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: p })
+            })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    this.adding = false;
+                    this.showMsg(data.msg, data.ok);
+                    if (data.ok) { this.newPath = ''; this.load(); }
+                }.bind(this))
+                .catch(function() { this.adding = false; this.showMsg('请求失败', false); }.bind(this));
+        },
+        removePath: function(path) {
+            if (!confirm('确认移除此路径？只从统计中排除，不会删除磁盘文件。\n\n' + path)) return;
+            fetch('/api/logs-admin/remove', {
+                method: 'POST',
+                headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    this.showMsg(data.msg, data.ok);
+                    if (data.ok) this.load();
+                }.bind(this))
+                .catch(function() { this.showMsg('请求失败', false); }.bind(this));
+        },
+        startBackfill: function(path, force) {
+            if (force && !confirm('全量重建将重新扫描该路径下所有小时目录（数万文件，较慢）。\n增量回填只处理有新增的目录。确认全量？')) return;
+            fetch('/api/logs-admin/backfill', {
+                method: 'POST',
+                headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path, force: !!force })
+            })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!data.ok) { this.showMsg(data.msg || '启动失败', false); return; }
+                    this.showMsg(force ? '全量回填已启动' : '增量回填已启动', true);
+                    this.pollBackfill(path, true);
+                }.bind(this))
+                .catch(function() { this.showMsg('请求失败', false); }.bind(this));
+        },
+        pollBackfill: function(path, loop) {
+            fetch('/api/logs-admin/backfill-status?path=' + encodeURIComponent(path),
+                  { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .then(function(st) {
+                    this.$set(this.bf, path, st);
+                    if (st.status === 'running' || loop) {
+                        setTimeout(function() { this.pollBackfill(path, st.status === 'running'); }.bind(this), 2000);
+                    }
+                }.bind(this))
+                .catch(function() {});
+        },
+        showMsg: function(msg, ok) {
+            this.msg = msg; this.msgOk = ok;
+            setTimeout(function() { this.msg = ''; }.bind(this), 4000);
+        }
+    },
+    mounted: function() { this.load(); }
+});
+</script>
+{% endblock %}

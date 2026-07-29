@@ -75,12 +75,53 @@ def _resolve_triplet(src_dir: Path, stem: str) -> Dict[str, Path]:
     return tri
 
 
+def _load_merged(src_dir: Path, stem: str, latest_file: str,
+                 tri: Dict[str, Path]) -> Optional[dict]:
+    """加载并组装 merged（messages + response + header）。
+
+    优先三元组（本项目格式）；找不到 req 时回退 new-api 合并单文件
+    （latest_file 是 .json 但非 -req.json），用 newapi_format 拆解。
+    返回 None 表示无法加载。
+    """
+    if "req" in tri:
+        try:
+            merged = _load_json(tri["req"])
+        except Exception:
+            return None
+        if "headers" in tri:
+            try:
+                merged["header"] = _load_json(tri["headers"])
+            except Exception:
+                merged["header"] = {}
+        else:
+            merged["header"] = {}
+        if "res" in tri:
+            try:
+                merged["response"] = parse_response(_load_json(tri["res"]))
+            except Exception:
+                merged["response"] = {}
+        else:
+            merged["response"] = {}
+        return merged
+
+    # new-api：合并单文件
+    if latest_file.endswith(".json") and not latest_file.endswith("-req.json"):
+        combined = src_dir / latest_file
+        if combined.is_file():
+            try:
+                from utils.newapi_format import build_merged_for_eval
+                return build_merged_for_eval(combined)
+            except Exception:
+                return None
+    return None
+
+
 def _process_one(args: tuple) -> Optional[dict]:
     """单个 session 的 reformat + analyze，多进程可调用。
 
     返回分析结果 dict（含 session/start_time 等字段），失败返回 None。
     """
-    src_dir_s, out_dir_s, first_ts, latest_file, trace_list = args
+    src_dir_s, out_dir_s, first_ts, latest_file, trace_list, api_key, models = args
 
     src_dir = Path(src_dir_s)
     out_dir = Path(out_dir_s)
@@ -92,29 +133,9 @@ def _process_one(args: tuple) -> Optional[dict]:
         stem = stem[:-len(".json")]
 
     tri = _resolve_triplet(src_dir, stem)
-    if "req" not in tri:
+    merged = _load_merged(src_dir, stem, latest_file, tri)
+    if merged is None:
         return None
-
-    try:
-        merged = _load_json(tri["req"])
-    except Exception:
-        return None
-
-    if "headers" in tri:
-        try:
-            merged["header"] = _load_json(tri["headers"])
-        except Exception:
-            merged["header"] = {}
-    else:
-        merged["header"] = {}
-
-    if "res" in tri:
-        try:
-            merged["response"] = parse_response(_load_json(tri["res"]))
-        except Exception:
-            merged["response"] = {}
-    else:
-        merged["response"] = {}
 
     session_dir = out_dir / first_ts
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -140,6 +161,9 @@ def _process_one(args: tuple) -> Optional[dict]:
     if start_ts and end_ts and end_ts >= start_ts:
         duration_s = (end_ts - start_ts).total_seconds()
 
+    # models 列表优先取传入值，退回 merged 的单值
+    models_list = list(models) if models else ([merged.get("model")] if merged.get("model") else [])
+
     return {
         "session": first_ts,
         "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S") if start_ts else None,
@@ -164,13 +188,21 @@ def _process_one(args: tuple) -> Optional[dict]:
         "tool_success_detail": analyzed["tool_success_detail"],
         "tool_fail_detail": analyzed["tool_fail_detail"],
         "skills_used": analyzed["skills_used"],
+        # 统一 schema 导出字段 + 兼容别名
+        "api_key": api_key,
+        "models": models_list,
+        "trace_list": trace_list or [],
+        "_key": first_ts,
+        "first_ts": first_ts,
+        "last_ts": stem,
+        "msg_count": analyzed["total_messages"],
         **dict(zip(("completed", "completed_note"), fmt_quality(analyzed["quality_errors"]))),
     }
 
 
 def _copy_session_to_outdir(args: tuple) -> None:
     """缓存命中时，仍需将合并后的 session JSON 写到 out_dir。"""
-    src_dir_s, out_dir_s, first_ts, latest_file, trace_list = args
+    src_dir_s, out_dir_s, first_ts, latest_file, trace_list, api_key, models = args
     src_dir = Path(src_dir_s)
     out_dir = Path(out_dir_s)
 
@@ -181,29 +213,9 @@ def _copy_session_to_outdir(args: tuple) -> None:
         stem = stem[:-len(".json")]
 
     tri = _resolve_triplet(src_dir, stem)
-    if "req" not in tri:
+    merged = _load_merged(src_dir, stem, latest_file, tri)
+    if merged is None:
         return
-
-    try:
-        merged = _load_json(tri["req"])
-    except Exception:
-        return
-
-    if "headers" in tri:
-        try:
-            merged["header"] = _load_json(tri["headers"])
-        except Exception:
-            merged["header"] = {}
-    else:
-        merged["header"] = {}
-
-    if "res" in tri:
-        try:
-            merged["response"] = parse_response(_load_json(tri["res"]))
-        except Exception:
-            merged["response"] = {}
-    else:
-        merged["response"] = {}
 
     session_dir = out_dir / first_ts
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -221,7 +233,8 @@ def _rebuild_from_cache(entry: dict) -> Optional[dict]:
         return None
     from utils.eval.eval import _parse_folder_ts
     start_ts = _parse_folder_ts(first_ts)
-    models = entry.get("models", [])
+    models = entry.get("models", []) or []
+    total_messages = ev.get("total_messages", entry.get("msg_count", 0))
     return {
         "session": first_ts,
         "latest_file": entry.get("latest_file", ""),
@@ -231,7 +244,7 @@ def _rebuild_from_cache(entry: dict) -> Optional[dict]:
         "api_call_count": ev.get("api_call_count", len(entry.get("trace_list", []) or []) or 1),
         "api_errors": ev.get("api_errors", 0),
         "user_turns": ev.get("user_turns", 0),
-        "total_messages": ev.get("total_messages", entry.get("msg_count", 0)),
+        "total_messages": total_messages,
         "tool_use_count": ev.get("tool_use_count", 0),
         "tool_result_count": ev.get("tool_result_count", 0),
         "tool_success": ev.get("tool_success", 0),
@@ -247,6 +260,14 @@ def _rebuild_from_cache(entry: dict) -> Optional[dict]:
         "skills_used": ev.get("skills_used", {}),
         "completed": ev.get("completed", 0),
         "completed_note": ev.get("completed_note", ""),
+        # 统一 schema 导出字段 + 兼容别名
+        "api_key": entry.get("api_key", ""),
+        "models": models,
+        "trace_list": entry.get("trace_list", []) or [],
+        "_key": first_ts,
+        "first_ts": first_ts,
+        "last_ts": entry.get("last_ts", ""),
+        "msg_count": total_messages,
     }
 
 
@@ -330,9 +351,14 @@ def reformat_and_analyze(
     api_key: Optional[str] = None,
     workers: int = 4,
     progress_cb: Optional[Callable[[str], None]] = None,
+    log_dir: Optional[str] = None,
 ) -> dict:
     """
     多进程并行: 对每个 session 的 latest_file 做 reformat + analyze_best_data。
+
+    log_dir: 写入每个 result 的历史目录标识（相对 root 的 posix 路径，
+        如 "260728/26072813"）；供报告生成 /history 链接用。缺省时退回
+        Path(src_dir).name（仅在单级 native 布局下正确）。
 
     Returns:
         {"total_sessions": N, "total_files": M, "errors": [...], "results": [analyzed_dict, ...]}
@@ -340,6 +366,10 @@ def reformat_and_analyze(
     _log = progress_cb or (lambda msg: None)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+
+    # 统一的历史目录标识：new-api 布局为 "<day>/<hour>"，native 为 "<hour>"。
+    # worker 内只能拿到 Path(src_dir).name（丢日期层），故在此统一覆盖。
+    resolved_log_dir = log_dir if log_dir is not None else Path(src_dir).name
 
     entries = session_entries
     if api_key:
@@ -356,15 +386,17 @@ def reformat_and_analyze(
         first_ts = sess.get("first_ts") or sess.get("_key", "")
         latest_file = sess.get("latest_file", "")
         trace_list = sess.get("trace_list", [])
+        s_api_key = sess.get("api_key", "")
+        s_models = sess.get("models", []) or []
         if not first_ts or not latest_file:
             continue
         cached = _rebuild_from_cache(sess)
         if cached:
-            cached["log_dir"] = Path(src_dir).name
+            cached["log_dir"] = resolved_log_dir
             cached_results.append(cached)
-            copy_tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list))
+            copy_tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list, s_api_key, s_models))
         else:
-            tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list))
+            tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list, s_api_key, s_models))
 
     for ct in copy_tasks:
         _copy_session_to_outdir(ct)
@@ -411,6 +443,8 @@ def reformat_and_analyze(
                 try:
                     result = future.result()
                     if result:
+                        # worker 内 log_dir=Path(src_dir).name 会丢失日期层，统一覆盖
+                        result["log_dir"] = resolved_log_dir
                         results.append(result)
                     else:
                         errors.append(f"处理失败: {first_ts}")

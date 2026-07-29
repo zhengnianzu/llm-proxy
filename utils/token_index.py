@@ -9,6 +9,7 @@ frozen 机制: index.jsonl 文件 mtime/size 不变时标记 frozen，下次跳�
 (channel_key|date) 三个维度预聚合。查询时从内存中按日期范围过滤汇总。
 """
 
+import hashlib
 import json
 import os
 import time
@@ -16,18 +17,41 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from utils.log_scan import iter_index_dirs, dir_key_for, normalize_entry
+
 _INDEX_FILE = ".token_index.jsonl"
-_VERSION = 3
+_VERSION = 4  # v4: 多格式归一化（new-api usage.token_in / 无 success 字段）
 _lock = threading.Lock()
 
 _MEM_TTL = 10
-_mem_index: Optional[dict] = None
-_mem_index_ts: float = 0
-_mem_env_dir: Optional[str] = None
+# 按 root 缓存，避免多目录轮询时单槽缓存互相驱逐
+_mem_cache: Dict[str, dict] = {}      # root_str -> index dict
+_mem_cache_ts: Dict[str, float] = {}  # root_str -> 最后刷新时间
+
+# 项目内缓存目录（当 root 不可写，如只读挂载的 new-api 目录时使用）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_FALLBACK_CACHE_DIR = _PROJECT_ROOT / "logs" / ".token_index_cache"
+
+
+def _resolve_cache_path(env_dir: Path) -> str:
+    """索引缓存文件路径。root 可写则存 root 内（兼容 logs_all 旧行为），
+    否则退回项目内 logs/.token_index_cache/{hash}.jsonl。"""
+    in_root = env_dir / _INDEX_FILE
+    try:
+        if env_dir.is_dir() and os.access(str(env_dir), os.W_OK):
+            return str(in_root)
+    except OSError:
+        pass
+    h = hashlib.md5(os.path.normpath(str(env_dir)).encode()).hexdigest()[:16]
+    try:
+        os.makedirs(str(_FALLBACK_CACHE_DIR), exist_ok=True)
+    except OSError:
+        pass
+    return str(_FALLBACK_CACHE_DIR / f"{h}.jsonl")
 
 
 def _index_path(env_dir: Path) -> str:
-    return str(env_dir / _INDEX_FILE)
+    return _resolve_cache_path(env_dir)
 
 
 def _load_index(env_dir: Path) -> dict:
@@ -117,20 +141,17 @@ def _scan_index_file(index_file: Path, offset: int = 0,
                 except json.JSONDecodeError:
                     continue
 
+                entry = normalize_entry(entry)
+
                 new_entries += 1
                 entry_count += 1
-                ts = entry.get("ts", "")
-                date_str = ts[:10] if len(ts) >= 10 else "unknown"
+                date_str = entry["date"]
                 dates_set.add(date_str)
 
-                model = entry.get("model", "") or ""
-                tok_in = entry.get("tok_in", 0) or 0
-                tok_out = entry.get("tok_out", 0) or 0
-
-                if "valid" in entry:
-                    is_success = bool(entry["valid"]) and tok_out > 0
-                else:
-                    is_success = bool(entry.get("success", False)) and tok_out > 0
+                model = entry["model"]
+                tok_in = entry["tok_in"]
+                tok_out = entry["tok_out"]
+                is_success = entry["success"]
 
                 # models dimension
                 if model:
@@ -149,7 +170,7 @@ def _scan_index_file(index_file: Path, offset: int = 0,
                         models[mk]["e_tok_in"] += tok_in
 
                 # keys dimension
-                raw_key = entry.get("api_key", "") or ""
+                raw_key = entry["api_key"]
                 if raw_key:
                     api_keys_set.add(raw_key)
                 kk = f"{raw_key}|{date_str}"
@@ -158,12 +179,12 @@ def _scan_index_file(index_file: Path, offset: int = 0,
                 keys[kk]["count"] += 1
                 keys[kk]["tok_in"] += tok_in
                 keys[kk]["tok_out"] += tok_out
-                sess_id = entry.get("q1_hash") or entry.get("chain_key", "")
+                sess_id = entry["q1_hash"] or entry["chain_key"]
                 if sess_id:
                     keys[kk]["sessions"] += 1
 
                 # channels dimension
-                ch_key = entry.get("channel_key", "") or ""
+                ch_key = entry["channel_key"]
                 if ch_key:
                     channel_keys_set.add(ch_key)
                 ck = f"{ch_key or '(default)'}|{date_str}"
@@ -194,88 +215,72 @@ def _scan_index_file(index_file: Path, offset: int = 0,
 
 
 def refresh_token_index(env_dir: str, force: bool = False) -> dict:
-    """增量刷新 token 索引，只扫描指定 env_dir 下的 mtime 目录。"""
-    global _mem_index, _mem_index_ts, _mem_env_dir
+    """增量刷新单个 root 的 token 索引。
 
+    root 下用可变深度扫描找到所有含 index.jsonl 的叶子目录，
+    dir_key 为叶子相对 root 的路径（如 '26072520' 或 '260727/26072717'）。
+    每个 root 独立缓存，避免多目录轮询时互相驱逐。
+    """
     env_path = Path(env_dir)
-    env_dir_str = str(env_path)
+    env_dir_str = os.path.normpath(str(env_path))
     now = time.time()
 
-    if (not force
-            and _mem_index is not None
-            and _mem_env_dir == env_dir_str
-            and (now - _mem_index_ts) < _MEM_TTL):
-        return _mem_index
+    cached = _mem_cache.get(env_dir_str)
+    if (not force and cached is not None
+            and (now - _mem_cache_ts.get(env_dir_str, 0)) < _MEM_TTL):
+        return cached
 
     with _lock:
-        if (not force
-                and _mem_index is not None
-                and _mem_env_dir == env_dir_str
-                and (time.time() - _mem_index_ts) < _MEM_TTL):
-            return _mem_index
+        cached = _mem_cache.get(env_dir_str)
+        if (not force and cached is not None
+                and (time.time() - _mem_cache_ts.get(env_dir_str, 0)) < _MEM_TTL):
+            return cached
 
-        index = (_mem_index if (_mem_env_dir == env_dir_str and _mem_index) else
-                 _load_index(env_path))
+        index = cached if cached else _load_index(env_path)
         dirs_cache = index.get("dirs", {})
         changed = False
 
         current_dirs = set()
-        if env_path.is_dir():
-            for mtime_dir in env_path.iterdir():
-                if not mtime_dir.is_dir():
-                    continue
+        for leaf in iter_index_dirs(env_path):
+            dir_key = dir_key_for(env_path, leaf)
+            current_dirs.add(dir_key)
 
-                dir_key = mtime_dir.name
-                current_dirs.add(dir_key)
+            prev = dirs_cache.get(dir_key)
 
-                prev = dirs_cache.get(dir_key)
+            if not force and prev and prev.get("frozen"):
+                continue
 
-                if not force and prev and prev.get("frozen"):
-                    continue
+            index_file = leaf / "index.jsonl"
+            try:
+                st = index_file.stat()
+                f_mtime = st.st_mtime
+                f_size = st.st_size
+            except OSError:
+                continue
 
-                index_file = mtime_dir / "index.jsonl"
-                if not index_file.is_file():
-                    if not prev:
-                        dirs_cache[dir_key] = {
-                            "index_mtime": 0, "index_size": 0,
-                            "frozen": False,
-                            "entry_count": 0,
-                            "models": {}, "keys": {}, "channels": {},
-                            "channel_keys_set": [], "dates": [],
-                        }
-                        changed = True
-                    continue
+            if (not force and prev
+                    and prev.get("index_mtime") == f_mtime
+                    and prev.get("index_size") == f_size):
+                if not prev.get("frozen"):
+                    prev["frozen"] = True
+                    changed = True
+                continue
 
-                try:
-                    st = index_file.stat()
-                    f_mtime = st.st_mtime
-                    f_size = st.st_size
-                except OSError:
-                    continue
-
-                if (not force and prev
-                        and prev.get("index_mtime") == f_mtime
-                        and prev.get("index_size") == f_size):
-                    if not prev.get("frozen"):
-                        prev["frozen"] = True
-                        changed = True
-                    continue
-
-                prev_offset = prev.get("scan_offset", 0) if prev else 0
-                if (not force and prev
-                        and prev_offset > 0
-                        and f_size > prev.get("index_size", 0)):
-                    scan_result = _scan_index_file(index_file, offset=prev_offset, prev=prev)
-                else:
-                    scan_result = _scan_index_file(index_file)
-                dirs_cache[dir_key] = {
-                    "index_mtime": f_mtime,
-                    "index_size": f_size,
-                    "scan_offset": scan_result.get("scan_offset", f_size),
-                    "frozen": False,
-                    **{k: v for k, v in scan_result.items() if k not in ("new_entries", "scan_offset")},
-                }
-                changed = True
+            prev_offset = prev.get("scan_offset", 0) if prev else 0
+            if (not force and prev
+                    and prev_offset > 0
+                    and f_size > prev.get("index_size", 0)):
+                scan_result = _scan_index_file(index_file, offset=prev_offset, prev=prev)
+            else:
+                scan_result = _scan_index_file(index_file)
+            dirs_cache[dir_key] = {
+                "index_mtime": f_mtime,
+                "index_size": f_size,
+                "scan_offset": scan_result.get("scan_offset", f_size),
+                "frozen": False,
+                **{k: v for k, v in scan_result.items() if k not in ("new_entries", "scan_offset")},
+            }
+            changed = True
 
         # 只删除非 frozen 的消失目录；frozen 代表数据已稳定，本地删除后仍保留统计
         removed = set(dirs_cache.keys()) - current_dirs
@@ -289,9 +294,8 @@ def refresh_token_index(env_dir: str, force: bool = False) -> dict:
             index["updated_at"] = time.time()
             _save_index(env_path, index)
 
-        _mem_index = index
-        _mem_index_ts = time.time()
-        _mem_env_dir = env_dir_str
+        _mem_cache[env_dir_str] = index
+        _mem_cache_ts[env_dir_str] = time.time()
 
         return index
 
@@ -306,12 +310,33 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:4]}...{key[-4:]}"
 
 
-def query_token_stats(env_dir: str, model: str = '', date_start: str = '2000-01-01',
+def _as_roots(env_dir) -> List[str]:
+    """把 env_dir 归一化为 root 列表（接受 str 或 list）。"""
+    if env_dir is None:
+        return []
+    if isinstance(env_dir, (str, os.PathLike)):
+        return [str(env_dir)]
+    return [str(x) for x in env_dir if x]
+
+
+def _combined_index(env_dir, force: bool = False) -> dict:
+    """刷新一个或多个 root，合并为一个 index（dir_key 加 root 前缀防冲突）。"""
+    roots = _as_roots(env_dir)
+    merged: Dict[str, Any] = {}
+    for root in roots:
+        idx = refresh_token_index(root, force=force)
+        prefix = os.path.normpath(root)
+        for dir_key, dir_info in idx.get("dirs", {}).items():
+            merged[f"{prefix}::{dir_key}"] = dir_info
+    return {"dirs": merged}
+
+
+def query_token_stats(env_dir, model: str = '', date_start: str = '2000-01-01',
                       date_end: str = '9999-12-31', status: str = '',
                       channel_key: str = '', api_key: str = '',
                       force: bool = False) -> dict:
-    """从索引中聚合 token 统计。"""
-    index = refresh_token_index(env_dir, force=force)
+    """从索引中聚合 token 统计。env_dir 可为单个 root 或 root 列表。"""
+    index = _combined_index(env_dir, force=force)
 
     model_filter = model.lower() if model else ""
     model_agg: Dict[str, Dict[str, Dict[str, int]]] = {}
@@ -384,10 +409,10 @@ def query_token_stats(env_dir: str, model: str = '', date_start: str = '2000-01-
     return {"data": res_data, "summary": summary}
 
 
-def query_key_stats(env_dir: str, date_start: str = '2000-01-01', date_end: str = '9999-12-31',
+def query_key_stats(env_dir, date_start: str = '2000-01-01', date_end: str = '9999-12-31',
                     force: bool = False) -> dict:
-    """从索引中聚合 key 统计。"""
-    index = refresh_token_index(env_dir, force=force)
+    """从索引中聚合 key 统计。env_dir 可为单个 root 或 root 列表。"""
+    index = _combined_index(env_dir, force=force)
 
     key_agg: Dict[str, Dict[str, Any]] = {}
 
@@ -429,10 +454,10 @@ def query_key_stats(env_dir: str, date_start: str = '2000-01-01', date_end: str 
     return {"keys": keys_list}
 
 
-def query_channel_stats(env_dir: str, date_start: str = '2000-01-01', date_end: str = '9999-12-31',
+def query_channel_stats(env_dir, date_start: str = '2000-01-01', date_end: str = '9999-12-31',
                         force: bool = False) -> dict:
-    """从索引中聚合 channel 统计。"""
-    index = refresh_token_index(env_dir, force=force)
+    """从索引中聚合 channel 统计。env_dir 可为单个 root 或 root 列表。"""
+    index = _combined_index(env_dir, force=force)
 
     ch_agg: Dict[str, Dict[str, Any]] = {}
 
@@ -472,9 +497,9 @@ def query_channel_stats(env_dir: str, date_start: str = '2000-01-01', date_end: 
     return {"channels": ch_list}
 
 
-def query_channel_keys(env_dir: str, force: bool = False) -> List[str]:
-    """从索引中提取所有 channel key。"""
-    index = refresh_token_index(env_dir, force=force)
+def query_channel_keys(env_dir, force: bool = False) -> List[str]:
+    """从索引中提取所有 channel key。env_dir 可为单个 root 或 root 列表。"""
+    index = _combined_index(env_dir, force=force)
     keys: set = set()
     for dir_info in index.get("dirs", {}).values():
         for ck in dir_info.get("channel_keys_set", []):
@@ -482,9 +507,9 @@ def query_channel_keys(env_dir: str, force: bool = False) -> List[str]:
     return sorted(keys)
 
 
-def query_api_keys(env_dir: str, force: bool = False) -> List[str]:
-    """从索引中提取所有 api key。"""
-    index = refresh_token_index(env_dir, force=force)
+def query_api_keys(env_dir, force: bool = False) -> List[str]:
+    """从索引中提取所有 api key。env_dir 可为单个 root 或 root 列表。"""
+    index = _combined_index(env_dir, force=force)
     keys: set = set()
     for dir_info in index.get("dirs", {}).values():
         for ak in dir_info.get("api_keys_set", []):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -7,11 +8,16 @@ from pathlib import Path
 from typing import Any
 
 from utils.export_store import (
+    create_record,
     get_record,
     get_record_resolved,
     list_records,
     list_records_by_key,
     list_records_for_datasets,
+    set_in_manage,
+    set_in_manage_bulk,
+    set_manage_name,
+    update_status,
 )
 from utils.key_store import get_key_full, list_keys, mask_key
 from utils.obs_utils import run_download_cmd
@@ -20,8 +26,8 @@ from . import db
 from .config import ReflectionConfig
 from .consumer import reflect
 from .extractor import extract_signatures
-from .importer import import_run, validate_quality_dir
-from .merger import merge
+from .importer import import_run, preview_run, validate_quality_dir
+from .merger import merge, append_response_message
 from .prompt_loader import load_prompt
 from .worker_manager import WorkerManager
 
@@ -124,12 +130,18 @@ class ReflectionService:
             })
         return result
 
+    @staticmethod
+    def _is_valid_dataset(record: dict) -> bool:
+        """是否为可作为数据集的质检记录：成功 且 local_copy_dir 含 analysis。"""
+        if record.get("status") != "success":
+            return False
+        return "analysis" in (record.get("local_copy_dir") or "").lower()
+
     def datasets_all(self) -> list[dict]:
+        """Session 管理列表：只返回被手动添加进管理（in_manage=1）的数据集。"""
         result = []
-        for record in list_records_for_datasets(limit=1000):
-            if "analysis" not in (record.get("local_copy_dir") or "").lower():
-                continue
-            if record["status"] != "success":
+        for record in list_records_for_datasets(limit=1000, in_manage=True):
+            if not self._is_valid_dataset(record):
                 continue
             artifacts_valid = True
             quality_error = ""
@@ -151,6 +163,53 @@ class ReflectionService:
                 "has_tasks": total > 0,
             })
         return result
+
+    def available_datasets(self) -> list[dict]:
+        """可添加池：有效但尚未加入管理列表（in_manage=0）的数据集（轻量，不查 runs）。"""
+        result = []
+        for record in list_records_for_datasets(limit=1000, in_manage=False):
+            if not self._is_valid_dataset(record):
+                continue
+            result.append({
+                "id": record["id"],
+                "key_slot": record["key_slot"],
+                "mode": record.get("mode", "export"),
+                "created_at": record.get("created_at", ""),
+                "total_sessions": record.get("total_sessions", 0),
+                "obs_dst": record.get("obs_dst", ""),
+            })
+        return result
+
+    def add_to_manage(self, body: dict) -> dict:
+        """将选中的导出结果加入 Session 管理列表（支持多选）。
+
+        可选 body["name"]：仅在单条导入时作为自定义显示名（留空则回退原 key_slot）。
+        """
+        raw_ids = body.get("ids") or []
+        ids = []
+        for x in raw_ids:
+            try:
+                rid = int(x)
+            except (TypeError, ValueError):
+                continue
+            record = get_record(rid)
+            if record and self._is_valid_dataset(record):
+                ids.append(rid)
+        if not ids:
+            raise ValueError("没有可添加的有效数据集")
+        set_in_manage_bulk(ids, True)
+        name = str(body.get("name") or "").strip()
+        if name and len(ids) == 1:
+            set_manage_name(ids[0], name)
+        return {"status": "ok", "added": len(ids)}
+
+    def remove_from_manage(self, record_id: int) -> dict:
+        """从管理列表移除（仅解除关联，不删 export 记录与本地/OBS 数据）。"""
+        record = get_record(record_id)
+        if not record:
+            raise ValueError("记录不存在")
+        set_in_manage(record_id, False)
+        return {"status": "ok"}
 
     def create_run(self, body: dict) -> dict:
         source_id = int(body["source_export_id"])
@@ -270,8 +329,10 @@ class ReflectionService:
             detail = self._load_task_detail(task)
             task["processed_text"] = detail.get("processed_text")
         raw = self._load_raw_json(row)
+        merged = merge(raw, tasks, run_id)
+        append_response_message(merged, raw)
         return {"trajectory": {k: row[k] for k in ("trajectory_id", "session_id", "trajectory_path")},
-                "merged": merge(raw, tasks, run_id),
+                "merged": merged,
                 "tasks": [{k: v for k, v in task.items() if k not in {"signature", "original_thinking"}} for task in tasks]}
 
     def export(self, run_id: str) -> dict:
@@ -589,7 +650,9 @@ class ReflectionService:
                 task["processed_text"] = detail.get("processed_text")
                 tasks.append(task)
         run_id = tasks[0].get("latest_run_id") or "" if tasks else ""
-        merged = merge(raw, tasks, run_id) if tasks else raw
+        # tasks 为空时 merge 不会执行（merged=raw），此处 deepcopy 一份避免就地修改 raw
+        merged = merge(raw, tasks, run_id) if tasks else copy.deepcopy(raw)
+        append_response_message(merged, raw)
         return {
             "merged": merged,
             "tasks": [{k: v for k, v in t.items() if k not in {"signature", "original_thinking"}} for t in tasks],
@@ -597,8 +660,69 @@ class ReflectionService:
         }
 
     # ------------------------------------------------------------------
+    # 注册外部数据集：登记一个已存在于 OBS 的数据集（来自其他平台导出）
+    # ------------------------------------------------------------------
+
+    def register_external(self, body: dict) -> dict:
+        obs_dst = str(body.get("obs_dst") or "").strip()
+        if not obs_dst or not obs_dst.startswith("obs://"):
+            raise ValueError("OBS 路径必须以 obs:// 开头")
+        if not obs_dst.endswith("/"):
+            obs_dst += "/"
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise ValueError("名称不能为空")
+        try:
+            total_sessions = max(0, int(body.get("total_sessions") or 0))
+        except (TypeError, ValueError):
+            total_sessions = 0
+
+        # local_copy_dir 必须落在 analysis 根下（datasets_all 过滤要求路径含 "analysis"），
+        # 目录此时可以尚不存在，"导入任务库" 会按 obs_dst 自动下载到此处。
+        import re
+        slug_base = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-") or "dataset"
+        slug = f"{slug_base}-{int(time.time())}"
+        local_copy_dir = (Path("logs_session_analysis") / "external" / slug).as_posix()
+
+        record_id = create_record(
+            api_key="",
+            key_slot=name,
+            mtime_dirs="[]",
+            obs_dst=obs_dst,
+            local_copy_dir=local_copy_dir,
+            mode="external",
+        )
+        update_status(record_id, "success", total_sessions=total_sessions)
+        set_in_manage(record_id, True)  # 注册即加入管理列表
+        return {"status": "ok", "id": record_id}
+
+    # ------------------------------------------------------------------
     # 导入任务库：从 export record 提取 signature 写入 dataset_tasks
     # ------------------------------------------------------------------
+
+    def preview_tasks(self, body: dict) -> dict:
+        """只读预统计：不写库，返回该导出可解析出的 signature 任务规模。
+
+        与 import_tasks 共用 quality_root 定位逻辑，但本地目录不存在时**不**自动
+        从 OBS 下载——保持统计快、纯只读；缺目录直接提示先下载/导入。
+        """
+        source_id = int(body["source_export_id"])
+        source = get_record_resolved(source_id)
+        if not source:
+            raise ValueError("记录不存在")
+
+        with db.connect(self.config.db_path) as conn:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM dataset_tasks WHERE export_id=?", (source_id,)
+            ).fetchone()[0]
+
+        quality_root = Path(source.get("local_copy_dir") or "")
+        if not quality_root.is_dir():
+            raise ValueError("本地质检目录不存在，请先下载/导入后再统计")
+
+        stats = preview_run(quality_root)
+        stats["already_imported"] = int(existing)
+        return {"status": "ok", **stats}
 
     def import_tasks(self, body: dict) -> dict:
         source_id = int(body["source_export_id"])

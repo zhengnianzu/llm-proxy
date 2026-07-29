@@ -3,7 +3,7 @@ utils/obs_utils.py — OBS 路径管理与工具函数
 
 集中管理：
 - obsutil 二进制路径
-- obs_base 配置读取（sync_config → settings/obs_base.yaml fallback）
+- obs_base 配置读取（唯一来源：sync_config 指向的 yaml，如 settings/obs_rl.yaml）
 - 上传命令（_run_upload_cmd）
 - 目录/文件列表（obsutil ls）
 """
@@ -27,39 +27,29 @@ DEFAULT_DOWNLOAD_SCRIPT = str(PROJECT_ROOT / "tools" / "obs_download.sh")
 # ---------------------------------------------------------------------------
 
 def load_obs_base() -> str:
-    """读取 obs_base。优先 .cli_state.yaml -> sync_config，fallback settings/obs_base.yaml。"""
+    """读取 obs_base。唯一来源：.cli_state.yaml -> sync_config 指向的配置文件
+    （如 settings/obs_rl.yaml）。所有 OBS 配置统一到该文件，不再回退其它文件。"""
     import yaml
 
-    candidates = []
-
     cli_state_path = PROJECT_ROOT / ".cli_state.yaml"
-    if cli_state_path.is_file():
-        try:
-            with open(cli_state_path, "r", encoding="utf-8") as f:
-                state = yaml.safe_load(f) or {}
-            sync_cfg = state.get("sync_config", "")
-            if sync_cfg:
-                p = Path(sync_cfg)
-                if not p.is_absolute():
-                    p = PROJECT_ROOT / p
-                candidates.append(p)
-        except Exception:
-            pass
-
-    candidates.append(PROJECT_ROOT / "settings" / "obs_base.yaml")
-
-    for cfg_path in candidates:
-        if not cfg_path.is_file():
-            continue
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            val = cfg.get("obs_base", "").strip().rstrip("/")
-            if val:
-                return val
-        except Exception:
-            continue
-    return ""
+    if not cli_state_path.is_file():
+        return ""
+    try:
+        with open(cli_state_path, "r", encoding="utf-8") as f:
+            state = yaml.safe_load(f) or {}
+        sync_cfg = state.get("sync_config", "")
+        if not sync_cfg:
+            return ""
+        p = Path(sync_cfg)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        if not p.is_file():
+            return ""
+        with open(p, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg.get("obs_base", "").strip().rstrip("/")
+    except Exception:
+        return ""
 
 
 def load_sync_config() -> dict:
