@@ -787,6 +787,8 @@ function collectKeys(data) {
 function _resetDeepSearchState() {
     _deepSearchQuery = '';
     _deepSearchActive = false;
+    _q1Query = '';
+    if (typeof _q1Timer !== 'undefined' && _q1Timer) { clearTimeout(_q1Timer); _q1Timer = null; }
     const btn = document.getElementById('deepSearchBtn');
     if (btn) { btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }
 }
@@ -850,6 +852,7 @@ async function loadFileList(refresh = false) {
     if (filterModel) params += `&model=${encodeURIComponent(filterModel)}`;
     if (refresh) params += '&refresh=true';
     if (_deepSearchQuery) params += `&search=${encodeURIComponent(_deepSearchQuery)}`;
+    if (_q1Query) params += `&q1search=${encodeURIComponent(_q1Query)}`;
     params += _sharedParams();
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg' || folder === 'agg') {
@@ -960,9 +963,13 @@ async function loadFileList(refresh = false) {
 
 function updateLoadStatus() {
     const loaded = fileListEl.querySelectorAll('.file-item').length;
-    document.getElementById('loadStatus').textContent = _deepSearchActive
-        ? `深度搜索: ${totalItems} 条匹配`
-        : `已加载 ${loaded} / 共 ${totalItems} 条`;
+    if (_deepSearchActive) {
+        document.getElementById('loadStatus').textContent = `深度搜索: ${totalItems} 条匹配`;
+    } else if (_q1Query) {
+        document.getElementById('loadStatus').textContent = `搜索到 ${totalItems} 条（已加载 ${loaded}）`;
+    } else {
+        document.getElementById('loadStatus').textContent = `已加载 ${loaded} / 共 ${totalItems} 条`;
+    }
 }
 
 function _updateRefreshTime(ts) {
@@ -1459,6 +1466,8 @@ function showError(msg) {
 let _searchQuery = '';
 let _deepSearchQuery = '';
 let _deepSearchActive = false;
+let _q1Query = '';        // 服务端首句过滤（跨全部会话）
+let _q1Timer = null;
 
 function filterSidebar() {
     if (_deepSearchActive) {
@@ -1466,7 +1475,9 @@ function filterSidebar() {
         if (!val) exitDeepSearch();
         return;
     }
-    _searchQuery = (document.getElementById('q1Search').value || '').trim().toLowerCase();
+    const raw = (document.getElementById('q1Search').value || '').trim();
+    // 即时对「已加载」行做隐藏/显示，给出即时反馈
+    _searchQuery = raw.toLowerCase();
     const items = fileListEl.querySelectorAll('.file-item');
     let visible = 0;
     items.forEach(el => {
@@ -1480,9 +1491,26 @@ function filterSidebar() {
         el.style.display = match ? '' : 'none';
         if (match) visible++;
     });
-    document.getElementById('loadStatus').textContent = _searchQuery
-        ? `搜索到 ${visible} 条 (共 ${totalItems})`
+    document.getElementById('loadStatus').textContent = raw
+        ? `搜索中… 本页 ${visible} 条`
         : `已加载 ${items.length} / 共 ${totalItems} 条`;
+    // 防抖：跨「全部会话」在服务端按首句过滤（不读合并文件，秒级）
+    if (_q1Timer) clearTimeout(_q1Timer);
+    _q1Timer = setTimeout(_runQ1Search, 300);
+}
+
+function _runQ1Search() {
+    if (_deepSearchActive) return;
+    const val = (document.getElementById('q1Search').value || '').trim();
+    if (val === _q1Query) return;   // 无变化
+    _q1Query = val;
+    _searchQuery = '';              // 交由服务端过滤，允许分页加载更多
+    offset = 0;
+    totalItems = 0;
+    aggChains = [];
+    fileListEl.innerHTML = '<div class="cv-sidebar-tip"><span class="spinner"></span>搜索中…</div>';
+    document.getElementById('loadStatus').textContent = '';
+    loadFileList();
 }
 
 function triggerDeepSearch() {
@@ -1496,6 +1524,8 @@ function triggerDeepSearch() {
     _deepSearchActive = true;
     _deepSearchQuery = query;
     _searchQuery = '';
+    _q1Query = '';
+    if (_q1Timer) { clearTimeout(_q1Timer); _q1Timer = null; }
     btn.style.background = 'var(--primary)';
     btn.style.color = 'var(--primary-foreground)';
     btn.style.borderColor = 'var(--primary)';
@@ -1510,6 +1540,8 @@ function triggerDeepSearch() {
 function exitDeepSearch() {
     _deepSearchActive = false;
     _deepSearchQuery = '';
+    _q1Query = '';
+    if (_q1Timer) { clearTimeout(_q1Timer); _q1Timer = null; }
     const btn = document.getElementById('deepSearchBtn');
     btn.style.background = '';
     btn.style.color = '';

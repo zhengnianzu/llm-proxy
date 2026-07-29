@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -569,12 +570,25 @@ def _content_contains_keyword(content, kw: str) -> bool:
     return False
 
 
-def _match_messages_content(root_dir: str, filename: str, keyword: str) -> bool:
+def _match_messages_content(root_dir: str, filename: str, keyword: str, newapi: bool = False) -> bool:
     req_path = Path(root_dir) / filename
     if not req_path.is_file():
         return False
+    kw = keyword.lower()
+    # new-api：合并单文件（键 req/resp/up_req/up_resp，无顶层 messages、无 -res.json 兄弟文件）。
+    # 直接对整份文件字节做子串扫描——覆盖请求+响应全部内容，免 json 解析与 utf-8 解码（快得多）。
+    # 关键词含 ASCII 字母时才做大小写折叠（bytes.lower 只影响 ASCII 字节，多字节 UTF-8 不受影响，
+    # 故中文关键词走零拷贝的直接字节查找）。
+    if newapi:
+        try:
+            kwb = keyword.encode("utf-8", "ignore")
+            fold = any(("a" <= ch.lower() <= "z") for ch in keyword if ch.isascii())
+            with open(req_path, "rb") as f:
+                data = f.read()
+            return (kwb.lower() in data.lower()) if fold else (kwb in data)
+        except Exception:
+            return False
     try:
-        kw = keyword.lower()
         with open(req_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         messages = data.get("messages")
@@ -596,16 +610,48 @@ def _match_messages_content(root_dir: str, filename: str, keyword: str) -> bool:
         return False
 
 
-def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
+def _filter_sessions_by_content(root_dir: str, sessions: List[dict], keyword: str, newapi: bool) -> List[dict]:
+    """并行对每个 session 的 latest_file 做内容匹配，返回命中的 session。
+
+    单线程逐个 open+json.load 数千个合并文件会长时间卡住（前端一直转圈）；这里用线程池并发，
+    I/O 等待可重叠，配合 newapi 的免解析子串扫描，把「深度搜索」从数分钟降到秒级。
+    """
+    files = [(i, s.get("latest_file", "")) for i, s in enumerate(sessions)]
+    workers = min(32, (os.cpu_count() or 4) * 4)
+
+    def _hit(item):
+        i, fn = item
+        return i if (fn and _match_messages_content(root_dir, fn, keyword, newapi)) else -1
+
+    matched_idx = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for r in ex.map(_hit, files):
+            if r >= 0:
+                matched_idx.append(r)
+    matched_idx.sort()
+    return [sessions[i] for i in matched_idx]
+
+
+def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "", q1search: str = "") -> Dict[str, Any]:
     _refresh_state(kind, root_dir, force=refresh)
     backend = _read_backend(root_dir)
 
     search = (search or "").strip()
+    q1search = (q1search or "").strip()
 
     if search:
-        # search 需要全量加载再过滤（无法下推 SQL），分页在过滤后处理
+        # search 需要全量加载再过滤（无法下推 SQL），分页在过滤后处理。
+        # 内容扫描并行化 + newapi 免解析，避免前端长时间转圈。
         sessions = backend.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
-        sessions = [s for s in sessions if _match_messages_content(root_dir, s.get("latest_file", ""), search)]
+        is_newapi = _root_format(root_dir) == "newapi"
+        sessions = _filter_sessions_by_content(root_dir, sessions, search, is_newapi)
+        total = len(sessions)
+        paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
+    elif q1search:
+        # 首句过滤：只匹配 session 的 q1（内存过滤，不读合并文件），覆盖全部会话后再分页。
+        needle = q1search.lower()
+        sessions = backend.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
+        sessions = [s for s in sessions if needle in (s.get("q1", "") or "").lower()]
         total = len(sessions)
         paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
     else:
@@ -643,7 +689,7 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
     return agg_payload
 
 
-def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
+def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "", q1search: str = "") -> Dict[str, Any]:
     env_path = Path(env_dir)
     if not env_path.is_dir():
         return {"items": [], "total": 0, "known_keys": [], "known_models": []}
@@ -669,9 +715,23 @@ def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: i
             all_known_keys.add(session.get("api_key", ""))
             all_sessions.append((session, root_dir))
 
+    q1search = (q1search or "").strip()
+    if q1search:
+        needle = q1search.lower()
+        all_sessions = [p for p in all_sessions if needle in (p[0].get("q1", "") or "").lower()]
+
     if search and search.strip():
         search = search.strip()
-        all_sessions = [(s, rd) for s, rd in all_sessions if _match_messages_content(rd, s.get("latest_file", ""), search)]
+
+        def _hit(pair):
+            s, rd = pair
+            fn = s.get("latest_file", "")
+            ok = bool(fn) and _match_messages_content(rd, fn, search, _root_format(rd) == "newapi")
+            return pair if ok else None
+
+        workers = min(32, (os.cpu_count() or 4) * 4)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            all_sessions = [p for p in ex.map(_hit, all_sessions) if p is not None]
 
     all_sessions.sort(key=lambda t: t[0].get("last_ts", ""), reverse=True)
     total = len(all_sessions)
@@ -992,8 +1052,8 @@ def register_log_routes(app: FastAPI) -> None:
         return JSONResponse(data)
 
     @app.get("/logs/aggregate")
-    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = "", search: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model, search))
+    def logs_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", log_dir: str = "", search: str = "", q1search: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", resolve_log_dir(log_dir), min_messages, offset, limit, api_key, refresh, model, search, q1search))
 
     # --- 旧路由（别名，向后兼容） ---
 
@@ -1006,8 +1066,8 @@ def register_log_routes(app: FastAPI) -> None:
         return logs_file(filename)
 
     @app.get("/logs/anthropic/aggregate")
-    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search))
+    def logs_anthropic_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "", q1search: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search, q1search))
 
     @app.get("/logs/openai/list")
     def logs_openai_list(min_messages: int = 10, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = ""):
@@ -1018,8 +1078,8 @@ def register_log_routes(app: FastAPI) -> None:
         return logs_file(filename)
 
     @app.get("/logs/openai/aggregate")
-    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = ""):
-        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search))
+    def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "", q1search: str = ""):
+        return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search, q1search))
 
     # --- shared 公开路由（key+code 验证） ---
 
@@ -1041,12 +1101,12 @@ def register_log_routes(app: FastAPI) -> None:
         return logs_dirs()
 
     @app.get("/api/shared/logs/aggregate")
-    def shared_logs_aggregate(key: str = "", code: str = "", min_messages: int = 1, offset: int = 0, limit: int = 50, refresh: bool = False, model: str = "", log_dir: str = "", search: str = ""):
+    def shared_logs_aggregate(key: str = "", code: str = "", min_messages: int = 1, offset: int = 0, limit: int = 50, refresh: bool = False, model: str = "", log_dir: str = "", search: str = "", q1search: str = ""):
         err = _check_shared(key, code)
         if err:
             return err
         target_dir = resolve_log_dir(log_dir) if log_dir and log_dir != "__ALL__" else resolve_log_dir("")
-        return JSONResponse(_aggregate_payload("anthropic", target_dir, min_messages, offset, limit, key, refresh, model, search))
+        return JSONResponse(_aggregate_payload("anthropic", target_dir, min_messages, offset, limit, key, refresh, model, search, q1search))
 
     @app.get("/api/shared/logs/file")
     def shared_logs_file(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
