@@ -81,8 +81,11 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
     @app.get("/api/reflection/config")
     def config():
         from utils.obs_utils import load_obs_base
+        from .worker_manager import DEFAULT_MAX_GLOBAL_WORKERS
         prompt = {method: (service.config.prompt_dir / f"{method}.json").is_file() for method in ("bulk", "sentence")}
         source_key_slots = service.source_key_slots()
+        max_global_workers = int(db.get_setting(
+            service.config.db_path, "max_global_workers", str(DEFAULT_MAX_GLOBAL_WORKERS)))
         return {
             "keys": service.active_keys(),
             "source_key_slots": source_key_slots,
@@ -91,7 +94,22 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
             "export_root": service.config.export_root.as_posix(),
             "reflection_base_url": service.config.reflection_base_url,
             "obs_base": load_obs_base(),
+            "max_global_workers": max_global_workers,
         }
+
+    @app.post("/api/reflection/settings")
+    async def update_settings(request: Request):
+        body = await request.json()
+        raw = body.get("max_global_workers")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "max_global_workers 必须是整数")
+        # 单个 run 的 worker_count 上限是 32；全局上限必须 >= 32，否则满额 run 永远排不进队列。
+        if value < 32:
+            raise HTTPException(400, "全局最大 Workers 不能小于 32（单 Run 上限）")
+        db.set_setting(service.config.db_path, "max_global_workers", value)
+        return {"max_global_workers": value}
 
     @app.post("/api/reflection/runs")
     async def create_run(request: Request): return call(service.create_run, await request.json())
@@ -121,7 +139,8 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
         run = db.get_run(service.config.db_path, run_id)
         if not run: raise HTTPException(404, "Run 不存在")
         call(service.workers.start, run_id)
-        return {"status": "running"}
+        updated = db.get_run(service.config.db_path, run_id)
+        return {"status": updated["status"] if updated else "running"}
 
     @app.post("/api/reflection/runs/{run_id}/pause")
     def pause(run_id: str): service.workers.stop(run_id); return {"status": "paused"}

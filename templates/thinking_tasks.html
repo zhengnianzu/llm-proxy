@@ -43,6 +43,9 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
     <div class="stat-card"><div class="num ok">{{stats.done}}</div><div class="label">已完成</div></div>
     <div class="stat-card"><div class="num warn">{{stats.pending+stats.processing}}</div><div class="label">进行中</div></div>
     <div class="stat-card"><div class="num bad">{{stats.failed}}</div><div class="label">失败</div></div>
+    <div class="stat-card"><div class="num">{{stats.active_workers}}<span style="font-size:13px;opacity:.6"> /{{stats.global_limit}}</span></div><div class="label">运行 Workers{{stats.queued_runs?(' · '+stats.queued_runs+' 排队'):''}}</div></div>
+    <div class="stat-card"><div class="num">{{stats.rpm}}</div><div class="label">RPM</div></div>
+    <div class="stat-card"><div class="num">{{fmtNum(stats.tpm)}}</div><div class="label">TPM</div></div>
   </div>
 
   <!-- Global config panel -->
@@ -83,6 +86,13 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
       <div class="config-field">
         <label>Workers</label>
         <input type="number" v-model.number="globalConfig.worker_count" min="1" max="32">
+      </div>
+      <div class="config-field">
+        <label>全局最大 Workers</label>
+        <div style="display:flex;gap:6px">
+          <input type="number" v-model.number="globalConfig.max_global_workers" min="32" step="1" style="width:90px">
+          <button class="btn" @click="saveSettings" :disabled="savingSettings">{{savingSettings?'...':'保存'}}</button>
+        </div>
       </div>
       <div class="config-field">
         <label>最大重试</label>
@@ -291,9 +301,9 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
 new Vue({el:'#tasksApp',data:{
   config:{source_key_slots:[],keys:[],reflection_base_url:''},
   rows:[],loading:false,error:'',expanded:{},
-  stats:{total:0,done:0,pending:0,processing:0,failed:0},
-  globalConfig:{reflection_endpoint:'',reflection_api_key_id:'',reflection_model:'THINKING:claude-opus-4-8',method:'bulk',worker_count:4,max_retries:3,max_tokens:16384},
-  loadRunId:'',loadRunBusy:false,
+  stats:{total:0,done:0,pending:0,processing:0,failed:0,active_workers:0,rpm:0,tpm:0,global_limit:32,queued_runs:0},
+  globalConfig:{reflection_endpoint:'',reflection_api_key_id:'',reflection_model:'THINKING:claude-opus-4-8',method:'bulk',worker_count:4,max_retries:3,max_tokens:16384,max_global_workers:32},
+  loadRunId:'',loadRunBusy:false,savingSettings:false,liveStatsPolling:null,
   detailDrawer:false,detailRun:null,logEntries:[],logSinceId:0,logPolling:null,
   snapshotDrawer:false,snapshotRun:null,
   testDrawer:false,testPhase:'input',testSteps:[],testResult:null,testError:'',testLoading:false,
@@ -304,12 +314,29 @@ new Vue({el:'#tasksApp',data:{
   checkedExportIds:function(){var ids=[];for(var i=0;i<this.rows.length;i++){if(this.rows[i].checked)ids.push(this.rows[i].export_id)}return ids},
   filteredLogs:function(){var out=[];for(var i=0;i<this.logEntries.length;i++){if(this.logEntries[i].message.indexOf('认领')<0)out.push(this.logEntries[i])}return out},
   logProgress:function(){var r=this.detailRun;if(!r)return{done:0,failed:0,processing:0,total:0,donePct:0,failPct:0,runPct:0};var done=r.done||0,failed=r.failed||0,processing=r.processing||0,total=r.total_count||0;if(total===0)return{done:done,failed:failed,processing:processing,total:total,donePct:0,failPct:0,runPct:0};return{done:done,failed:failed,processing:processing,total:total,donePct:(done/total*100).toFixed(1),failPct:(failed/total*100).toFixed(1),runPct:(processing/total*100).toFixed(1)}}
-},async mounted(){try{await this.load()}catch(e){this.error='初始化失败: '+e.message;console.error(e)}},
-beforeDestroy:function(){this.stopLogPoll()},
+},async mounted(){try{await this.load()}catch(e){this.error='初始化失败: '+e.message;console.error(e)}this.liveStatsPolling=setInterval(this.fetchLiveStats,3000)},
+beforeDestroy:function(){this.stopLogPoll();if(this.liveStatsPolling)clearInterval(this.liveStatsPolling)},
 methods:{
   async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},
   headers:function(){return{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
   fmtTs:function(ts){if(!ts)return'';return new Date(ts*1000).toTimeString().slice(0,8)},
+  fmtNum:function(n){n=n||0;if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n)},
+  async fetchLiveStats(){
+    try{
+      var s=await this.json('/api/reflection/tasks-summary');
+      var keys=['total','done','pending','processing','failed','active_workers','rpm','tpm','global_limit','queued_runs'];
+      for(var i=0;i<keys.length;i++){if(s[keys[i]]!==undefined)this.$set(this.stats,keys[i],s[keys[i]])}
+    }catch(e){/* 轮询静默失败，不打断页面 */}
+  },
+  async saveSettings(){
+    this.savingSettings=true;
+    try{
+      var d=await this.json('/api/reflection/settings',{method:'POST',headers:this.headers(),body:JSON.stringify({max_global_workers:this.globalConfig.max_global_workers})});
+      this.globalConfig.max_global_workers=d.max_global_workers;
+      this.$set(this.stats,'global_limit',d.max_global_workers);
+    }catch(e){alert('保存失败: '+e.message)}
+    finally{this.savingSettings=false}
+  },
   toggleExpand:function(id){this.$set(this.expanded,id,!this.expanded[id]);if(this.expanded[id])this.loadTasks(id)},
   toggleAll:function(e){var v=e.target.checked;for(var i=0;i<this.rows.length;i++){this.$set(this.rows[i],'checked',v)}},
 
@@ -320,6 +347,7 @@ methods:{
       if(!this.globalConfig.reflection_endpoint&&this.config.reflection_base_url){
         this.globalConfig.reflection_endpoint=this.config.reflection_base_url;
       }
+      if(this.config.max_global_workers){this.globalConfig.max_global_workers=this.config.max_global_workers}
       var summary=await this.json('/api/reflection/tasks-summary');
       this.stats=summary;
       var allDs=await this.json('/api/reflection/datasets-all');

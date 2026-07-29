@@ -1143,5 +1143,6 @@ class ReflectionService:
         for row in rows:
             counts[row["latest_status"]] = row["cnt"]
             counts["total"] += row["cnt"]
+        counts.update(self.workers.live_stats())
         return counts
 

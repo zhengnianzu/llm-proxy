@@ -34,8 +34,26 @@ SESSION_INDEX_NAME = "session_index.jsonl"
 SYNC_STATE_NAME = ".sync_export_state.json"
 
 
+def _is_newapi(logs_dir: str) -> bool:
+    try:
+        from utils.log_scan import detect_format
+        return detect_format(logs_dir) == "newapi"
+    except Exception:
+        return False
+
+
 def _read_session_cache(logs_dir: str) -> List[dict]:
-    """优先从 DB 读取，降级到读 .session_cache.jsonl 文件。"""
+    """优先从 DB 读取，降级到读 .session_cache.jsonl 文件。
+
+    new-api 叶子的 session 数据在叶子内 index.db（非 per-port session_cache.db），故先取它。
+    """
+    if _is_newapi(logs_dir):
+        try:
+            import utils.newapi_index_db as nidb
+            return nidb.export_sessions(logs_dir)
+        except Exception:
+            return []
+
     try:
         import utils.session_store as _ss
         count = _ss.get_session_count_by_root(logs_dir)
@@ -116,6 +134,18 @@ def export_session_index(logs_dir: str, force: bool = False) -> dict:
     #    （条数变化即视为有更新；避免文件不存在就误判为 0）
     if cache_path.is_file():
         source_mtime = cache_path.stat().st_mtime
+    elif _is_newapi(logs_dir):
+        # new-api：变更判据用 index.db 的 session 条数（无数据即跳过）
+        db_count = 0
+        try:
+            import utils.newapi_index_db as nidb
+            db_count = nidb.status(logs_dir).get("sessions", 0)
+        except Exception:
+            db_count = 0
+        if db_count <= 0:
+            logger.warning("new-api 叶子 index.db 尚未构建，跳过 export: %s", logs_dir)
+            return {"total_sessions": 0, "avg_msg_count": 0, "skipped": True}
+        source_mtime = float(-db_count)
     else:
         db_count = 0
         try:

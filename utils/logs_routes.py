@@ -143,7 +143,7 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
 
     @app.post("/api/logs-admin/backfill")
     async def logs_admin_backfill(request: Request):
-        """启动 new-api 会话聚合后台回填（历史预览/导出前置）。"""
+        """启动 new-api 叶子 index.db 后台构建（ingest+补 meta+聚合 sessions；历史预览/导出前置）。"""
         denied = _require_ajax(request)
         if denied:
             return denied

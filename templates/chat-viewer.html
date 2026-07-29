@@ -443,6 +443,9 @@
 <div class="cv-header">
     <span class="min-msg-label" id="loadStatus" style="font-size:14px;font-weight:600;color:var(--foreground);"></span>
     <div class="cv-header-right">
+        <span class="min-msg-label" id="rootSelectLabel" style="display:none;">来源地址</span>
+        <select class="folder-select" id="rootSelect" style="display:none;" onchange="onRootChange()">
+        </select>
         <span class="min-msg-label">时间目录</span>
         <select class="folder-select" id="logDirSelect" onchange="resetAndLoad()">
         </select>
@@ -554,8 +557,37 @@ let isLoadingMore = false;
 let knownKeys = new Set();
 let knownModels = new Set();
 let _logDirsLoaded = false;
+let _allDirs = [];   // /logs/dirs 原始条目，供来源/时间目录两级下拉复用
 let _keyPrefRestored = false;
+let _backfillTimer = null;  // new-api 大叶子首次回填时的轮询定时器（切目录/离开时清除）
 const _adminSharedCode = '{{ shared_code|default("") }}';
+
+// 取消进行中的回填轮询（切换目录、过滤条件变化或离开时调用，避免轮询叠加）
+function _cancelBackfillPoll() {
+    if (_backfillTimer) { clearTimeout(_backfillTimer); _backfillTimer = null; }
+}
+
+// new-api 叶子的 index.db 未构建 / 待补 meta 时：列表暂不可用，展示引导去「日志管理」
+// 批量构建的提示，并每 4s 轻量重拉（只读状态），构建完成后自动切回正常渲染。
+// 返回 true 表示已进入「待构建」提示态（调用方应 return，不再渲染空态）。
+function _maybeShowBackfilling(data) {
+    const bf = data && data.backfill;
+    if (!bf || bf.format !== 'newapi') return false;
+    // 就绪（已构建、无新增、无待补）→ 正常渲染；
+    // 已构建但 index.jsonl 有新增（stale）→ 仍渲染既有会话，不拦截。
+    if (bf.built) return false;
+    let tip;
+    if (bf.pending > 0) {
+        tip = `该时段索引待补充元信息（${bf.pending} 条待处理），请到「日志管理」点击「构建索引」。`;
+    } else {
+        tip = `该时段索引尚未构建，请到「日志管理」点击「构建索引」后再查看。`;
+    }
+    fileListEl.innerHTML = `<div class="cv-sidebar-tip">${tip}<br>`
+        + `<span class="spinner"></span> 构建完成后将自动刷新…</div>`;
+    _cancelBackfillPoll();
+    _backfillTimer = setTimeout(() => { _backfillTimer = null; loadFileList(); }, 4000);
+    return true;
+}
 
 function _buildShareUrl(filename, logDir, apiKey) {
     const base = location.origin + '/history/shared';
@@ -595,25 +627,67 @@ function currentLogDir() {
     return sel ? sel.value : '';
 }
 
+// 用指定来源（root basename）过滤填充「时间目录」下拉；root===null 表示不过滤（单来源）
+function _populateDirSelect(rootName) {
+    const sel = document.getElementById('logDirSelect');
+    sel.innerHTML = '';
+    _allDirs.forEach(d => {
+        if (rootName !== null && (d.root || '') !== rootName) return;
+        const opt = document.createElement('option');
+        opt.value = d.name;   // 仍存 "<root>::<rel>"（多来源），后端 resolve_log_dir 解析
+        // 多来源时去掉 "<root>::" 前缀，只显示时间目录相对路径
+        let rel = d.name;
+        const sep = d.name.indexOf('::');
+        if (sep >= 0) rel = d.name.slice(sep + 2);
+        let label = d.label || rel;
+        if (d.count !== undefined) label += ' (' + d.count + ')';
+        if (d.current) { label += ' (当前)'; opt.selected = true; }
+        opt.textContent = label;
+        sel.appendChild(opt);
+    });
+}
+
 async function loadLogDirs() {
     if (_logDirsLoaded) return;
     try {
         const res = await fetch(_apiPrefix() + '/dirs?' + (_sharedMode ? 'key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode) : ''));
         const data = await res.json();
-        const sel = document.getElementById('logDirSelect');
-        sel.innerHTML = '';
-        (data.dirs || []).forEach(d => {
-            const opt = document.createElement('option');
-            opt.value = d.name;
-            var label = d.label || d.name;
-            if (d.count !== undefined) label += ' (' + d.count + ')';
-            if (d.current) label += ' (当前)';
-            opt.textContent = label;
-            if (d.current) opt.selected = true;
-            sel.appendChild(opt);
-        });
+        _allDirs = data.dirs || [];
+        // 去重来源，保持首次出现顺序（当前目录所在来源已被后端排在最前）
+        const roots = [];
+        _allDirs.forEach(d => { const r = d.root || ''; if (!roots.includes(r)) roots.push(r); });
+        const rootLabel = document.getElementById('rootSelectLabel');
+        const rootSel = document.getElementById('rootSelect');
+        if (roots.length > 1) {
+            // 多来源：显示「来源地址」下拉，默认选当前目录所在来源
+            const cur = _allDirs.find(d => d.current);
+            const curRoot = cur ? (cur.root || '') : roots[0];
+            rootSel.innerHTML = '';
+            roots.forEach(r => {
+                const opt = document.createElement('option');
+                opt.value = r;
+                opt.textContent = r || '(默认)';
+                if (r === curRoot) opt.selected = true;
+                rootSel.appendChild(opt);
+            });
+            rootLabel.style.display = '';
+            rootSel.style.display = '';
+            _populateDirSelect(curRoot);
+        } else {
+            // 单来源：隐藏来源下拉，时间目录列全部
+            rootLabel.style.display = 'none';
+            rootSel.style.display = 'none';
+            _populateDirSelect(null);
+        }
         _logDirsLoaded = true;
     } catch(e) {}
+}
+
+// 切换来源：按新来源重填时间目录（默认落到该来源第一个），再重新加载
+function onRootChange() {
+    const rootSel = document.getElementById('rootSelect');
+    _populateDirSelect(rootSel.value);
+    resetAndLoad();
 }
 
 function currentFolder() {
@@ -758,6 +832,7 @@ function reloadWithModel() {
 }
 
 async function loadFileList(refresh = false) {
+    if (offset === 0) _cancelBackfillPoll();  // 新一轮加载：先停掉旧的回填轮询
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
     const filterKey = _sharedMode ? _sharedKey : document.getElementById('filterKey').value;
@@ -790,6 +865,7 @@ async function loadFileList(refresh = false) {
             collectKeys(data);
 
             if (!aggChains.length) {
+                if (offset === 0 && _maybeShowBackfilling(data)) return;
                 fileListEl.innerHTML = '<div class="cv-sidebar-tip">没有满足条件的对话</div>';
                 return;
             }
@@ -851,6 +927,7 @@ async function loadFileList(refresh = false) {
             collectKeys(data);
 
             if (!items.length && offset === 0) {
+                if (_maybeShowBackfilling(data)) return;
                 fileListEl.innerHTML = '<div class="cv-sidebar-tip">没有满足条件的文件</div>';
                 return;
             }

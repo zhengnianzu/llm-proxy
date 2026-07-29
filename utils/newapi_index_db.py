@@ -1,0 +1,713 @@
+"""
+utils/newapi_index_db.py — new-api 叶子的「富 index」+ 会话聚合（每叶子一个 index.db）
+
+背景：new-api 上游写的 index.jsonl 只有 ts/model/api_key/req_file/usage，缺聚合所需的
+q1_hash/msg_count/user_turns，导致历史/导出聚合必须逐个打开 ~1MB 合并文件（单叶子可达数万
+文件 / 数十 GB）。本模块给每个叶子在其目录内建一个 index.db（与 index.jsonl 同级、共享盘、
+跨实例共享），把「贵的原文件解析」固化成一次性、可并行、可断点续跑的批量补 meta。
+
+三段式，全增量：
+  Stage 1 ingest        —— 从 index.jsonl 按 ingest_offset 只读新增行，写 requests（meta 列留空）
+  Stage 2 enrich        —— SELECT q1_hash IS NULL 的行，叶子内分片多进程解析合并文件回填 meta
+  Stage 3 rebuild_sessions —— requests(meta 齐全) 按 rowid(=时间序) 内存聚合，写 sessions/traces/chain_index
+
+视图只读本库（count_sessions/list_sessions/get_traces_batch/...）；写仅经批量构建路径。
+会话切分口径对齐 utils/newapi_consumer._process_entry。
+"""
+
+import json
+import os
+import sqlite3
+import threading
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+_INDEX_NAME = "index.jsonl"
+_DB_NAME = "index.db"
+
+# 每叶子一把写锁（同进程内串行写；跨实例互斥由上层 dispatcher + leader_lock 负责）
+_leaf_locks: Dict[str, threading.Lock] = {}
+_leaf_locks_guard = threading.Lock()
+
+
+def db_path(leaf_dir: str) -> str:
+    return os.path.join(leaf_dir, _DB_NAME)
+
+
+def _leaf_lock(leaf_dir: str) -> threading.Lock:
+    key = os.path.normpath(leaf_dir)
+    with _leaf_locks_guard:
+        lk = _leaf_locks.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _leaf_locks[key] = lk
+        return lk
+
+
+# ── 连接 / schema ─────────────────────────────────────────────────────────
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS requests (
+    req_file    TEXT PRIMARY KEY,
+    ts          TEXT,
+    model       TEXT,
+    api_key     TEXT,
+    usage_json  TEXT,
+    success     INTEGER DEFAULT 0,
+    -- Stage 2 补齐（q1_hash IS NULL 视作待补）：
+    q1_hash     TEXT,
+    msg_count   INTEGER,
+    user_turns  INTEGER,
+    q1_preview  TEXT,
+    chain_key   TEXT,
+    has_res     INTEGER
+);
+CREATE INDEX IF NOT EXISTS requests_pending ON requests(q1_hash) WHERE q1_hash IS NULL;
+CREATE INDEX IF NOT EXISTS requests_lookup  ON requests(api_key, q1_hash);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_key     TEXT PRIMARY KEY,
+    api_key         TEXT DEFAULT '',
+    q1              TEXT DEFAULT '',
+    models          TEXT DEFAULT '[]',   -- JSON 数组，配合 json_each 过滤
+    latest_file     TEXT DEFAULT '',
+    msg_count       INTEGER DEFAULT 0,
+    first_ts        TEXT DEFAULT '',
+    last_ts         TEXT DEFAULT '',
+    has_failure     INTEGER DEFAULT 0,
+    best_req_count  INTEGER DEFAULT 0,
+    max_real_turns  INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS sessions_last_ts ON sessions(last_ts);
+CREATE INDEX IF NOT EXISTS sessions_api_key ON sessions(api_key);
+
+CREATE TABLE IF NOT EXISTS traces (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key  TEXT,
+    filename     TEXT,
+    model        TEXT,
+    msg_count    INTEGER,
+    ts           TEXT,
+    success      INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS traces_sk ON traces(session_key);
+
+CREATE TABLE IF NOT EXISTS chain_index (
+    lookup_key   TEXT PRIMARY KEY,
+    session_key  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    k TEXT PRIMARY KEY,
+    v TEXT
+);
+"""
+
+
+def _connect(leaf_dir: str, write: bool = False) -> sqlite3.Connection:
+    path = db_path(leaf_dir)
+    conn = sqlite3.connect(path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    if write:
+        conn.executescript(_SCHEMA)
+    return conn
+
+
+def _db_exists(leaf_dir: str) -> bool:
+    return os.path.isfile(db_path(leaf_dir))
+
+
+def _meta_get(conn: sqlite3.Connection, k: str, default: str = "") -> str:
+    row = conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    return row["v"] if row else default
+
+
+def _meta_set(conn: sqlite3.Connection, k: str, v: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        (k, str(v)),
+    )
+
+
+# ── Stage 1：摄取 index.jsonl 新增行 ──────────────────────────────────────
+
+def _iter_index_lines(leaf_dir: str, start_offset: int) -> Tuple[List[dict], int]:
+    """从 index.jsonl 的 start_offset 处读到末尾，返回 (entries, end_offset)。
+    只解析非 _meta 行；解析失败的行跳过。"""
+    index_file = os.path.join(leaf_dir, _INDEX_NAME)
+    entries: List[dict] = []
+    try:
+        with open(index_file, "rb") as f:
+            f.seek(start_offset)
+            data = f.read()
+            end_offset = f.tell()
+    except OSError:
+        return [], start_offset
+    for raw in data.split(b"\n"):
+        line = raw.decode("utf-8", errors="ignore").strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("_meta"):
+            continue
+        entries.append(entry)
+    return entries, end_offset
+
+
+def ingest(leaf_dir: str) -> int:
+    """Stage 1：把 index.jsonl 新增行插入 requests（meta 列留 NULL）。幂等、增量。
+
+    截断/轮转（当前文件大小 < 记录偏移）→ 清空重摄取。返回本次新增行数。
+    """
+    index_file = os.path.join(leaf_dir, _INDEX_NAME)
+    if not os.path.isfile(index_file):
+        return 0
+    with _leaf_lock(leaf_dir):
+        conn = _connect(leaf_dir, write=True)
+        try:
+            offset = int(_meta_get(conn, "ingest_offset", "0") or "0")
+            try:
+                cur_size = os.path.getsize(index_file)
+            except OSError:
+                cur_size = 0
+            if cur_size < offset:
+                # 文件被截断/轮转：全量重摄取
+                conn.execute("DELETE FROM requests")
+                offset = 0
+            elif cur_size == offset:
+                conn.close()
+                return 0
+
+            entries, end_offset = _iter_index_lines(leaf_dir, offset)
+            n = 0
+            for e in entries:
+                req_file = (e.get("req_file") or "").strip()
+                if not req_file:
+                    continue
+                usage = e.get("usage") if isinstance(e.get("usage"), dict) else {}
+                success = 1 if (usage.get("token_out") or 0) > 0 else 0
+                conn.execute(
+                    "INSERT OR IGNORE INTO requests(req_file, ts, model, api_key, usage_json, success) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        req_file,
+                        str(e.get("ts") or ""),
+                        str(e.get("model") or ""),
+                        str(e.get("api_key") or ""),
+                        json.dumps(usage, ensure_ascii=False),
+                        success,
+                    ),
+                )
+                n += 1
+            _meta_set(conn, "ingest_offset", end_offset)
+            _meta_set(conn, "updated_at", str(int(time.time())))
+            if n:
+                _meta_set(conn, "sessions_dirty", "1")
+            conn.commit()
+            return n
+        finally:
+            conn.close()
+
+
+# ── Stage 2：补 meta（叶子内分片多进程）────────────────────────────────────
+
+def pending_count(leaf_dir: str) -> int:
+    if not _db_exists(leaf_dir):
+        return 0
+    conn = _connect(leaf_dir)
+    try:
+        row = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE q1_hash IS NULL").fetchone()
+        return row["c"] if row else 0
+    finally:
+        conn.close()
+
+
+def _worker_enrich(leaf_dir: str, req_files: List[str]) -> List[tuple]:
+    """子进程：解析一批合并文件，算 meta，返回 (req_file, q1_hash, msg_count,
+    user_turns, q1_preview, chain_key, has_res, success, model, ts) 列表。"""
+    from utils.newapi_format import parse_combined_file, compute_session_fields
+    from utils.newapi_consumer import _resolve_combined_path
+
+    leaf = Path(leaf_dir)
+    out: List[tuple] = []
+    for req_file in req_files:
+        path = _resolve_combined_path(leaf, req_file)
+        if path is None:
+            # 文件缺失/损坏：q1_hash='' 防重扫，msg_count=-1 作解析失败标记
+            # （rebuild_sessions 会跳过，等价 _process_entry 的 path/parsed None → return）
+            out.append((req_file, "", -1, 0, "", "", 0, 0, "", ""))
+            continue
+        parsed = parse_combined_file(path)
+        if parsed is None:
+            out.append((req_file, "", -1, 0, "", "", 0, 0, "", ""))
+            continue
+        messages = parsed["messages"]
+        fields = compute_session_fields(messages)
+        has_res = 1 if parsed["assistant_content"] is not None else 0
+        out.append((
+            req_file,
+            fields["q1_hash"] or "",
+            fields["msg_count"],
+            fields["user_turns"],
+            fields["q1_preview"],
+            fields["chain_key"],
+            has_res,
+            1 if parsed["success"] else 0,
+            parsed["model"] or "",
+            parsed["ts"] or "",
+        ))
+    return out
+
+
+def _chunk(items: List[Any], n: int) -> List[List[Any]]:
+    if n <= 1 or len(items) <= 1:
+        return [items] if items else []
+    size = (len(items) + n - 1) // n
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def enrich(leaf_dir: str, workers: int = 8, progress_cb=None) -> Dict[str, Any]:
+    """Stage 2：把 requests 中 q1_hash IS NULL 的行补齐 meta。叶子内分片并行。
+
+    progress_cb(done, total) 可选，供上层刷新进度。返回 {enriched, total}。
+    """
+    if not _db_exists(leaf_dir):
+        return {"enriched": 0, "total": 0}
+    conn = _connect(leaf_dir, write=True)
+    try:
+        pending = [r["req_file"] for r in conn.execute(
+            "SELECT req_file FROM requests WHERE q1_hash IS NULL ORDER BY rowid"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+    total = len(pending)
+    if not total:
+        return {"enriched": 0, "total": 0}
+
+    workers = max(1, min(int(workers or 1), (os.cpu_count() or 4)))
+    chunks = _chunk(pending, workers * 4)  # 多于 worker 数，便于负载均衡与进度粒度
+    done = 0
+
+    def _apply(rows: List[tuple]) -> None:
+        nonlocal done
+        with _leaf_lock(leaf_dir):
+            w = _connect(leaf_dir, write=True)
+            try:
+                w.executemany(
+                    "UPDATE requests SET q1_hash=?, msg_count=?, user_turns=?, q1_preview=?, "
+                    "chain_key=?, has_res=?, success=?, model=COALESCE(NULLIF(?,''), model), "
+                    "ts=COALESCE(NULLIF(?,''), ts) WHERE req_file=?",
+                    [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[0]) for r in rows],
+                )
+                _meta_set(w, "sessions_dirty", "1")
+                w.commit()
+            finally:
+                w.close()
+        done += len(rows)
+        if progress_cb:
+            progress_cb(done, total)
+
+    if workers == 1:
+        for ch in chunks:
+            _apply(_worker_enrich(leaf_dir, ch))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_worker_enrich, leaf_dir, ch): ch for ch in chunks}
+            for fut in as_completed(futs):
+                _apply(fut.result())
+
+    return {"enriched": done, "total": total}
+
+
+# ── Stage 3：从 requests 聚合出 sessions（纯内存，口径对齐 _process_entry）──
+
+def rebuild_sessions(leaf_dir: str) -> int:
+    """Stage 3：清空 sessions/traces/chain_index，从 requests(meta 齐全) 全量重建。
+
+    按 rowid（= 摄取顺序 = index.jsonl 追加顺序 = 时间序）遍历，复刻 newapi_consumer
+    ._process_entry 的会话归并与切分逻辑。返回 session 数。
+    """
+    if not _db_exists(leaf_dir):
+        return 0
+    with _leaf_lock(leaf_dir):
+        conn = _connect(leaf_dir, write=True)
+        try:
+            rows = conn.execute(
+                "SELECT req_file, ts, model, api_key, q1_hash, msg_count, user_turns, "
+                "q1_preview, chain_key, has_res, success FROM requests "
+                "WHERE q1_hash IS NOT NULL AND msg_count >= 0 ORDER BY rowid"
+            ).fetchall()
+
+            sessions: Dict[str, Dict[str, Any]] = {}
+            chain_map: Dict[str, str] = {}
+
+            for r in rows:
+                _agg_one(r, sessions, chain_map)
+
+            conn.execute("DELETE FROM sessions")
+            conn.execute("DELETE FROM traces")
+            conn.execute("DELETE FROM chain_index")
+
+            for sk, s in sessions.items():
+                has_failure = 1 if any(not t.get("_ok", True) for t in s["trace_list"]) else 0
+                conn.execute(
+                    "INSERT INTO sessions(session_key, api_key, q1, models, latest_file, msg_count, "
+                    "first_ts, last_ts, has_failure, best_req_count, max_real_turns) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sk, s["api_key"], s["q1"], json.dumps(s["models"], ensure_ascii=False),
+                        s["latest_file"], s["msg_count"], s["first_ts"], s["last_ts"],
+                        has_failure, s["_best_req_count"], s["_max_real_turns"],
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO traces(session_key, filename, model, msg_count, ts, success) "
+                    "VALUES(?,?,?,?,?,?)",
+                    [(sk, t["filename"], t["model"], t["msg_count"], t["ts"],
+                      1 if t.get("_ok", True) else 0) for t in s["trace_list"]],
+                )
+            for lk, sk in chain_map.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO chain_index(lookup_key, session_key) VALUES(?,?)",
+                    (lk, sk),
+                )
+            _meta_set(conn, "sessions_dirty", "0")
+            _meta_set(conn, "sessions_built_at", str(int(time.time())))
+            conn.commit()
+            return len(sessions)
+        finally:
+            conn.close()
+
+
+def _agg_one(r: sqlite3.Row, sessions: Dict[str, Dict[str, Any]],
+             chain_map: Dict[str, str]) -> None:
+    """处理一条 request 行，就地更新 sessions/chain_map。等价 _process_entry 内存分支。"""
+    api_key = r["api_key"] or ""
+    model = r["model"] or ""
+    filename = os.path.basename(r["req_file"] or "")
+    ts = r["ts"] or filename
+    q1_hash = r["q1_hash"] or ""
+    msg_count = r["msg_count"] or 0
+    user_turns = r["user_turns"] or 0
+    has_res = bool(r["has_res"])
+    success = bool(r["success"])
+    full_msg_count = msg_count + (1 if has_res else 0)
+
+    lookup_key = f"{api_key}||{q1_hash}"
+    sess_key = chain_map.get(lookup_key)
+    session = sessions.get(sess_key) if sess_key else None
+
+    # 新会话检测：user_turns 回落 ≤1 且低于峰值 → 另起 ##session_N
+    if session is not None and user_turns <= 1 and \
+       user_turns < session.get("_max_real_turns", 1):
+        suffix = 1
+        new_lookup = f"{lookup_key}##session_{suffix}"
+        while new_lookup in chain_map:
+            suffix += 1
+            new_lookup = f"{lookup_key}##session_{suffix}"
+        lookup_key = new_lookup
+        session = None
+        sess_key = None
+
+    trace_entry = {"filename": filename, "model": model, "msg_count": full_msg_count,
+                   "ts": ts, "_ok": success}
+
+    if session is None:
+        sess_key = ts
+        while sess_key in sessions:
+            sess_key = sess_key + "_x"
+        q1 = r["q1_preview"] or (r["chain_key"] or "")[:200]
+        sessions[sess_key] = {
+            "api_key": api_key,
+            "q1": q1,
+            "models": [model] if model else [],
+            "latest_file": filename,
+            # 对齐 _new_session：新会话 msg_count 用 raw msg_count（更新分支才用 full_msg_count）
+            "msg_count": msg_count,
+            "first_ts": ts,
+            "last_ts": ts,
+            "_best_req_count": msg_count,
+            "_max_real_turns": user_turns,
+            "trace_list": [trace_entry],
+        }
+        chain_map[lookup_key] = sess_key
+    else:
+        models = session["models"]
+        if model and model not in models:
+            models.append(model)
+        session["_max_real_turns"] = max(user_turns, session.get("_max_real_turns", 0))
+        best = session.get("_best_req_count", 0)
+        if msg_count > best or (msg_count == best and has_res):
+            session["latest_file"] = filename
+            session["msg_count"] = full_msg_count
+            session["_best_req_count"] = msg_count
+        session["last_ts"] = ts
+        session["trace_list"].append(trace_entry)
+
+
+# ── 一条龙（批量构建用）────────────────────────────────────────────────────
+
+def build_leaf(leaf_dir: str, workers: int = 8, progress_cb=None) -> Dict[str, Any]:
+    """ingest → enrich → rebuild_sessions 一条龙。返回汇总统计。"""
+    ingested = ingest(leaf_dir)
+    en = enrich(leaf_dir, workers=workers, progress_cb=progress_cb)
+    n_sessions = rebuild_sessions(leaf_dir)
+    return {
+        "ingested": ingested,
+        "enriched": en.get("enriched", 0),
+        "sessions": n_sessions,
+        "pending": pending_count(leaf_dir),
+    }
+
+
+def remove_db(leaf_dir: str) -> None:
+    """删除叶子 index.db（含 WAL/SHM）。force 重建或修数据用。"""
+    p = db_path(leaf_dir)
+    for path in (p, p + "-wal", p + "-shm"):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def needs_build(leaf_dir: str) -> bool:
+    """叶子是否需要（重新）构建：无 db、index.jsonl 有新增、有待补 meta、或 sessions 脏。"""
+    index_file = os.path.join(leaf_dir, _INDEX_NAME)
+    if not os.path.isfile(index_file):
+        return False  # 连 index.jsonl 都没有，不是有效叶子
+    if not _db_exists(leaf_dir):
+        return True
+    conn = _connect(leaf_dir)
+    try:
+        offset = int(_meta_get(conn, "ingest_offset", "0") or "0")
+        pending = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE q1_hash IS NULL").fetchone()["c"]
+        dirty = _meta_get(conn, "sessions_dirty", "1") == "1"
+    finally:
+        conn.close()
+    try:
+        cur_size = os.path.getsize(index_file)
+    except OSError:
+        cur_size = offset
+    return cur_size != offset or pending > 0 or dirty
+
+
+def ensure_fresh(leaf_dir: str) -> None:
+    """视图侧轻量刷新：仅摄取新增行 + 若无待补且脏则重建 sessions。绝不触发解析。
+
+    注意：这会写库（摄取/重建），跨实例并发由 _leaf_lock + SQLite busy_timeout 兜底；
+    真正贵的 enrich 只走批量路径。
+    """
+    if not os.path.isfile(os.path.join(leaf_dir, _INDEX_NAME)):
+        return
+    try:
+        ingest(leaf_dir)
+        if pending_count(leaf_dir) == 0:
+            conn = _connect(leaf_dir, write=True)
+            try:
+                dirty = _meta_get(conn, "sessions_dirty", "0") == "1"
+            finally:
+                conn.close()
+            if dirty:
+                rebuild_sessions(leaf_dir)
+    except Exception:
+        pass
+
+
+# ── 状态 / 读 API（供视图）─────────────────────────────────────────────────
+
+def status(leaf_dir: str) -> Dict[str, Any]:
+    """{built, ingested, pending, sessions, sessions_dirty}。built=有 sessions 且无待补。"""
+    if not _db_exists(leaf_dir):
+        return {"built": False, "ingested": 0, "pending": 0, "sessions": 0, "sessions_dirty": True}
+    conn = _connect(leaf_dir)
+    try:
+        ingested = conn.execute("SELECT COUNT(*) AS c FROM requests").fetchone()["c"]
+        pending = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE q1_hash IS NULL").fetchone()["c"]
+        n_sess = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()["c"]
+        dirty = _meta_get(conn, "sessions_dirty", "1") == "1"
+        updated_at = _meta_get(conn, "updated_at", "0") or "0"
+    finally:
+        conn.close()
+    return {
+        "built": (pending == 0 and n_sess > 0 and not dirty),
+        "ingested": ingested,
+        "pending": pending,
+        "sessions": n_sess,
+        "sessions_dirty": dirty,
+        "updated_at": updated_at,
+    }
+
+
+def _row_to_session(row: sqlite3.Row) -> Dict[str, Any]:
+    try:
+        models = json.loads(row["models"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        models = []
+    return {
+        "session_key": row["session_key"],
+        "api_key": row["api_key"] or "",
+        "q1": row["q1"] or "",
+        "models": models,
+        "latest_file": row["latest_file"] or "",
+        "msg_count": row["msg_count"] or 0,
+        "first_ts": row["first_ts"] or "",
+        "last_ts": row["last_ts"] or "",
+        "has_failure": bool(row["has_failure"]),
+    }
+
+
+def list_sessions(leaf_dir: str, api_key: str = "", model: str = "",
+                  min_msg_count: int = 0, offset: int = 0, limit: int = 0) -> List[Dict[str, Any]]:
+    if not _db_exists(leaf_dir):
+        return []
+    conn = _connect(leaf_dir)
+    try:
+        sql = "SELECT * FROM sessions WHERE 1=1"
+        params: list = []
+        if api_key:
+            sql += " AND api_key = ?"; params.append(api_key)
+        if min_msg_count > 0:
+            sql += " AND msg_count >= ?"; params.append(min_msg_count)
+        if model:
+            sql += " AND EXISTS (SELECT 1 FROM json_each(models) WHERE value = ?)"; params.append(model)
+        sql += " ORDER BY last_ts DESC"
+        if limit > 0:
+            sql += " LIMIT ? OFFSET ?"; params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
+        return [_row_to_session(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def count_sessions(leaf_dir: str, api_key: str = "", model: str = "",
+                   min_msg_count: int = 0) -> int:
+    if not _db_exists(leaf_dir):
+        return 0
+    conn = _connect(leaf_dir)
+    try:
+        sql = "SELECT COUNT(*) AS c FROM sessions WHERE 1=1"
+        params: list = []
+        if api_key:
+            sql += " AND api_key = ?"; params.append(api_key)
+        if min_msg_count > 0:
+            sql += " AND msg_count >= ?"; params.append(min_msg_count)
+        if model:
+            sql += " AND EXISTS (SELECT 1 FROM json_each(models) WHERE value = ?)"; params.append(model)
+        row = conn.execute(sql, params).fetchone()
+        return row["c"] if row else 0
+    finally:
+        conn.close()
+
+
+def get_traces_batch(leaf_dir: str, session_keys: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    if not session_keys or not _db_exists(leaf_dir):
+        return {k: [] for k in session_keys}
+    conn = _connect(leaf_dir)
+    try:
+        ph = ",".join("?" * len(session_keys))
+        rows = conn.execute(
+            f"SELECT * FROM traces WHERE session_key IN ({ph}) ORDER BY ts ASC, id ASC",
+            session_keys,
+        ).fetchall()
+        result: Dict[str, List[Dict[str, Any]]] = {k: [] for k in session_keys}
+        for row in rows:
+            t: Dict[str, Any] = {
+                "filename": row["filename"],
+                "model": row["model"],
+                "msg_count": row["msg_count"],
+                "ts": row["ts"],
+            }
+            if not row["success"]:
+                t["success"] = False
+            result[row["session_key"]].append(t)
+        return result
+    finally:
+        conn.close()
+
+
+def get_known_models(leaf_dir: str) -> List[str]:
+    if not _db_exists(leaf_dir):
+        return []
+    conn = _connect(leaf_dir)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT value FROM sessions, json_each(sessions.models) "
+            "WHERE value != '' ORDER BY value"
+        ).fetchall()
+        return [r["value"] for r in rows]
+    finally:
+        conn.close()
+
+
+def get_known_keys(leaf_dir: str) -> List[str]:
+    if not _db_exists(leaf_dir):
+        return []
+    conn = _connect(leaf_dir)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT api_key FROM sessions WHERE api_key != '' ORDER BY api_key"
+        ).fetchall()
+        return [r["api_key"] for r in rows]
+    finally:
+        conn.close()
+
+
+def export_sessions(leaf_dir: str) -> List[Dict[str, Any]]:
+    """返回完整 session 列表（含 trace_list），行格式与 session_store.export_sessions 兼容，
+    供 export_sync.export_session_index 生成 session_index.jsonl。"""
+    sessions = list_sessions(leaf_dir)
+    if not sessions:
+        return []
+    traces_by_key = get_traces_batch(leaf_dir, [s["session_key"] for s in sessions])
+    result: List[Dict[str, Any]] = []
+    for s in sessions:
+        sk = s["session_key"]
+        result.append({
+            "_key": sk,
+            "api_key": s["api_key"],
+            "q1": s["q1"],
+            "first_ts": s["first_ts"],
+            "last_ts": s["last_ts"],
+            "models": s["models"],
+            "latest_file": s["latest_file"],
+            "msg_count": s["msg_count"],
+            "trace_list": traces_by_key.get(sk, []),
+        })
+    return result
+
+
+def get_session_stats(leaf_dir: str, threshold: int = 5) -> Dict[str, Dict[str, int]]:
+    """{ '{api_key}|{date}': {total, qualified} }，date=first_ts[:10]，
+    qualified = trace 数 >= threshold 的 session。对齐 session_store.get_session_stats 语义，
+    供 stats_index 的 new-api 分支读归并统计（date 用 ts[:10]，与 _sessions_from_index 一致）。"""
+    if not _db_exists(leaf_dir):
+        return {}
+    conn = _connect(leaf_dir)
+    try:
+        tc = {r["session_key"]: r["c"] for r in conn.execute(
+            "SELECT session_key, COUNT(*) AS c FROM traces GROUP BY session_key"
+        ).fetchall()}
+        rows = conn.execute("SELECT session_key, api_key, first_ts FROM sessions").fetchall()
+    finally:
+        conn.close()
+    from collections import defaultdict
+    buckets: Dict[str, Dict[str, int]] = defaultdict(lambda: {"total": 0, "qualified": 0})
+    for r in rows:
+        api_key = r["api_key"] or "(empty)"
+        ts = r["first_ts"] or ""
+        date_str = ts[:10] if len(ts) >= 10 else "unknown"
+        bk = f"{api_key}|{date_str}"
+        buckets[bk]["total"] += 1
+        if tc.get(r["session_key"], 0) >= threshold:
+            buckets[bk]["qualified"] += 1
+    return dict(buckets)

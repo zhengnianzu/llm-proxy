@@ -174,22 +174,30 @@ def _sessions_from_index(leaf: Path) -> dict:
     return buckets
 
 
-def _sessions_lazy_backfill(leaf: Path, threshold: int) -> dict:
-    """new-api 叶子的统计：DB 有数据走 q1 归并口径；无数据时给裸计数近似（不阻塞）。
+def _sub_is_newapi(sub: Path) -> bool:
+    """叶子是否为 new-api 格式（无 -req.json 但有 index.jsonl）。用于统计分支择路。"""
+    try:
+        from utils.log_scan import detect_format
+        return detect_format(str(sub)) == "newapi"
+    except Exception:
+        return False
 
-    DB 已回填 → get_session_stats（真实归并值）。
-    DB 未回填 → 返回裸计数（每请求算 1 session，近似偏大），并依赖 refresh_index
-    头部已把该 root 入了后台串行回填队列——绝不在此同步 consume_leaf（那会让
-    页面请求阻塞几十秒，正是「导出一直加载中」的根因）。回填在后台跑完后，
-    下次刷新 DB 有数据即自动收敛为归并值。
+
+def _sessions_lazy_backfill(leaf: Path, threshold: int) -> dict:
+    """new-api 叶子的统计：index.db 已构建 → 读 q1 归并口径；未构建 → 裸计数近似（不阻塞）。
+
+    已构建（sessions>0）→ newapi_index_db.get_session_stats（真实归并值）。
+    未构建 → 返回裸计数（每请求算 1 session，近似偏大）；index.db 的构建/补 meta
+    一律经「日志管理」批量路径，绝不在此同步解析（那会让页面请求阻塞几十秒）。
+    批量构建跑完后，下次刷新读到 sessions 即自动收敛为归并值。
     """
     try:
-        import utils.session_store as _ss
-        if _ss.get_session_count_by_root(str(leaf)) > 0:
-            return _ss.get_session_stats(str(leaf), threshold)
+        import utils.newapi_index_db as nidb
+        if nidb.status(str(leaf)).get("sessions", 0) > 0:
+            return nidb.get_session_stats(str(leaf), threshold)
     except Exception:
         pass
-    # 未回填：裸计数近似（前端在回填运行时会标「聚合中·近似」），不阻塞
+    # 未构建：裸计数近似（前端在未构建时会标「聚合中·近似」），不阻塞
     return _sessions_from_index(leaf)
 
 
@@ -248,10 +256,10 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
         active_tag = _get_active_tag()
         changed_buckets: list = []
 
-        # 访问时懒回填（new-api，异步）：发现该 root 有 db 无数据的新叶子时，
-        # 在后台多进程并行聚合进 session_cache.db——不阻塞本次页面请求。
-        # 本次刷新未回填的叶子先走裸计数近似（下方 use_index 分支），后台跑完后
-        # 下次刷新即 db_count>0 走归并快路径，数字自动收敛。start_backfill 幂等，
+        # 访问时懒构建（new-api，异步）：把该 root 入后台串行队列，逐叶子增量构建
+        # index.db（ingest+enrich+rebuild，跳过已就绪叶子）——不阻塞本次页面请求。
+        # 本次刷新未构建的叶子先走裸计数近似（下方 use_index 分支），后台跑完后
+        # 下次刷新即读到 sessions 走归并快路径，数字自动收敛。start_backfill 幂等，
         # 已在跑/无新叶子时几乎零成本。
         try:
             from utils.log_scan import detect_format as _detect_fmt
@@ -278,12 +286,15 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                     # .session_cache.jsonl 已不在运行时生成（数据迁到 session_cache.db）。
                     # 文件不存在不代表无 session：先查 DB，有数据就从 DB 聚合，
                     # 否则退回 req 文件计数占位。
+                    # new-api 叶子的数据在叶子内 index.db（非 per-port session_cache.db），
+                    # 跳过 session_store 检查，直接走下方 use_index 分支（避免旧库残留数据反噬）。
                     db_count = 0
-                    try:
-                        import utils.session_store as _ss
-                        db_count = _ss.get_session_count_by_root(str(sub))
-                    except Exception:
-                        db_count = 0
+                    if not _sub_is_newapi(sub):
+                        try:
+                            import utils.session_store as _ss
+                            db_count = _ss.get_session_count_by_root(str(sub))
+                        except Exception:
+                            db_count = 0
 
                     if db_count > 0:
                         # DB 有数据：count 未变则跳过重扫（省一次聚合查询）

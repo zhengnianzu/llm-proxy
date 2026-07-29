@@ -185,8 +185,150 @@ def init(path: Path) -> None:
           created_at REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_run_logs_run ON run_logs(run_id, id);
+
+        CREATE TABLE IF NOT EXISTS reflection_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS reflection_req_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts REAL NOT NULL,
+          tokens INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_reflection_req_log_ts ON reflection_req_log(ts);
         """)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def get_setting(path: Path, key: str, default: str | None = None) -> str | None:
+    with connect(path) as conn:
+        row = conn.execute(
+            "SELECT value FROM reflection_settings WHERE key=?", (key,)
+        ).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(path: Path, key: str, value: str) -> None:
+    with connect(path) as conn:
+        conn.execute(
+            "INSERT INTO reflection_settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+
+
+# ---- 跨进程全局并发闸门（名额口径 = SUM(worker_count) WHERE status='running'）----
+
+_QUEUEABLE_STATUSES = ("draft", "paused", "queued")
+
+
+def global_running_workers(conn: sqlite3.Connection) -> int:
+    """当前已承诺的全局 worker 名额（跨所有进程的真值）。"""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(worker_count),0) n FROM reflection_runs WHERE status='running'"
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def active_run_for_export(conn: sqlite3.Connection, export_id: int,
+                          exclude_run_id: str | None = None) -> str | None:
+    """该数据集是否已有活跃(running)的 run；有则返回其 run_id。"""
+    row = conn.execute(
+        "SELECT run_id FROM reflection_runs "
+        "WHERE source_export_id=? AND status='running' AND run_id!=? LIMIT 1",
+        (export_id, exclude_run_id or ""),
+    ).fetchone()
+    return row["run_id"] if row else None
+
+
+def try_claim_slot(path: Path, run_id: str, limit: int) -> str:
+    """原子决定一个 run 该 running 还是 queued，并落库。
+
+    在 BEGIN IMMEDIATE 事务内完成，跨进程互斥。返回最终 status。
+    - 若该数据集已有活跃 run（非自己）→ 'blocked'（调用方按冲突处理，不落库）。
+    - 若全局名额不足 → 落 'queued'。
+    - 否则落 'running'。
+    """
+    with connect(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run = conn.execute(
+            "SELECT status,source_export_id,worker_count FROM reflection_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if not run or run["status"] not in _QUEUEABLE_STATUSES:
+            conn.rollback()
+            return "invalid"
+        export_id = int(run["source_export_id"])
+        if active_run_for_export(conn, export_id, exclude_run_id=run_id):
+            conn.rollback()
+            return "blocked"
+        want = int(run["worker_count"])
+        current = global_running_workers(conn)
+        now = time.time()
+        if current + want > limit:
+            conn.execute(
+                "UPDATE reflection_runs SET status='queued',updated_at=? WHERE run_id=?",
+                (now, run_id))
+            conn.commit()
+            return "queued"
+        conn.execute(
+            "UPDATE reflection_runs SET status='running',"
+            "started_at=COALESCE(started_at,?),updated_at=? WHERE run_id=?",
+            (now, now, run_id))
+        conn.commit()
+        return "running"
+
+
+def claim_next_queued(path: Path, limit: int) -> dict | None:
+    """名额释放后，原子挑一个可启动的 queued run 翻成 running 并返回它。
+
+    在 BEGIN IMMEDIATE 事务内：按 updated_at 取最早的 queued，逐个检查
+    名额是否够、该数据集有无活跃 run；命中则落 running 返回该 run dict，
+    否则返回 None（无可拉起项）。不可启动的 queued（数据集冲突）跳过，
+    但不在此丢弃状态——留待其活跃 run 结束后再被拉起。
+    """
+    with connect(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = global_running_workers(conn)
+        rows = conn.execute(
+            "SELECT * FROM reflection_runs WHERE status='queued' ORDER BY updated_at, run_id"
+        ).fetchall()
+        for row in rows:
+            want = int(row["worker_count"])
+            if current + want > limit:
+                continue  # 名额不够，试更小的（也可能是同尺寸，继续找无害）
+            if active_run_for_export(conn, int(row["source_export_id"])):
+                continue  # 该数据集已有活跃 run，跳过
+            now = time.time()
+            conn.execute(
+                "UPDATE reflection_runs SET status='running',"
+                "started_at=COALESCE(started_at,?),updated_at=? WHERE run_id=?",
+                (now, now, row["run_id"]))
+            conn.commit()
+            return dict(row)
+        conn.rollback()
+        return None
+
+
+# ---- 跨进程 RPM/TPM（反思专属请求日志）----
+
+def record_reflection_request(path: Path, tokens: int) -> None:
+    now = time.time()
+    with connect(path) as conn:
+        conn.execute(
+            "INSERT INTO reflection_req_log(ts,tokens) VALUES(?,?)", (now, int(tokens)))
+        # 顺手清理 5 分钟前的旧行，避免无限增长
+        conn.execute("DELETE FROM reflection_req_log WHERE ts < ?", (now - 300,))
+
+
+def reflection_rpm_tpm(conn: sqlite3.Connection, window: float = 60.0) -> tuple[int, int]:
+    row = conn.execute(
+        "SELECT COUNT(*) rpm, COALESCE(SUM(tokens),0) tpm "
+        "FROM reflection_req_log WHERE ts > ?",
+        (time.time() - window,),
+    ).fetchone()
+    return int(row["rpm"]), int(row["tpm"])
 
 
 def task_detail_dir(source_key: str, export_created_at: str) -> Path:

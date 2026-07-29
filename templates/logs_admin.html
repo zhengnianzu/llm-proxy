@@ -62,7 +62,7 @@
                     <th>格式</th>
                     <th class="text-center">叶子目录数</th>
                     <th class="text-center" v-if="withSize">大小</th>
-                    <th class="text-center">会话回填</th>
+                    <th class="text-center">索引构建</th>
                     <th class="text-center">操作</th>
                 </tr>
             </thead>
@@ -83,18 +83,21 @@
                         <template v-if="r.exists && r.format === 'newapi'">
                             <template v-if="!bf[r.path] || bf[r.path].status === 'idle' || bf[r.path].status === 'done' || bf[r.path].status === 'error'">
                                 <button class="btn btn-outline btn-sm" @click="startBackfill(r.path, false)"
-                                    title="只处理首次/有新增的小时目录，跳过已完成的">
-                                    {{ (bf[r.path] && (bf[r.path].status === 'done' || bf[r.path].status === 'error')) ? '增量回填' : '回填' }}
+                                    title="只构建/补齐首次或有新增的小时目录，跳过已就绪的">
+                                    {{ (bf[r.path] && (bf[r.path].status === 'done' || bf[r.path].status === 'error')) ? '增量构建' : '构建索引' }}
                                 </button>
                                 <button class="btn btn-outline btn-sm" style="margin-left:4px;"
                                     v-if="bf[r.path] && (bf[r.path].status === 'done' || bf[r.path].status === 'error')"
                                     @click="startBackfill(r.path, true)"
-                                    title="全量重建该路径下所有小时目录（较慢）">全量</button>
+                                    title="全量重建该路径下所有小时目录的 index.db（重解析合并文件，较慢）">全量</button>
                             </template>
                             <span v-if="bf[r.path] && bf[r.path].status === 'running'" style="font-size:.8rem;">
-                                {{ bf[r.path].done_leaves }}/{{ bf[r.path].total_leaves }} …<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }}）</span>
+                                叶子 {{ bf[r.path].done_leaves }}/{{ bf[r.path].total_leaves }}<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }}）</span>
+                                <template v-if="bf[r.path].current_leaf">
+                                    · {{ bf[r.path].current_leaf }}<span v-if="bf[r.path].leaf_total"> 补meta {{ bf[r.path].leaf_done }}/{{ bf[r.path].leaf_total }}</span>
+                                </template> …
                             </span>
-                            <span v-if="bf[r.path] && bf[r.path].status === 'done'" class="msg-ok" style="font-size:.78rem; margin-left:6px;">已完成<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }} 个已回填）</span></span>
+                            <span v-if="bf[r.path] && bf[r.path].status === 'done'" class="msg-ok" style="font-size:.78rem; margin-left:6px;">已就绪<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }} 个已构建）</span></span>
                             <span v-if="bf[r.path] && bf[r.path].status === 'error'" class="msg-err" style="font-size:.78rem;">失败</span>
                         </template>
                         <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
@@ -182,7 +185,7 @@ new Vue({
                 .catch(function() { this.showMsg('请求失败', false); }.bind(this));
         },
         startBackfill: function(path, force) {
-            if (force && !confirm('全量重建将重新扫描该路径下所有小时目录（数万文件，较慢）。\n增量回填只处理有新增的目录。确认全量？')) return;
+            if (force && !confirm('全量重建将重新解析该路径下所有小时目录的合并文件（数万文件，较慢）。\n增量构建只处理首次或有新增的目录。确认全量？')) return;
             fetch('/api/logs-admin/backfill', {
                 method: 'POST',
                 headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
@@ -191,7 +194,7 @@ new Vue({
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     if (!data.ok) { this.showMsg(data.msg || '启动失败', false); return; }
-                    this.showMsg(force ? '全量回填已启动' : '增量回填已启动', true);
+                    this.showMsg(force ? '全量构建已启动' : '增量构建已启动', true);
                     this.pollBackfill(path, true);
                 }.bind(this))
                 .catch(function() { this.showMsg('请求失败', false); }.bind(this));

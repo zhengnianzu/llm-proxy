@@ -29,6 +29,7 @@ from utils.message_common import (
 )
 from utils.q1_index import get_effective_q1, should_update_q1, update_q1
 import utils.session_store as _ss
+import utils.newapi_index_db as nidb
 
 _CACHE_LOCK = threading.Lock()
 _LOG_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -381,13 +382,10 @@ def _get_init_lock(root_dir: str) -> threading.Lock:
 
 
 def _refresh_state(kind: str, root_dir: str, force: bool = False) -> None:
-    # new-api 叶子：走合并文件消费器（增量），不走三元组 + index 快速路径
+    # new-api 叶子：视图只读 index.db。构建/补 meta 一律经「日志管理」批量路径
+    # （dispatcher + leader_lock 单写者）；此处不写库、不解析合并文件，保证视图请求恒亚秒。
+    # 待构建/待补 meta 的信息由 _attach_backfill_status 以徽标形式带给前端。
     if _root_format(root_dir) == "newapi":
-        try:
-            from utils.newapi_consumer import consume_leaf
-            consume_leaf(root_dir, force=force)
-        except Exception:
-            pass
         return
 
     # 快速路径：TTL 内直接返回，只读内存变量，不需要全局锁
@@ -453,14 +451,81 @@ def _refresh_state(kind: str, root_dir: str, force: bool = False) -> None:
         state["_last_refresh_ts"] = time.time()
 
 
+def _attach_backfill_status(payload: Dict[str, Any], root_dir: str) -> None:
+    """new-api 叶子给 payload 带上 index.db 构建状态，供前端区分「未构建 / 待补 meta /
+    有新增待重建 / 就绪」并给出「去日志管理批量构建」的提示。native 目录不附带此字段。"""
+    if _root_format(root_dir) != "newapi":
+        return
+    try:
+        st = nidb.status(root_dir)
+        # index.jsonl 是否有超出已摄取偏移的新增行（stale：已构建但落后于最新）
+        stale = st.get("built", False) and nidb.needs_build(root_dir)
+        payload["backfill"] = {
+            "format": "newapi",
+            "built": st.get("built", False),
+            "ingested": st.get("ingested", 0),
+            "pending": st.get("pending", 0),
+            "sessions": st.get("sessions", 0),
+            "stale": bool(stale),
+        }
+    except Exception:
+        pass
+
+
+class _NidbBackend:
+    """把 newapi 叶子 index.db 适配成 session_store 同名读 API，供 payload 逻辑无差别复用。
+
+    session_store 是「单库按 session_key 全局寻址」，故其 get_traces_batch 只收 session_keys；
+    index.db 是「每叶子一库」，故这里把 root_dir 记在实例上，get_traces_batch 内部带上叶子路径。
+    """
+
+    def __init__(self, root_dir: str):
+        self._root = root_dir
+
+    def list_sessions(self, root_dir, api_key="", model="", min_msg_count=0, offset=0, limit=0):
+        return nidb.list_sessions(root_dir, api_key=api_key, model=model,
+                                  min_msg_count=min_msg_count, offset=offset, limit=limit)
+
+    def count_sessions(self, root_dir, api_key="", model="", min_msg_count=0):
+        return nidb.count_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_msg_count)
+
+    def get_traces_batch(self, session_keys):
+        return nidb.get_traces_batch(self._root, session_keys)
+
+    def get_known_models(self, root_dir):
+        return nidb.get_known_models(root_dir)
+
+
+def _read_backend(root_dir: str):
+    """按格式选读后端：newapi → 叶子 index.db；native → 全局 session_cache.db（_ss）。"""
+    if _root_format(root_dir) == "newapi":
+        return _NidbBackend(root_dir)
+    return _ss
+
+
+def _payload_known_keys(kind: str, root_dir: str) -> Tuple[List[str], float]:
+    """返回 (known_keys, last_refresh_ts)。newapi 从 index.db 取，native 从内存 state 取。"""
+    if _root_format(root_dir) == "newapi":
+        try:
+            keys = nidb.get_known_keys(root_dir)
+            ts = float(nidb.status(root_dir).get("updated_at", 0) or 0)
+        except Exception:
+            keys, ts = [], 0.0
+        return keys, ts
+    with _CACHE_LOCK:
+        current_state = _state(kind, root_dir)
+        return sorted(current_state["known_keys"]), current_state.get("_last_refresh_ts", 0)
+
+
 def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "") -> Dict[str, Any]:
     _refresh_state(kind, root_dir, force=refresh)
+    backend = _read_backend(root_dir)
 
-    sessions = _ss.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
+    sessions = backend.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
     session_keys = [s["session_key"] for s in sessions]
-    traces_by_key = _ss.get_traces_batch(session_keys)
+    traces_by_key = backend.get_traces_batch(session_keys)
 
-    known_models = _ss.get_known_models(root_dir)
+    known_models = backend.get_known_models(root_dir)
     items = []
     for session in sessions:
         sk = session["session_key"]
@@ -485,12 +550,11 @@ def _list_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, 
     total = len(items)
     paged = items[offset:offset + limit] if limit > 0 else items[offset:]
 
-    with _CACHE_LOCK:
-        current_state = _state(kind, root_dir)
-        known_keys = sorted(current_state["known_keys"])
-        last_ts = current_state.get("_last_refresh_ts", 0)
+    known_keys, last_ts = _payload_known_keys(kind, root_dir)
 
-    return {"items": paged, "total": total, "known_keys": known_keys, "known_models": known_models, "last_refresh_ts": last_ts}
+    payload = {"items": paged, "total": total, "known_keys": known_keys, "known_models": known_models, "last_refresh_ts": last_ts}
+    _attach_backfill_status(payload, root_dir)
+    return payload
 
 
 def _content_contains_keyword(content, kw: str) -> bool:
@@ -534,23 +598,24 @@ def _match_messages_content(root_dir: str, filename: str, keyword: str) -> bool:
 
 def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
     _refresh_state(kind, root_dir, force=refresh)
+    backend = _read_backend(root_dir)
 
     search = (search or "").strip()
 
     if search:
         # search 需要全量加载再过滤（无法下推 SQL），分页在过滤后处理
-        sessions = _ss.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
+        sessions = backend.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
         sessions = [s for s in sessions if _match_messages_content(root_dir, s.get("latest_file", ""), search)]
         total = len(sessions)
         paged = sessions[offset:offset + limit] if limit > 0 else sessions[offset:]
     else:
         # 无 search：COUNT + 分页完全下推 SQL
-        total = _ss.count_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
-        paged = _ss.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages, offset=offset, limit=limit if limit > 0 else 0)
+        total = backend.count_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages)
+        paged = backend.list_sessions(root_dir, api_key=api_key, model=model, min_msg_count=min_messages, offset=offset, limit=limit if limit > 0 else 0)
 
-    known_models = _ss.get_known_models(root_dir)
+    known_models = backend.get_known_models(root_dir)
     paged_keys = [s["session_key"] for s in paged]
-    traces_by_key = _ss.get_traces_batch(paged_keys)
+    traces_by_key = backend.get_traces_batch(paged_keys)
 
     items = []
     for session in paged:
@@ -571,12 +636,11 @@ def _aggregate_payload(kind: str, root_dir: str, min_messages: int, offset: int 
             payload["has_failure"] = True
         items.append(payload)
 
-    with _CACHE_LOCK:
-        current_state = _state(kind, root_dir)
-        known_keys = sorted(current_state["known_keys"])
-        last_refresh_ts = current_state.get("_last_refresh_ts", 0)
+    known_keys, last_refresh_ts = _payload_known_keys(kind, root_dir)
 
-    return {"items": items, "total": total, "known_keys": known_keys, "known_models": known_models, "last_refresh_ts": last_refresh_ts}
+    agg_payload = {"items": items, "total": total, "known_keys": known_keys, "known_models": known_models, "last_refresh_ts": last_refresh_ts}
+    _attach_backfill_status(agg_payload, root_dir)
+    return agg_payload
 
 
 def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "") -> Dict[str, Any]:
