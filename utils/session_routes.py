@@ -50,7 +50,8 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
         if not existing:
             return JSONResponse({"error": f"directory not found: {env_dir}"}, status_code=404)
 
-        stats = build_stats_multi(existing, threshold, force=refresh)
+        stats = build_stats_multi(existing, threshold, force=refresh,
+                                  active_env_dir=str(env_dir))
 
         stats["_dir"] = " + ".join(existing)
         stats["_roots"] = existing

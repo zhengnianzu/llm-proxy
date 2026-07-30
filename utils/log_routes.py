@@ -843,12 +843,17 @@ def register_log_routes(app: FastAPI) -> None:
     def resolve_log_dir(log_dir: str = "") -> str:
         if not log_dir:
             return _current_log_dir
-        # log_dir 形如 "26072520" 或跨 root 时 "<root_idx>::<rel_key>"
+        # log_dir 形如 "26072520" 或跨 root 时 "<root_id>::<rel_key>"
+        # root_part 现为稳定 root_id；旧链接可能是 basename/normpath，保留回退匹配。
         if "::" in log_dir:
+            from utils.logs_config import get_root_id
+            from utils.log_scan import resolve_leaf
             root_part, _, rel = log_dir.partition("::")
             for root in _all_roots():
-                if os.path.basename(os.path.normpath(root)) == root_part or os.path.normpath(root) == root_part:
-                    candidate = os.path.join(root, rel)
+                if (get_root_id(root, _env_dir) == root_part
+                        or os.path.basename(os.path.normpath(root)) == root_part
+                        or os.path.normpath(root) == root_part):
+                    candidate = str(resolve_leaf(root, rel))
                     if os.path.isdir(candidate):
                         return candidate
         # 兼容旧格式：同 env-key 下的时间戳子目录
@@ -890,7 +895,7 @@ def register_log_routes(app: FastAPI) -> None:
         from utils.stats_index import refresh_index, get_dir_counts
         from utils.token_index import refresh_token_index
         from utils.log_scan import dir_key_for
-        from utils.logs_config import get_path_name
+        from utils.logs_config import get_path_name, get_root_id
         current_tag = Path(_current_log_dir).name
         roots = _all_roots()
         multi = len(roots) > 1
@@ -901,7 +906,8 @@ def register_log_routes(app: FastAPI) -> None:
             root_path = Path(root)
             if not root_path.is_dir():
                 continue
-            root_base = os.path.basename(os.path.normpath(root))
+            # 多 root 时用稳定 root_id 作前缀区分来源（消除同 basename 冲突）
+            root_id = get_root_id(root, _env_dir)
             # 活跃 env_dir 名称固定 default；历史根取配置名称
             is_active_root = (os.path.normpath(root) == os.path.normpath(_env_dir))
             root_label = "default" if is_active_root else get_path_name(root)
@@ -911,14 +917,14 @@ def register_log_routes(app: FastAPI) -> None:
             for rel_key, count in counts.items():
                 is_current = (os.path.normpath(root) == os.path.normpath(_env_dir)
                               and rel_key == current_tag)
-                name = f"{root_base}::{rel_key}" if multi else rel_key
+                name = f"{root_id}::{rel_key}" if multi else rel_key
                 if is_current:
                     current_name = name
                 dirs.append({
                     "name": name,
                     "current": is_current,
                     "count": count,
-                    "root": root_base,
+                    "root": root_id,
                     "root_label": root_label,
                 })
         # 当前目录优先，其余按名称倒序

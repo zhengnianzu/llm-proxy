@@ -303,18 +303,19 @@ def _scan_data_dirs(logs_all: Path, env_name: str = None, port_env_map: dict = N
 def _scan_root_leaves(root: str) -> List[dict]:
     """扫描一个非 logs_all 根（如 new-api 的 details）下含 index.jsonl 的叶子。
 
-    env_name = 根 basename；mtime_tag = 叶子相对根的路径（天/小时）；
-    dir_path = env_name/mtime_tag。
+    env_name = 根的稳定 root_id（消除同 basename 冲突）；
+    mtime_tag = 叶子相对根的路径（天/小时）；dir_path = env_name/mtime_tag。
     """
     result = []
     try:
         from utils.log_scan import iter_index_dirs, dir_key_for
+        from utils.logs_config import get_root_id
     except Exception:
         return result
     rp = Path(root)
     if not rp.is_dir():
         return result
-    env_name = os.path.basename(os.path.normpath(root))
+    env_name = get_root_id(root)
     for leaf in iter_index_dirs(rp):
         rel = dir_key_for(rp, leaf)
         try:
@@ -676,8 +677,8 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         _port_env_map[_active_env_name] = port
 
     # --- 多根支持：把配置的历史路径（含 new-api）也纳入备份 ---
-    # env_name = 根目录 basename（如 logs_all 下是 env-xxx；new-api 根是 details）
-    # 对 new-api 根，其 basename 作为一个「env」，其 天/小时 叶子作为 mtime_tag。
+    # env_name = 根目录的稳定 root_id（消除同 basename 冲突，如两个 new-api details 根）。
+    # 对历史根，其 root_id 作为一个「env」，其 天/小时 叶子作为 mtime_tag。
     def _extra_roots() -> list:
         """配置的历史路径（排除活跃 logs_all 自身，那条已由 logs_all 扫描覆盖）。"""
         try:
@@ -687,30 +688,50 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             return []
 
     def _root_env_name(root: str) -> str:
+        from utils.logs_config import get_root_id
+        return get_root_id(root, logs_dir)
+
+    def _root_basename(root: str) -> str:
+        """旧标识（basename），仅用于兼容存量 dir_path 的回退匹配。"""
         return os.path.basename(os.path.normpath(root))
 
     def _extra_root_for_env(env_name: str):
         for root in _extra_roots():
-            if _root_env_name(root) == env_name:
+            if _root_env_name(root) == env_name or _root_basename(root) == env_name:
                 return root
         return None
 
     def _resolve_real_dir(dir_path: str) -> Path:
         """把 dir_path（env_name/mtime_tag[/...]）解析为真实磁盘路径。
 
-        优先按 logs_all/{dir_path}；不存在时在配置的历史根里按 <root_basename>/<rel> 匹配。
+        优先按 logs_all/{dir_path}；不存在时在配置的历史根里按 root_id/<rel> 匹配，
+        并对存量记录里遗留的旧 basename 前缀保留回退匹配。
         """
         cand = logs_all / dir_path
         if cand.is_dir():
             return cand
         env_name = dir_path.split("/", 1)[0]
         for root in _extra_roots():
-            if _root_env_name(root) == env_name:
+            if _root_env_name(root) == env_name or _root_basename(root) == env_name:
                 rel = dir_path.split("/", 1)[1] if "/" in dir_path else ""
-                real = Path(root) / rel
+                from utils.log_scan import resolve_leaf
+                real = resolve_leaf(root, rel)
                 if real.is_dir():
                     return real
         return cand  # 兜底：返回 logs_all 下的路径（可能不存在）
+
+    # 一次性幂等迁移：存量记录旧 env 前缀（basename）-> root_id
+    try:
+        from utils.backup_store import migrate_env_prefix
+        _mig = {}
+        for root in _extra_roots():
+            old = _root_basename(root)
+            new = _root_env_name(root)
+            if old != new:
+                _mig[old] = new
+        migrate_env_prefix(_mig)
+    except Exception:
+        logger.exception("backup env-prefix migration failed")
 
     # 启动手动上传串行队列 dispatcher：登记上下文 + 恢复中断项 + 起线程
     _dispatcher_ctx["logs_all"] = logs_all
@@ -758,6 +779,12 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
 
         db_dirs = list_dirs(env_name=env_name if env_name else None)
 
+        # root_id -> 展示名（配置的历史根用其 name；logs_all 下 env 目录名即展示名）
+        from utils.logs_config import get_path_name
+        _label_map = {}
+        for root in _extra_roots():
+            _label_map[_root_env_name(root)] = get_path_name(root)
+
         # 从 token_index 按 env 批量加载统计数据（内存缓存，无额外 IO）
         # new-api env 的 token_index 以真实根为 key（mtime_tag 为 天/小时 相对路径）。
         _tok_cache: dict = {}
@@ -785,6 +812,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             entry = {
                 "dir_path": d["dir_path"],
                 "env_name": d["env_name"],
+                "env_label": _label_map.get(d["env_name"], d["env_name"]),
                 "mtime_tag": d["mtime_tag"],
                 "file_count": d["file_count"],
                 "synced": d.get("synced", 0),
@@ -995,21 +1023,25 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         denied = _require_ajax(request)
         if denied:
             return denied
+        from utils.logs_config import get_path_name
         env_set = set(list_env_names())
         if logs_all.is_dir():
             for d in logs_all.iterdir():
                 if d.is_dir() and not d.name.startswith("logs_") and not d.name.startswith("."):
                     env_set.add(d.name)
-        # new-api 等配置的历史根：basename 作为一个 env
+        # new-api 等配置的历史根：root_id 作为 env 标识（筛选键），配置名作展示 label
         newapi_envs = set()
+        label_map = {}
         for root in _extra_roots():
             en = _root_env_name(root)
             env_set.add(en)
             newapi_envs.add(en)
+            label_map[en] = get_path_name(root)
         envs = []
         for name in sorted(env_set):
             envs.append({
                 "name": name,
+                "label": label_map.get(name, name),
                 "port": _port_env_map.get(name, ""),
                 "newapi": name in newapi_envs,
             })
@@ -1157,8 +1189,9 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         roots.append({"name": _active_env_name or os.path.basename(active_root),
                       "path": _active_path,
                       "active": True})
+        from utils.logs_config import get_path_name
         for r in _extra_roots():
-            roots.append({"name": _root_env_name(r), "path": r, "active": False})
+            roots.append({"name": get_path_name(r), "path": r, "active": False})
 
         out = []
         for r in roots:
@@ -1229,8 +1262,12 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         if denied:
             return denied
         from utils.backup_store import list_pending_delete
+        from utils.logs_config import get_path_name
         env = request.query_params.get("env_name", "") or None
         rows = list_pending_delete(env)
+        _label_map = {_root_env_name(r): get_path_name(r) for r in _extra_roots()}
+        for row in rows:
+            row["env_label"] = _label_map.get(row.get("env_name"), row.get("env_name"))
         return JSONResponse({"dirs": rows})
 
     @app.post("/api/backup/confirm-delete")

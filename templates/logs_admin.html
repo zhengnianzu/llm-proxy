@@ -86,6 +86,7 @@
             <thead>
                 <tr>
                     <th>名称</th>
+                    <th>标识</th>
                     <th>路径</th>
                     <th>状态</th>
                     <th>格式</th>
@@ -98,6 +99,7 @@
             <tbody>
                 <tr v-for="r in rows" :key="r.path">
                     <td><span class="badge badge-fmt">{{ r.name || 'default' }}</span></td>
+                    <td class="mono">{{ r.root_id || '-' }}</td>
                     <td class="mono">
                         {{ r.path }}
                         <span v-if="r.base && r.active" style="color:var(--muted-foreground);">（base: {{ r.base }}）</span>
@@ -138,7 +140,7 @@
                     </td>
                 </tr>
                 <tr v-if="rows.length === 0">
-                    <td :colspan="withSize ? 8 : 7" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
+                    <td :colspan="withSize ? 9 : 8" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
                 </tr>
             </tbody>
         </table>

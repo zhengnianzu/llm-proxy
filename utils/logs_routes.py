@@ -50,9 +50,16 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
             leaf_count = sum(1 for _ in iter_index_dirs(Path(path)))
         except Exception:
             leaf_count = 0
+    # root_id：活跃 env_dir 固定为 default，其余按稳定哈希，供用户核对来源标识
+    try:
+        from utils.logs_config import get_root_id
+        root_id = "default" if active else get_root_id(path, active_env_dir)
+    except Exception:
+        root_id = "default"
     return {
         "path": path,
         "name": name or "default",
+        "root_id": root_id,
         "active": active,
         "exists": exists,
         "format": fmt,
@@ -99,7 +106,7 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
             # 跳过与活跃 env_dir 相同的路径
             if os.path.normpath(p) == os.path.normpath(active_env_dir):
                 continue
-            rows.append(_describe(p, active=False, name=e.get("name") or "default"))
+            rows.append(_describe(p, active=False, active_env_dir=active_env_dir, name=e.get("name") or "default"))
 
         if with_size:
             for r in rows:

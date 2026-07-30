@@ -115,6 +115,38 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def migrate_env_prefix(mapping: dict):
+    """把存量记录里旧的 env 标识（basename）改写为新的 root_id。
+
+    mapping: {old_env_name: new_env_name}。幂等——已是新前缀的记录不受影响
+    （old==new 时跳过，且新前缀不在 mapping 键中）。仅改写 env_name 与
+    dir_path 的第一段前缀；obs_path 保留原值（存量 OBS 对象不搬动）。
+    """
+    if not _conn or not mapping:
+        return
+    pairs = [(o, n) for o, n in mapping.items() if o and n and o != n]
+    if not pairs:
+        return
+    with _lock:
+        for old, new in pairs:
+            like = old + "/%"
+            # backup_dirs：env_name + dir_path 前缀
+            _conn.execute(
+                "UPDATE OR IGNORE backup_dirs SET env_name=?, "
+                "dir_path=? || substr(dir_path, ?) "
+                "WHERE env_name=? AND dir_path LIKE ?",
+                (new, new, len(old) + 1, old, like),
+            )
+            # 关联表：仅 dir_path 前缀
+            for tbl in ("backup_logs", "backup_failed_files", "backup_queue"):
+                _conn.execute(
+                    f"UPDATE OR IGNORE {tbl} SET dir_path=? || substr(dir_path, ?) "
+                    "WHERE dir_path LIKE ?",
+                    (new, len(old) + 1, like),
+                )
+        _conn.commit()
+
+
 def upsert_dir(dir_path: str, env_name: str, mtime_tag: str, file_count: int = 0,
                port: str = "", has_local: bool = True, has_obs: bool = False):
     with _lock:

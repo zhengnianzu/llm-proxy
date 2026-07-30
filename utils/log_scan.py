@@ -46,11 +46,39 @@ def iter_index_dirs(root: Path, max_depth: int = _MAX_DEPTH) -> Iterator[Path]:
 
 
 def dir_key_for(root: Path, leaf: Path) -> str:
-    """叶子目录相对 root 的标识；用于索引缓存的键。"""
+    """叶子目录相对 root 的标识；用于索引缓存的键。
+
+    折叠"末段与父段同名"的冗余层：某些 new-api 源把真叶子多套一层同名子目录
+    （如 260727/26072717/26072717/index.jsonl），此处归一化为标准 天/小时
+    （260727/26072717），与其它源口径一致。与 resolve_leaf 成对，可逆。
+    """
     try:
-        return leaf.relative_to(root).as_posix()
+        rel = leaf.relative_to(root).as_posix()
     except ValueError:
         return leaf.name
+    parts = rel.split("/")
+    if len(parts) >= 2 and parts[-1] == parts[-2]:
+        rel = "/".join(parts[:-1])
+    return rel
+
+
+def resolve_leaf(root, dir_key: str) -> Path:
+    """dir_key（可能已被 dir_key_for 折叠）反解为真实叶子绝对路径。
+
+    先试 root/dir_key（标准结构直接命中）；若该目录不含 index.jsonl 但存在
+    同名子目录 root/dir_key/<末段> 且含 index.jsonl，则补回被折叠的层。
+    与 dir_key_for 成对。
+    """
+    root_path = Path(root)
+    cand = root_path / dir_key
+    if (cand / _INDEX_NAME).is_file():
+        return cand
+    if dir_key:
+        last = dir_key.split("/")[-1]
+        nested = cand / last
+        if (nested / _INDEX_NAME).is_file():
+            return nested
+    return cand
 
 
 def detect_format(root: str) -> str:

@@ -623,7 +623,7 @@ def _build_rows(cache: dict, threshold: int) -> dict:
 
 
 def build_stats_multi(roots: List[str], threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
-                      force: bool = False) -> dict:
+                      force: bool = False, active_env_dir: Optional[str] = None) -> dict:
     """跨多个 root 刷新 + 构建 session 统计，合并 rows / dates / totals。
 
     每个 root 独立走 refresh_index + build_stats_from_index（各自缓存），
@@ -661,8 +661,9 @@ def build_stats_multi(roots: List[str], threshold: int = QUALIFIED_THRESHOLD_DEF
                 cell["total"] += c.get("total", 0)
                 cell["qualified"] += c.get("qualified", 0)
             # mtime_cells 的 key 已是相对 root 的 dir_key，可能跨 root 重名，
-            # 加 root 前缀防冲突
-            prefix = os.path.basename(os.path.normpath(root))
+            # 加 root_id 前缀防冲突（root_id 稳定且消除同 basename 碰撞）
+            from utils.logs_config import get_root_id
+            prefix = get_root_id(root, active_env_dir)
             for mt, c in row.get("mtime_cells", {}).items():
                 key = f"{prefix}/{mt}" if len(roots) > 1 else mt
                 cell = m["mtime_cells"].setdefault(key, {"total": 0, "qualified": 0})

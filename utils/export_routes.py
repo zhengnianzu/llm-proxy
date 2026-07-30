@@ -157,25 +157,33 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         roots = _existing_roots()
         multi = len(roots) > 1
         out = []
+        from utils.logs_config import get_root_id
         for root in roots:
             rp = Path(root)
-            base = os.path.basename(os.path.normpath(root))
+            base = get_root_id(root, str(env_dir))
             for leaf in iter_index_dirs(rp):
                 rel = dir_key_for(rp, leaf)
                 out.append(f"{base}/{rel}" if multi else rel)
         return sorted(set(out), reverse=True)
 
     def _resolve_mt(mt: str) -> Optional[str]:
-        """把 mtime key（<root_basename>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。"""
+        """把 mtime key（<root_id>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。
+
+        优先按 root_id 前缀匹配；对 export_records 里遗留的旧 <basename>/ 前缀
+        保留回退匹配，保证历史记录仍可解析。
+        """
+        from utils.logs_config import get_root_id
         roots = _existing_roots()
         multi = len(roots) > 1
         for root in roots:
             rp = Path(root)
+            rid = get_root_id(root, str(env_dir))
             base = os.path.basename(os.path.normpath(root))
-            if multi and mt.startswith(base + "/"):
-                cand = rp / mt[len(base) + 1:]
-                if cand.is_dir():
-                    return str(cand)
+            for pfx in (rid, base):  # 新前缀优先，旧 basename 回退
+                if multi and mt.startswith(pfx + "/"):
+                    cand = rp / mt[len(pfx) + 1:]
+                    if cand.is_dir():
+                        return str(cand)
             cand2 = rp / mt
             if cand2.is_dir():
                 return str(cand2)
@@ -281,8 +289,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if not roots:
             return JSONResponse({"keys": [], "mtimes": []})
 
-        # 跨 root 合并 session 统计（rows 的 mtime_cells key 已带 <root>/ 前缀）
-        stats = build_stats_multi(roots, threshold)
+        # 跨 root 合并 session 统计（rows 的 mtime_cells key 已带 <root_id>/ 前缀）
+        stats = build_stats_multi(roots, threshold, active_env_dir=str(env_dir))
 
         # 每个 key 的模型分布（{api_key: {model: session_count}}）。DB 已按 service 绑定，
         # 一次查询覆盖全部叶子，避免逐叶重扫 index.jsonl（那是「导出一直加载中」的根因）。
@@ -742,7 +750,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             return err
 
         roots = [r for r in _all_roots() if Path(r).is_dir()]
-        stats = build_stats_multi(roots) if roots else {"rows": []}
+        stats = build_stats_multi(roots, active_env_dir=str(env_dir)) if roots else {"rows": []}
         mtime_dirs = []
         for row in stats.get("rows", []):
             if row["api_key"] == key_value:

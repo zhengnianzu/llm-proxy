@@ -82,14 +82,20 @@ def load_combined(path: Path) -> Optional[dict]:
         return None
 
 
-def _messages_from_req(req: Any) -> Optional[List[dict]]:
+def _req_to_dict(req: Any) -> Optional[dict]:
+    """把 req 字段（可能是 JSON 字符串或已是 dict）解析为完整请求体 dict。"""
     if isinstance(req, str):
         try:
             req = json.loads(req)
         except json.JSONDecodeError:
             return None
-    if isinstance(req, dict) and isinstance(req.get("messages"), list):
-        return req["messages"]
+    return req if isinstance(req, dict) else None
+
+
+def _messages_from_req(req: Any) -> Optional[List[dict]]:
+    req_obj = _req_to_dict(req)
+    if isinstance(req_obj, dict) and isinstance(req_obj.get("messages"), list):
+        return req_obj["messages"]
     return None
 
 
@@ -102,7 +108,9 @@ def parse_combined_file(path: Path) -> Optional[Dict[str, Any]]:
     if data is None:
         return None
 
-    messages = _messages_from_req(data.get("req")) or []
+    req_body = _req_to_dict(data.get("req"))
+    messages = (req_body.get("messages") if isinstance(req_body, dict) else None) or []
+    resp_raw = data.get("resp", "")
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     tok_in = usage.get("token_in") or 0
     tok_out = usage.get("token_out") or 0
@@ -112,7 +120,11 @@ def parse_combined_file(path: Path) -> Optional[Dict[str, Any]]:
         "model": data.get("model", "") or "",
         "api_key": data.get("api_key", "") or "",
         "messages": messages,
-        "assistant_content": _assistant_content_from_resp(data.get("resp", "")),
+        # 完整请求体（含 tools/system/tool_choice 等所有字段），不裁剪
+        "req_body": req_body if isinstance(req_body, dict) else {},
+        # 响应原文（Anthropic SSE / OpenAI 流式或非流式整块），不裁剪
+        "resp_raw": resp_raw if isinstance(resp_raw, str) else "",
+        "assistant_content": _assistant_content_from_resp(resp_raw),
         "tok_in": tok_in,
         "tok_out": tok_out,
         "success": tok_out > 0,
@@ -149,14 +161,15 @@ def build_merged_for_eval(path: Path) -> Optional[Dict[str, Any]]:
     if parsed is None:
         return None
     content = parsed["assistant_content"]
-    merged: Dict[str, Any] = {
-        "model": parsed["model"],
-        "messages": parsed["messages"],
-        "header": {},
-        "response": {
-            "content": content if content is not None else [],
-            "status_code": 200 if parsed["success"] else 400,
-        },
+    # 以完整请求体为基底，保留 tools/system/tool_choice 等所有字段，
+    # 再覆盖 model/messages 与派生的 response，避免遗漏原始请求信息。
+    merged: Dict[str, Any] = dict(parsed["req_body"])
+    merged["model"] = parsed["model"] or merged.get("model", "")
+    merged["messages"] = parsed["messages"]
+    merged["header"] = {}
+    merged["response"] = {
+        "content": content if content is not None else [],
+        "status_code": 200 if parsed["success"] else 400,
     }
     return merged
 
@@ -174,10 +187,11 @@ def build_preview_payload(path: Path) -> Optional[Dict[str, Any]]:
             "content": parsed["assistant_content"],
             "_from_res": True,
         })
-    payload: Dict[str, Any] = {
-        "model": parsed["model"],
-        "messages": messages,
-    }
+    # 以完整请求体为基底，保留 tools/system/tool_choice 等所有字段，
+    # 再覆盖 model/messages（messages 末尾已附 assistant）。
+    payload: Dict[str, Any] = dict(parsed["req_body"])
+    payload["model"] = parsed["model"] or payload.get("model", "")
+    payload["messages"] = messages
     if parsed["tok_in"] or parsed["tok_out"]:
         payload["_usage"] = {
             "input_tokens": parsed["tok_in"],

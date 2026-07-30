@@ -17,6 +17,7 @@ utils/logs_config.py — 多日志路径配置
   - new-api 格式 {root}/{day}/{hour}/index.jsonl  (root = .../logs/details)
 """
 
+import hashlib
 import os
 import threading
 from pathlib import Path
@@ -28,6 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_CONFIG_PATH = PROJECT_ROOT / "settings" / "logs_dirs.yaml"
 _DEFAULT_BASE = "logs_all"
 _DEFAULT_NAME = "default"
+_DEFAULT_ID = "default"
 
 _lock = threading.Lock()
 
@@ -131,6 +133,36 @@ def get_path_name(path: str) -> str:
         if os.path.normpath(e["path"]) == norm:
             return e["name"]
     return _DEFAULT_NAME
+
+
+def get_root_id(path: str, active_env_dir: Optional[str] = None) -> str:
+    """某根目录的稳定内部唯一标识（供 log_dir / 备份 env_name 区分来源）。
+
+    - 活跃 env_dir 固定返回 "default"（与历史行为一致，且是活跃写入目录）。
+    - 其余根：normpath 路径的 md5 前 8 位。同路径必同 id，不同路径几乎不碰撞。
+
+    用路径哈希而非独立 uuid：全系统缓存/会话 DB 本就以路径为键，
+    路径哈希与之同源、确定性生成、无需持久化回填。
+    """
+    if not path:
+        return _DEFAULT_ID
+    norm = os.path.normpath(path)
+    if active_env_dir and norm == os.path.normpath(active_env_dir):
+        return _DEFAULT_ID
+    return hashlib.md5(norm.encode("utf-8")).hexdigest()[:8]
+
+
+def get_root_by_id(root_id: str, active_env_dir: Optional[str] = None) -> Optional[str]:
+    """按 root_id 反查根目录路径；找不到返回 None。
+
+    候选集合 = 活跃 env_dir + 配置的历史路径（与 get_stats_roots 一致）。
+    """
+    if not root_id:
+        return None
+    for root in get_stats_roots(active_env_dir):
+        if get_root_id(root, active_env_dir) == root_id:
+            return root
+    return None
 
 
 def _ensure_config() -> dict:
