@@ -69,6 +69,42 @@ ensure_path_in_bashrc() {
 }
 
 # ---------------------------------------------------------------------------
+# 2b. 配置阿里云 PyPI 镜像（pip 与 uv 各一套，幂等，不覆盖已有配置）
+# ---------------------------------------------------------------------------
+ALIYUN_INDEX="https://mirrors.aliyun.com/pypi/simple/"
+ALIYUN_HOST="mirrors.aliyun.com"
+
+ensure_mirror() {
+    # pip：seed 出来的 .venv/bin/pip 手动装包时用
+    local pip_conf="$HOME/.config/pip/pip.conf"
+    if [[ -f "$pip_conf" ]] && grep -qF "$ALIYUN_HOST" "$pip_conf"; then
+        log "pip 镜像已配置，跳过 ($pip_conf)"
+    else
+        log "写入 pip 阿里镜像 → $pip_conf"
+        mkdir -p "$(dirname "$pip_conf")"
+        cat > "$pip_conf" <<EOF
+[global]
+index-url = $ALIYUN_INDEX
+trusted-host = $ALIYUN_HOST
+EOF
+    fi
+
+    # uv：uv pip install 装 requirements.txt 时用（pip.conf 对 uv 无效）
+    local uv_conf="$HOME/.config/uv/uv.toml"
+    if [[ -f "$uv_conf" ]] && grep -qF "$ALIYUN_HOST" "$uv_conf"; then
+        log "uv 镜像已配置，跳过 ($uv_conf)"
+    else
+        log "写入 uv 阿里镜像 → $uv_conf"
+        mkdir -p "$(dirname "$uv_conf")"
+        cat > "$uv_conf" <<EOF
+[[index]]
+url = "$ALIYUN_INDEX"
+default = true
+EOF
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # 3. 安装 Python 3.12（由 uv 托管）
 # ---------------------------------------------------------------------------
 ensure_python() {
@@ -85,7 +121,7 @@ setup_venv() {
         log ".venv 已存在，复用（如需重建先 rm -rf .venv）"
     else
         log "创建 .venv（Python $PY_VERSION）"
-        uv venv --python "$PY_VERSION" .venv
+        uv venv --python "$PY_VERSION" --seed .venv
     fi
     log "安装依赖 requirements.txt 到 .venv"
     uv pip install --python "$SCRIPT_DIR/.venv/bin/python" -r requirements.txt
@@ -96,6 +132,7 @@ setup_venv() {
 main() {
     ensure_uv
     ensure_path_in_bashrc
+    ensure_mirror
     ensure_python
     setup_venv
     echo ""
