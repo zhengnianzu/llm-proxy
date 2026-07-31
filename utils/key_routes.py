@@ -27,11 +27,15 @@ def _require_key_api(request: Request):
     return None
 
 
-def register_key_routes(app: FastAPI, templates: Jinja2Templates):
+def register_key_routes(app: FastAPI, templates: Jinja2Templates, context_builder=None):
 
     @app.get("/keys")
     def keys_page(request: Request):
-        return templates.TemplateResponse(request, "keys.html", context={"active_page": "keys", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
+        if context_builder is not None:
+            context = context_builder(request, "keys")
+        else:
+            context = {"active_page": "keys", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]}
+        return templates.TemplateResponse(request, "keys.html", context=context)
 
     @app.get("/api/keys")
     def api_keys_list(request: Request):

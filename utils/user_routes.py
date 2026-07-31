@@ -13,18 +13,22 @@ def _is_internal(request: Request) -> bool:
     return request.headers.get("x-requested-with") == "XMLHttpRequest"
 
 
-def register_user_routes(app: FastAPI, templates: Jinja2Templates):
+def register_user_routes(app: FastAPI, templates: Jinja2Templates, context_builder=None):
 
     @app.get("/users")
     def users_page(request: Request):
-        perms_raw = request.session.get("monitor_permissions") or ""
-        perms_list = [p.strip() for p in perms_raw.split(",") if p.strip()]
-        return templates.TemplateResponse(request, "users.html", context={
-            "active_page": "users",
-            "user_role": request.session.get("monitor_role", "user"),
-            "user_name": request.session.get("monitor_user", ""),
-            "user_permissions": perms_list,
-        })
+        if context_builder is not None:
+            context = context_builder(request, "users")
+        else:
+            perms_raw = request.session.get("monitor_permissions") or ""
+            perms_list = [p.strip() for p in perms_raw.split(",") if p.strip()]
+            context = {
+                "active_page": "users",
+                "user_role": request.session.get("monitor_role", "user"),
+                "user_name": request.session.get("monitor_user", ""),
+                "user_permissions": perms_list,
+            }
+        return templates.TemplateResponse(request, "users.html", context=context)
 
     @app.get("/api/users")
     def api_users_list(request: Request):

@@ -100,9 +100,16 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
     }
 
 
-def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_dir: str = "") -> None:
+def register_logs_routes(
+    app: FastAPI,
+    templates: Jinja2Templates,
+    active_env_dir: str = "",
+    context_builder=None,
+) -> None:
 
     def _ctx(request: Request) -> dict:
+        if context_builder is not None:
+            return context_builder(request, "logs_admin")
         return {
             "active_page": "logs_admin",
             "user_role": request.session.get("monitor_role", "admin"),

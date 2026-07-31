@@ -28,7 +28,7 @@ def _build_stats_json(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAUL
     return build_stats_from_index(index, threshold, env_dir=env_dir)
 
 
-def register_session_routes(app: FastAPI, logs_dir: str) -> None:
+def register_session_routes(app: FastAPI, logs_dir: str, context_builder=None) -> None:
     env_dir = Path(logs_dir).parent
 
     from fastapi.templating import Jinja2Templates
@@ -36,12 +36,16 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/sessions")
     async def sessions_page(request: Request):
-        return _templates.TemplateResponse(request, "sessions.html", context={
-            "active_page": "sessions",
-            "user_role": request.session.get("monitor_role", "user"),
-            "user_name": request.session.get("monitor_user", ""),
-            "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()],
-        })
+        if context_builder is not None:
+            context = context_builder(request, "sessions")
+        else:
+            context = {
+                "active_page": "sessions",
+                "user_role": request.session.get("monitor_role", "user"),
+                "user_name": request.session.get("monitor_user", ""),
+                "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()],
+            }
+        return _templates.TemplateResponse(request, "sessions.html", context=context)
 
     @app.get("/sessions/stats")
     def sessions_stats(threshold: int = QUALIFIED_THRESHOLD_DEFAULT, refresh: bool = False):

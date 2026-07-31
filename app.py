@@ -1821,16 +1821,26 @@ def rate_history(hours: int = 2):
 
 
 register_log_routes(app)
-register_session_routes(app, LOGS_DIR)
-register_key_routes(app, templates)
-register_channel_routes(app, templates)
-register_export_routes(app, LOGS_DIR)
-register_backup_routes(app, LOGS_DIR, port=os.getenv("PROXY_PORT", "4000"))
-register_obs_routes(app, templates)
-register_logs_routes(app, templates, active_env_dir=ENV_DIR)
-register_user_routes(app, templates)
+register_session_routes(app, LOGS_DIR, context_builder=_ctx)
+register_key_routes(app, templates, context_builder=_ctx)
+register_channel_routes(app, templates, context_builder=_ctx)
+register_export_routes(app, LOGS_DIR, context_builder=_ctx)
+register_backup_routes(
+    app,
+    LOGS_DIR,
+    port=os.getenv("PROXY_PORT", "4000"),
+    context_builder=_ctx,
+)
+register_obs_routes(app, templates, context_builder=_ctx)
+register_logs_routes(
+    app,
+    templates,
+    active_env_dir=ENV_DIR,
+    context_builder=_ctx,
+)
+register_user_routes(app, templates, context_builder=_ctx)
 register_debug_routes(app, LOGS_DEBUG, STARTUP_DATE_TAG)
-register_reflection_routes(app, templates)
+register_reflection_routes(app, templates, context_builder=_ctx)
 
 
 # ---------------------------------------------------------------------------
