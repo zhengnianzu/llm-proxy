@@ -21,80 +21,61 @@ OBSUTIL_BIN = str(PROJECT_ROOT / "tools" / "obsutil" / "obsutil")
 DEFAULT_UPLOAD_SCRIPT = str(PROJECT_ROOT / "tools" / "obs_upload.sh")
 DEFAULT_DOWNLOAD_SCRIPT = str(PROJECT_ROOT / "tools" / "obs_download.sh")
 
+# sync_config 未初始化时的默认配置文件（.cli_state.yaml 里没有 sync_config 时回退）
+DEFAULT_SYNC_CONFIG = PROJECT_ROOT / "settings" / "obs_base.yaml"
+
 
 # ---------------------------------------------------------------------------
 # obs_base 配置读取
 # ---------------------------------------------------------------------------
 
-def load_obs_base() -> str:
-    """读取 obs_base。唯一来源：.cli_state.yaml -> sync_config 指向的配置文件
-    （如 settings/obs_rl.yaml）。所有 OBS 配置统一到该文件，不再回退其它文件。"""
+def get_sync_config_path() -> Optional[Path]:
+    """返回 sync_config YAML 文件路径。
+
+    优先用 .cli_state.yaml 的 sync_config 指向的文件；未配置或不存在时，
+    回退到默认的 settings/obs_base.yaml（若存在）。
+    """
     import yaml
 
     cli_state_path = PROJECT_ROOT / ".cli_state.yaml"
-    if not cli_state_path.is_file():
-        return ""
-    try:
-        with open(cli_state_path, "r", encoding="utf-8") as f:
-            state = yaml.safe_load(f) or {}
-        sync_cfg = state.get("sync_config", "")
-        if not sync_cfg:
-            return ""
-        p = Path(sync_cfg)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if not p.is_file():
-            return ""
-        with open(p, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        return cfg.get("obs_base", "").strip().rstrip("/")
-    except Exception:
-        return ""
+    if cli_state_path.is_file():
+        try:
+            with open(cli_state_path, "r", encoding="utf-8") as f:
+                state = yaml.safe_load(f) or {}
+            sync_cfg = state.get("sync_config", "")
+            if sync_cfg:
+                p = Path(sync_cfg)
+                if not p.is_absolute():
+                    p = PROJECT_ROOT / p
+                if p.is_file():
+                    return p
+        except Exception:
+            pass
+    # 回退默认配置
+    return DEFAULT_SYNC_CONFIG if DEFAULT_SYNC_CONFIG.is_file() else None
 
 
 def load_sync_config() -> dict:
-    """读取 sync_config 配置文件（obs_base, interval, workers, upload_script）。"""
+    """读取 sync_config 配置文件（obs_base, interval, workers, upload_script）。
+
+    未初始化时回退到默认 settings/obs_base.yaml。
+    """
     import yaml
 
-    cli_state_path = PROJECT_ROOT / ".cli_state.yaml"
-    if not cli_state_path.is_file():
+    p = get_sync_config_path()
+    if p is None:
         return {}
     try:
-        with open(cli_state_path, "r", encoding="utf-8") as f:
-            state = yaml.safe_load(f) or {}
-        sync_cfg = state.get("sync_config", "")
-        if not sync_cfg:
-            return {}
-        p = Path(sync_cfg)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if not p.is_file():
-            return {}
         with open(p, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except Exception:
         return {}
 
 
-def get_sync_config_path() -> Optional[Path]:
-    """返回 sync_config YAML 文件路径（如果配置了）。"""
-    import yaml
-
-    cli_state_path = PROJECT_ROOT / ".cli_state.yaml"
-    if not cli_state_path.is_file():
-        return None
-    try:
-        with open(cli_state_path, "r", encoding="utf-8") as f:
-            state = yaml.safe_load(f) or {}
-        sync_cfg = state.get("sync_config", "")
-        if not sync_cfg:
-            return None
-        p = Path(sync_cfg)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        return p if p.is_file() else None
-    except Exception:
-        return None
+def load_obs_base() -> str:
+    """读取 obs_base。来源：sync_config 指向的配置文件（如 settings/obs_rl.yaml）；
+    未初始化时回退默认 settings/obs_base.yaml。"""
+    return load_sync_config().get("obs_base", "").strip().rstrip("/")
 
 
 # ---------------------------------------------------------------------------

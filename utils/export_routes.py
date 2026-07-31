@@ -58,7 +58,45 @@ _queue_lock = threading.Lock()
 # record_id -> True 表示该任务已被取消，调度线程出队后直接跳过（本进程内快速路径）
 _cancelled_ids: set = set()
 
-_EXPORT_LOCK_PATH = os.path.join(get_service_log_dir(), "export_queue.lock")
+# 全局并发上限：同一时刻最多几个导出任务在真正执行（跨 worker）。
+# 用 EXPORT_CONCURRENCY 配置，默认 2。
+_EXPORT_CONCURRENCY = max(1, int(os.getenv("EXPORT_CONCURRENCY", "2")))
+
+# N 个槽位锁文件，任务执行前非阻塞抢占任一空槽，抢到才执行 → 全局并发严格 ≤ N。
+_EXPORT_LOCK_DIR = get_service_log_dir()
+_EXPORT_LOCK_PATHS = [
+    os.path.join(_EXPORT_LOCK_DIR, f"export_queue.slot{i}.lock")
+    for i in range(_EXPORT_CONCURRENCY)
+]
+
+
+def _acquire_slot():
+    """非阻塞轮询抢占任一空槽，返回持锁的文件对象；抢不到返回 None。"""
+    import fcntl
+    os.makedirs(_EXPORT_LOCK_DIR, exist_ok=True)
+    for path in _EXPORT_LOCK_PATHS:
+        try:
+            fp = open(path, "w")
+            fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fp
+        except OSError:
+            try:
+                fp.close()
+            except OSError:
+                pass
+            continue
+    return None
+
+
+def _release_slot(fp) -> None:
+    import fcntl
+    if fp is None:
+        return
+    try:
+        fcntl.flock(fp, fcntl.LOCK_UN)
+        fp.close()
+    except OSError:
+        pass
 
 
 def _is_cancelled(record_id: int) -> bool:
@@ -77,8 +115,8 @@ def _is_cancelled(record_id: int) -> bool:
 
 
 def _queue_runner():
-    """全局单一调度线程，逐个执行队列中的任务。跨 worker 用文件锁保证全局串行。"""
-    import fcntl
+    """调度线程，逐个执行队列中的任务。跨 worker 用 N 槽位文件锁保证全局并发 ≤ N。"""
+    import time
     while True:
         record_id, fn = _task_queue.get()
         if _is_cancelled(record_id):
@@ -86,23 +124,24 @@ def _queue_runner():
             continue
         lock_fp = None
         try:
-            # 阻塞式全局锁：等到其它 worker 的导出任务结束再执行本任务
-            os.makedirs(os.path.dirname(_EXPORT_LOCK_PATH), exist_ok=True)
-            lock_fp = open(_EXPORT_LOCK_PATH, "w")
-            fcntl.flock(lock_fp, fcntl.LOCK_EX)
-            # 拿到锁后再确认一次是否在等待期间被取消
+            # 抢占任一空槽；所有槽被占（已达全局并发上限）时轮询等待
+            while True:
+                if _is_cancelled(record_id):
+                    break
+                lock_fp = _acquire_slot()
+                if lock_fp is not None:
+                    break
+                time.sleep(1)
+            if lock_fp is None:  # 等待期间被取消
+                continue
+            # 拿到槽后再确认一次是否在等待期间被取消
             if _is_cancelled(record_id):
                 continue
             fn()
         except Exception:
             logger.exception("queue_runner: task %s raised", record_id)
         finally:
-            if lock_fp is not None:
-                try:
-                    fcntl.flock(lock_fp, fcntl.LOCK_UN)
-                    lock_fp.close()
-                except OSError:
-                    pass
+            _release_slot(lock_fp)
             _task_queue.task_done()
 
 
@@ -113,9 +152,10 @@ def _enqueue_task(record_id: int, fn) -> None:
     _task_queue.put((record_id, fn))
 
 
-# 启动调度线程（只启动一次）
-_runner_thread = threading.Thread(target=_queue_runner, daemon=True, name="export-queue-runner")
-_runner_thread.start()
+# 启动调度线程：本进程内起 N 个 runner，与全局槽位数一致
+for _i in range(_EXPORT_CONCURRENCY):
+    _t = threading.Thread(target=_queue_runner, daemon=True, name=f"export-queue-runner-{_i}")
+    _t.start()
 
 
 def _load_sync_config() -> dict:

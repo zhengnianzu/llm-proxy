@@ -80,6 +80,9 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
               <div class="dropdown" :class="{open:openDropdown===d.id}">
                 <button class="btn" @click.stop="toggleDropdown(d.id)" style="padding:6px 6px;font-size:.72rem">▼</button>
                 <div class="dropdown-menu">
+                  <button v-if="d.obs_dst" class="dropdown-item" @click="doDownload(d)" :disabled="d.has_tasks||d._downloading">
+                    {{d._downloading?'下载中...':'下载到本地'}}
+                  </button>
                   <button class="dropdown-item" @click="doPreview(d)" :disabled="d.has_tasks||d._previewing">
                     {{d._previewing?'统计中...':d._preview?'重新统计':'统计 signature'}}
                   </button>
@@ -288,6 +291,7 @@ methods:{
       for(var i=0;i<all.length;i++){
         this.$set(all[i],'_importing',false);
         this.$set(all[i],'_previewing',false);
+        this.$set(all[i],'_downloading',false);
         this.$set(all[i],'_preview',null);
         keySet[all[i].key_slot]=true;
       }
@@ -295,6 +299,19 @@ methods:{
       var keyCount=0;for(var k in keySet){if(keySet.hasOwnProperty(k))keyCount++}
       this.stats={exports:all.length,keys:keyCount};
     }catch(e){this.error=e.message}finally{this.loading=false}
+  },
+
+  async doDownload(d){
+    if(d.has_tasks||d._downloading)return;
+    if(!d.obs_dst){alert('该记录没有 OBS 路径');return}
+    this.$set(d,'_downloading',true);
+    try{
+      var r=await this.json('/api/reflection/datasets/'+d.id+'/download-obs',{method:'POST',headers:this.headers()});
+      alert('下载成功：'+(r.local_path||'')+'\n现在可以点「统计 signature」查看规模');
+      // 下载完目录已存在，顺手统计一次，省去用户再点一步
+      await this.doPreview(d);
+    }catch(e){alert('下载失败: '+e.message)}
+    finally{this.$set(d,'_downloading',false)}
   },
 
   async doPreview(d){

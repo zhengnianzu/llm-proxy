@@ -1,0 +1,10 @@
+active_base: logs_all
+history:
+- path: /mnt/data/newapi/logs/details/
+  name: jumper-001
+- path: /mnt/sfs_turbo/s3-asset-b-hd-cce-aifm-nlp-exp/data/oc/backup/raw/raw/details/
+  name: IP-1-95-199-64
+- path: /mnt/sfs_turbo/s3-asset-b-hd-cce-aifm-nlp-exp/raw/harness/jumper-003/data/newapi/logs/details/details/
+  name: jumper-003
+- path: /mnt/sfs_turbo/s3-asset-b-hd-cce-aifm-nlp-exp/raw/harness/proxy-004/data/newapi/logs/details/details/
+  name: proxy-004

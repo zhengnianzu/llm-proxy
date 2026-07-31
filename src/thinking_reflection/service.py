@@ -26,7 +26,7 @@ from . import db
 from .config import ReflectionConfig
 from .consumer import reflect
 from .extractor import extract_signatures
-from .importer import import_run, preview_run, validate_quality_dir
+from .importer import import_run, preview_run, validate_quality_dir, resolve_dataset_root
 from .merger import merge, append_response_message
 from .prompt_loader import load_prompt
 from .worker_manager import WorkerManager
@@ -525,7 +525,6 @@ class ReflectionService:
         if not record:
             raise ValueError("记录不存在")
         root = Path(record["local_copy_dir"])
-        cache_path = root / ".session_cache.json"
 
         needle = (search or "").strip().lower()
 
@@ -539,15 +538,10 @@ class ReflectionService:
                 ]
             return {"items": sessions[offset:offset + limit], "total": len(sessions)}
 
-        # 自动穿透：如果 root 下没有 session_analysis.json，但只有一个子目录（同名嵌套），
-        # 则往下一层查找（obsutil cp 上传目录时会把目录名本身复制进去造成双层嵌套）
+        # 自动穿透 obsutil 下载造成的单层同名嵌套（与统计/导入共用同一逻辑）
+        root = resolve_dataset_root(root)
+        cache_path = root / ".session_cache.json"
         analysis_path = root / "session_analysis.json"
-        if not analysis_path.is_file() and root.is_dir():
-            subdirs = [d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")]
-            if len(subdirs) == 1 and (subdirs[0] / "session_analysis.json").is_file():
-                root = subdirs[0]
-                analysis_path = root / "session_analysis.json"
-                cache_path = root / ".session_cache.json"
 
         if analysis_path.is_file():
             source, source_mtime = "session_analysis", analysis_path.stat().st_mtime
@@ -621,6 +615,9 @@ class ReflectionService:
     def _build_sessions_from_analysis(self, root: Path, analysis_path: Path) -> list:
         payload = json.loads(analysis_path.read_text(encoding="utf-8"))
         raw_sessions = payload.get("sessions", []) if isinstance(payload, dict) else payload
+        # v1: sessions 为 list[dict]；v2: sessions 为 dict{"0":{...},...}（值仍是 dict）
+        if isinstance(raw_sessions, dict):
+            raw_sessions = list(raw_sessions.values())
         if not isinstance(raw_sessions, list):
             raw_sessions = []
         items = []
@@ -703,7 +700,7 @@ class ReflectionService:
         record = get_record(record_id)
         if not record:
             raise ValueError("记录不存在")
-        root = Path(record["local_copy_dir"])
+        root = resolve_dataset_root(Path(record["local_copy_dir"]))
         traj_path = root / session_id / file_name
         if not traj_path.is_file():
             raise ValueError(f"文件不存在: {traj_path}")

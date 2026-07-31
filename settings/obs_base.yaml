@@ -2,7 +2,7 @@
 # 用法: sync config settings/obs_base.yaml
 
 # OBS base 路径（必填）
-obs_base: obs://bucket/llm-proxy-logs/
+obs_base: obs://s3-asset-b-hd-cce-aifm-nlp-exp/raw/proxy/
 
 # 同步间隔（秒），默认 600（10分钟）
 interval: 600

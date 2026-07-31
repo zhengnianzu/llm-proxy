@@ -18,6 +18,9 @@ def _load_session_index(root: Path) -> list[str]:
     payload = json.loads(analysis_path.read_text(encoding="utf-8"))
     sessions = []
     items = payload.get("sessions") if isinstance(payload, dict) else payload
+    # v1: sessions 为 list[dict]；v2: sessions 为 dict{"0":{...},...}（值仍是 dict）
+    if isinstance(items, dict):
+        items = list(items.values())
     if not isinstance(items, list):
         raise ValueError("session_analysis.json 格式错误")
     for entry in items:
@@ -27,11 +30,33 @@ def _load_session_index(root: Path) -> list[str]:
     return sessions
 
 
+def resolve_dataset_root(root: Path) -> Path:
+    """穿透 obsutil 下载造成的单层同名嵌套，返回真正含数据的根目录。
+
+    obsutil cp <obs>/xxx/ <local> -r 会把源目录名 xxx 本身也建到 local 下，
+    形成 local/xxx/session_analysis.json 的双层结构。若 root 下没有
+    session_analysis.json、且恰好只有一个非隐藏子目录含 session_analysis.json，
+    则下钻到该子目录。否则原样返回 root。
+
+    统计 / 导入 / 查看轨迹共用此逻辑，保证各入口对同一数据集解析出的
+    root 一致（否则会出现统计只认出 1 个 session、查看轨迹找不到文件等错乱）。
+    """
+    if not root.is_dir():
+        return root
+    if (root / "session_analysis.json").is_file():
+        return root
+    subdirs = [d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    if len(subdirs) == 1 and (subdirs[0] / "session_analysis.json").is_file():
+        return subdirs[0]
+    return root
+
+
 def _collect_files(root: Path) -> list[tuple[str, Path]]:
     """收集轨迹文件。优先 session_analysis.json 索引，否则 rglob 全扫。
 
     返回 [(session_id, file_path), ...]
     """
+    root = resolve_dataset_root(root)
     excluded = {"session_analysis.json", "session_index.json", "failure_report.json", "manifest.json"}
     analysis_path = root / "session_analysis.json"
     if analysis_path.is_file():
@@ -132,6 +157,8 @@ def preview_run(root: Path) -> dict[str, int]:
 
 
 def import_run(db_path: Path, export_id: int, root: Path, max_retries: int, detail_dir: Path) -> dict[str, int]:
+    # 与 _collect_files 一致地穿透嵌套，保证 relative / source_root 与 session_trajectory 查询口径相同
+    root = resolve_dataset_root(root)
     files = _collect_files(root)
     if not files:
         raise ValueError("目录中没有可导入的轨迹文件")
