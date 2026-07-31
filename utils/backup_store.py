@@ -6,6 +6,7 @@ SQLite 后端，记录每个 mtime 目录的 OBS 同步状态和同步日志。
 """
 
 import os
+import json
 import sqlite3
 import threading
 from datetime import datetime
@@ -82,6 +83,32 @@ def init_db(db_dir: str):
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_backup_queue_active "
             "ON backup_queue(dir_path) WHERE state IN ('queued','running')"
         )
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS raw_download_jobs (
+                job_id            TEXT PRIMARY KEY,
+                dir_path          TEXT NOT NULL,
+                obs_path          TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'queued',
+                total_files       INTEGER NOT NULL DEFAULT 0,
+                downloaded_files  INTEGER NOT NULL DEFAULT 0,
+                output_path       TEXT NOT NULL DEFAULT '',
+                error_msg         TEXT NOT NULL DEFAULT '',
+                manifest_json     TEXT NOT NULL DEFAULT '[]',
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            )
+        """)
+        # 后台线程不会跨进程恢复；重启时把遗留任务明确标为中断。
+        _conn.execute("""
+            UPDATE raw_download_jobs
+            SET status = 'failed',
+                error_msg = CASE
+                    WHEN error_msg = '' THEN '服务重启，下载任务已中断'
+                    ELSE error_msg
+                END,
+                updated_at = ?
+            WHERE status IN ('queued', 'running')
+        """, (_now(),))
         for col, definition in [
             ("sync_pid", "INTEGER DEFAULT NULL"),
             ("port",     "TEXT NOT NULL DEFAULT ''"),
@@ -473,6 +500,80 @@ def reset_running_on_startup():
     with _lock:
         _conn.execute(
             "UPDATE backup_queue SET state = 'queued', started_at = NULL WHERE state = 'running'"
+        )
+        _conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# raw_download_jobs — OBS 选择性下载任务
+# ---------------------------------------------------------------------------
+
+def create_raw_download_job(
+    job_id: str,
+    dir_path: str,
+    obs_path: str,
+    output_path: str,
+    manifest: List[dict],
+) -> None:
+    now = _now()
+    with _lock:
+        _conn.execute(
+            """INSERT INTO raw_download_jobs
+               (job_id, dir_path, obs_path, status, total_files,
+                downloaded_files, output_path, error_msg, manifest_json,
+                created_at, updated_at)
+               VALUES (?, ?, ?, 'queued', ?, 0, ?, '', ?, ?, ?)""",
+            (
+                job_id,
+                dir_path,
+                obs_path,
+                len(manifest),
+                output_path,
+                json.dumps(manifest, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        _conn.commit()
+
+
+def get_raw_download_job(job_id: str) -> Optional[dict]:
+    with _lock:
+        row = _conn.execute(
+            "SELECT * FROM raw_download_jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    try:
+        out["manifest"] = json.loads(out.pop("manifest_json", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        out["manifest"] = []
+    return out
+
+
+def update_raw_download_job(
+    job_id: str,
+    status: Optional[str] = None,
+    downloaded_files: Optional[int] = None,
+    error_msg: Optional[str] = None,
+) -> None:
+    fields = ["updated_at = ?"]
+    params: list = [_now()]
+    if status is not None:
+        fields.append("status = ?")
+        params.append(status)
+    if downloaded_files is not None:
+        fields.append("downloaded_files = ?")
+        params.append(int(downloaded_files))
+    if error_msg is not None:
+        fields.append("error_msg = ?")
+        params.append(error_msg)
+    params.append(job_id)
+    with _lock:
+        _conn.execute(
+            f"UPDATE raw_download_jobs SET {', '.join(fields)} WHERE job_id = ?",
+            params,
         )
         _conn.commit()
 

@@ -9,3 +9,4 @@ uvicorn
 openai
 jinja2
 itsdangerous
+PyYAML
