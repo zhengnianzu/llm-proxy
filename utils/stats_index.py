@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+from utils.atomic_write import safe_replace
 import time
 import threading
 from collections import defaultdict
@@ -91,7 +92,7 @@ def _save_index(env_dir: Path, data: dict) -> None:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, path)
+        safe_replace(tmp, path)
     except OSError:
         pass
 
@@ -468,7 +469,7 @@ def _save_key_cache(env_dir: Path, cache: dict) -> None:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False)
-        os.replace(tmp, path)
+        safe_replace(tmp, path)
     except OSError:
         pass
 

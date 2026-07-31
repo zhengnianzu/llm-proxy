@@ -9,6 +9,7 @@ utils/eval/reformat.py — 格式重整 + 质检一体化
 import json
 import logging
 import os
+from utils.atomic_write import safe_replace
 import signal
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -339,7 +340,7 @@ def write_eval_to_cache(logs_dir: str, results: List[dict]) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
-        os.replace(tmp, str(cache_path))
+        safe_replace(tmp, str(cache_path))
     except OSError:
         pass
 

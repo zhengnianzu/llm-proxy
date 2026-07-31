@@ -45,6 +45,7 @@ from utils.channel_routes import register_channel_routes
 from utils.user_routes import register_user_routes
 from utils.export_store import init_db as init_export_db, mark_interrupted as mark_export_interrupted
 from utils.backup_store import init_db as init_backup_db
+from utils.logdir_store import init_db as init_logdir_db, reset_building_on_startup as reset_logdir_building
 from utils.backup_routes import register_backup_routes
 from utils.obs_routes import register_obs_routes
 from utils.logs_routes import register_logs_routes
@@ -760,6 +761,8 @@ init_key_config(SERVICE_LOG_DIR)
 init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
 init_backup_db(SERVICE_LOG_DIR)
+init_logdir_db(SERVICE_LOG_DIR)
+reset_logdir_building()
 init_user_db(SERVICE_LOG_DIR)
 init_session_db(SERVICE_LOG_DIR)
 load_custom_models()

@@ -34,6 +34,7 @@ utils/migrate_q1_hash.py — 为历史数据回填 q1_hash 聚合键。
 import argparse
 import json
 import os
+from utils.atomic_write import safe_replace
 import shutil
 import sqlite3
 import sys
@@ -148,7 +149,7 @@ def backfill_index_file(repo_root: Path, index_file: Path, dry_run: bool, worker
         tmp = str(index_file) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write("\n".join(out_lines) + ("\n" if out_lines else ""))
-        os.replace(tmp, str(index_file))
+        safe_replace(tmp, str(index_file))
 
     return total, updated
 

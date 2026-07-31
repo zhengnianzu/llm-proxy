@@ -211,7 +211,8 @@ def export_session_index(logs_dir: str, force: bool = False) -> dict:
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         f.write(json.dumps(meta_line, ensure_ascii=False) + "\n")
-    os.replace(tmp_path, str(index_path))
+    from utils.atomic_write import safe_replace
+    safe_replace(tmp_path, str(index_path))
 
     logger.info("已导出 session_index.jsonl: %d 条 session, 平均 %d 轮 msg", total, avg_msg)
     return {"total_sessions": total, "avg_msg_count": avg_msg, "skipped": False}

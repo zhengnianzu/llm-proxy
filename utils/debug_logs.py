@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+from utils.atomic_write import safe_replace
 import threading
 import time
 from datetime import datetime
@@ -233,7 +234,7 @@ def _rebuild_debug_cache(debug_root: Path) -> tuple:
             tmp = str(cache_path) + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(save_cache, f, ensure_ascii=False)
-            os.replace(tmp, cache_path)
+            safe_replace(tmp, cache_path)
         except OSError:
             pass
 

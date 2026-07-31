@@ -22,6 +22,7 @@ import atexit
 import glob
 import json
 import os
+from utils.atomic_write import safe_replace
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -132,7 +133,7 @@ def _write_heartbeat():
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(snap, f, ensure_ascii=False)
-        os.replace(tmp, _hb_file)  # 原子替换，读端不会看到半截文件
+        safe_replace(tmp, _hb_file)  # 原子替换，读端不会看到半截文件
     except OSError:
         pass
 

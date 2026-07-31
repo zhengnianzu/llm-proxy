@@ -12,6 +12,7 @@ frozen 机制: index.jsonl 文件 mtime/size 不变时标记 frozen，下次跳�
 import hashlib
 import json
 import os
+from utils.atomic_write import safe_replace
 import time
 import threading
 from pathlib import Path
@@ -100,7 +101,7 @@ def _save_index(env_dir: Path, data: dict) -> None:
                 row = dict(dir_info)
                 row["dir"] = dir_key
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        os.replace(tmp, path)
+        safe_replace(tmp, path)
     except OSError:
         pass
 

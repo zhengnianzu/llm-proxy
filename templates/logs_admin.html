@@ -34,6 +34,16 @@
 .modal-field label { display: block; font-size: .82rem; color: var(--muted-foreground); margin-bottom: 5px; }
 .modal-field input { width: 100%; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.path-cell { max-width: 320px; }
+.path-text { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; cursor: pointer; }
+.path-text.expanded { white-space: normal; word-break: break-all; }
+.dropdown { position: relative; display: inline-block; }
+.dropdown-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 50; min-width: 132px; background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-md, 8px); box-shadow: var(--shadow); padding: 4px; }
+.dropdown-menu button { display: block; width: 100%; text-align: left; background: none; border: none; padding: 7px 10px; font-size: .84rem; color: var(--foreground); border-radius: 6px; cursor: pointer; }
+.dropdown-menu button:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.dropdown-menu button.danger { color: #dc2626; }
+.dropdown-menu button.danger:hover { background: color-mix(in srgb, #ef4444 10%, transparent); }
+.dropdown-menu .divider { height: 1px; background: var(--border); margin: 4px 2px; }
 {% endblock %}
 
 {% block content %}
@@ -90,7 +100,7 @@
                     <th>路径</th>
                     <th>状态</th>
                     <th>格式</th>
-                    <th class="text-center">叶子目录数</th>
+                    <th class="text-center">节点（已回填/总数）</th>
                     <th class="text-center" v-if="withSize">大小</th>
                     <th class="text-center">索引构建</th>
                     <th class="text-center">操作</th>
@@ -100,8 +110,9 @@
                 <tr v-for="r in rows" :key="r.path">
                     <td><span class="badge badge-fmt">{{ r.name || 'default' }}</span></td>
                     <td class="mono">{{ r.root_id || '-' }}</td>
-                    <td class="mono">
-                        {{ r.path }}
+                    <td class="mono path-cell">
+                        <span class="path-text" :class="{ expanded: expanded[r.path] }"
+                            :title="r.path" @click="togglePath(r.path)">{{ r.path }}</span>
                         <span v-if="r.base && r.active" style="color:var(--muted-foreground);">（base: {{ r.base }}）</span>
                     </td>
                     <td><span class="badge" :class="r.active ? 'badge-active' : 'badge-history'">{{ r.status }}</span></td>
@@ -109,34 +120,49 @@
                         <span class="badge badge-fmt" v-if="r.exists && r.format !== 'missing'">{{ fmtLabel(r.format) }}</span>
                         <span class="badge badge-missing" v-if="!r.exists">目录不存在</span>
                     </td>
-                    <td class="text-center">{{ r.leaf_count }}</td>
+                    <td class="text-center">
+                        <template v-if="r.format === 'newapi'">
+                            <span :class="builtOf(r) >= r.leaf_count && r.leaf_count > 0 ? 'msg-ok' : ''">{{ builtOf(r) }}</span>/{{ r.leaf_count }}
+                        </template>
+                        <template v-else>{{ r.leaf_count }}</template>
+                    </td>
                     <td class="text-center" v-if="withSize">{{ r.size || '-' }}</td>
                     <td class="text-center">
                         <template v-if="r.exists && r.format === 'newapi'">
-                            <template v-if="!bf[r.path] || bf[r.path].status === 'idle' || bf[r.path].status === 'done' || bf[r.path].status === 'error'">
-                                <button class="btn btn-outline btn-sm" @click="startBackfill(r.path, false)"
-                                    title="只构建/补齐首次或有新增的小时目录，跳过已就绪的">
-                                    {{ (bf[r.path] && (bf[r.path].status === 'done' || bf[r.path].status === 'error')) ? '增量构建' : '构建索引' }}
-                                </button>
-                                <button class="btn btn-outline btn-sm" style="margin-left:4px;"
-                                    v-if="bf[r.path] && (bf[r.path].status === 'done' || bf[r.path].status === 'error')"
-                                    @click="startBackfill(r.path, true)"
-                                    title="全量重建该路径下所有小时目录的 index.db（重解析合并文件，较慢）">全量</button>
-                            </template>
                             <span v-if="bf[r.path] && bf[r.path].status === 'running'" style="font-size:.8rem;">
                                 叶子 {{ bf[r.path].done_leaves }}/{{ bf[r.path].total_leaves }}<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }}）</span>
                                 <template v-if="bf[r.path].current_leaf">
                                     · {{ bf[r.path].current_leaf }}<span v-if="bf[r.path].leaf_total"> 补meta {{ bf[r.path].leaf_done }}/{{ bf[r.path].leaf_total }}</span>
                                 </template> …
                             </span>
-                            <span v-if="bf[r.path] && bf[r.path].status === 'done'" class="msg-ok" style="font-size:.78rem; margin-left:6px;">已就绪<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }} 个已构建）</span></span>
-                            <span v-if="bf[r.path] && bf[r.path].status === 'error'" class="msg-err" style="font-size:.78rem;">失败</span>
+                            <span v-else-if="bf[r.path] && bf[r.path].status === 'queued'" style="font-size:.8rem; color:var(--muted-foreground);">排队中…</span>
+                            <span v-else-if="bf[r.path] && bf[r.path].status === 'done'" class="msg-ok" style="font-size:.78rem;">已就绪<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }} 个已构建）</span></span>
+                            <span v-else-if="bf[r.path] && bf[r.path].status === 'error'" class="msg-err" style="font-size:.78rem;">失败</span>
+                            <span v-else style="color:var(--muted-foreground); font-size:.8rem;">未构建</span>
                         </template>
                         <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
                     </td>
                     <td class="text-center">
-                        <button class="btn btn-danger btn-sm" v-if="!r.active" @click="removePath(r.path)">移除</button>
-                        <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
+                        <button class="btn btn-outline btn-sm"
+                            v-if="r.exists && r.format === 'newapi'"
+                            @click="syncNodes(r.path)" :disabled="syncing[r.path]"
+                            title="扫描该源的小时目录，把新增节点写入并更新构建状态（不触发回填）">
+                            {{ syncing[r.path] ? '同步中…' : '同步' }}
+                        </button>
+                        <div class="dropdown" v-if="hasMore(r)" style="margin-left:4px;">
+                            <button class="btn btn-outline btn-sm" @click="toggleMenu(r.path)">更多 ▾</button>
+                            <div class="dropdown-menu" v-if="openMenu === r.path">
+                                <template v-if="r.exists && r.format === 'newapi'">
+                                    <button @click="menuAction(r.path, 'incremental')"
+                                        :disabled="isBuilding(r)">增量构建</button>
+                                    <button @click="menuAction(r.path, 'full')"
+                                        :disabled="isBuilding(r)">全量重建</button>
+                                </template>
+                                <div class="divider" v-if="(r.exists && r.format === 'newapi') && !r.active"></div>
+                                <button class="danger" v-if="!r.active" @click="menuAction(r.path, 'remove')">删除</button>
+                            </div>
+                        </div>
+                        <span v-if="!hasSync(r) && !hasMore(r)" style="color:var(--muted-foreground); font-size:.8rem;">—</span>
                     </td>
                 </tr>
                 <tr v-if="rows.length === 0">
@@ -164,13 +190,47 @@ new Vue({
         loading: false,
         withSize: false,
         activeBase: '',
-        bf: {},          // path -> backfill status
-        _pollTimer: null,
+        bf: {},          // path -> backfill/persisted status
+        syncing: {},     // path -> 同步进行中
+        expanded: {},    // path -> 路径是否展开
+        openMenu: null,  // 当前打开「更多」菜单的行 path
     },
     methods: {
         fmtLabel: function(f) {
             var m = { native: '本项目', newapi: 'new-api', unknown: '未知', empty: '空', missing: '缺失' };
             return m[f] || f;
+        },
+        builtOf: function(r) {
+            // 已回填叶子数：优先用实时轮询状态（回填进行中会更新），否则用 list 返回的初值
+            var s = this.bf[r.path];
+            if (s && (s.status === 'running' || s.status === 'queued' || s.status === 'done' || s.status === 'error')
+                    && typeof s.done_leaves === 'number') {
+                return s.done_leaves;
+            }
+            return r.built_count || 0;
+        },
+        togglePath: function(path) {
+            this.$set(this.expanded, path, !this.expanded[path]);
+        },
+        hasSync: function(r) {
+            return !!(r.exists && r.format === 'newapi');
+        },
+        hasMore: function(r) {
+            // 「更多」有内容：newapi 源（增量/全量），或非活跃源（删除）
+            return (r.exists && r.format === 'newapi') || !r.active;
+        },
+        isBuilding: function(r) {
+            var s = this.bf[r.path];
+            return !!(s && (s.status === 'running' || s.status === 'queued'));
+        },
+        toggleMenu: function(path) {
+            this.openMenu = (this.openMenu === path) ? null : path;
+        },
+        menuAction: function(path, action) {
+            this.openMenu = null;
+            if (action === 'incremental') this.startBackfill(path, false);
+            else if (action === 'full') this.startBackfill(path, true);
+            else if (action === 'remove') this.removePath(path);
         },
         load: function() {
             this.loading = true;
@@ -181,8 +241,9 @@ new Vue({
                     this.rows = data.rows || [];
                     this.activeBase = data.active_base || '';
                     this.loading = false;
+                    // 读一次每个 newapi 源的持久化状态（无轮询）；running 时点「刷新」再读
                     this.rows.forEach(function(r) {
-                        if (r.exists && r.format === 'newapi') this.pollBackfill(r.path);
+                        if (r.exists && r.format === 'newapi') this.refreshStatus(r.path);
                     }.bind(this));
                 }.bind(this))
                 .catch(function() { this.loading = false; }.bind(this));
@@ -236,21 +297,33 @@ new Vue({
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     if (!data.ok) { this.showMsg(data.msg || '启动失败', false); return; }
-                    this.showMsg(force ? '全量构建已启动' : '增量构建已启动', true);
-                    this.pollBackfill(path, true);
+                    this.showMsg((force ? '全量构建' : '增量构建') + '已启动，请稍后点「刷新」查看进度', true);
+                    // 严格零轮询：只读一次当前状态（可能已进入 running/queued），之后靠手动刷新
+                    this.refreshStatus(path);
                 }.bind(this))
                 .catch(function() { this.showMsg('请求失败', false); }.bind(this));
         },
-        pollBackfill: function(path, loop) {
+        syncNodes: function(path) {
+            this.$set(this.syncing, path, true);
+            fetch('/api/logs-admin/sync', {
+                method: 'POST',
+                headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    this.$set(this.syncing, path, false);
+                    this.showMsg(data.msg || (data.ok ? '同步完成' : '同步失败'), data.ok);
+                    if (data.ok) this.load();   // 刷新一次列表（读 DB 汇总）
+                }.bind(this))
+                .catch(function() { this.$set(this.syncing, path, false); this.showMsg('请求失败', false); }.bind(this));
+        },
+        refreshStatus: function(path) {
+            // 一次性读持久化 + 运行态汇总，写入 bf[path]。无 setTimeout、无轮询。
             fetch('/api/logs-admin/backfill-status?path=' + encodeURIComponent(path),
                   { headers: { 'x-requested-with': 'XMLHttpRequest' } })
                 .then(function(r) { return r.json(); })
-                .then(function(st) {
-                    this.$set(this.bf, path, st);
-                    if (st.status === 'running' || loop) {
-                        setTimeout(function() { this.pollBackfill(path, st.status === 'running'); }.bind(this), 2000);
-                    }
-                }.bind(this))
+                .then(function(st) { this.$set(this.bf, path, st); }.bind(this))
                 .catch(function() {});
         },
         showMsg: function(msg, ok) {
@@ -258,7 +331,17 @@ new Vue({
             setTimeout(function() { this.msg = ''; }.bind(this), 4000);
         }
     },
-    mounted: function() { this.load(); }
+    mounted: function() {
+        this.load();
+        // 点击菜单外部时关闭「更多」下拉
+        this._closeMenu = function(e) {
+            if (!e.target.closest || !e.target.closest('.dropdown')) this.openMenu = null;
+        }.bind(this);
+        document.addEventListener('click', this._closeMenu);
+    },
+    beforeDestroy: function() {
+        if (this._closeMenu) document.removeEventListener('click', this._closeMenu);
+    }
 });
 </script>
 {% endblock %}

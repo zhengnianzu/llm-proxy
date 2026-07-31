@@ -19,6 +19,7 @@ utils/logs_config.py — 多日志路径配置
 
 import hashlib
 import os
+from utils.atomic_write import safe_replace
 import threading
 from pathlib import Path
 from typing import List, Optional
@@ -75,7 +76,7 @@ def _save_raw(data: dict) -> None:
         tmp = str(path) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
-        os.replace(tmp, str(path))
+        safe_replace(tmp, str(path))
     except OSError:
         pass
 

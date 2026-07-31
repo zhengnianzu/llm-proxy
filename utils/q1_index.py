@@ -9,6 +9,7 @@ utils/q1_index.py — Q1 修正机制
 import hashlib
 import json
 import os
+from utils.atomic_write import safe_replace
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -60,7 +61,7 @@ def _save_overrides(log_dir: str, data: Dict[str, Any]) -> None:
         os.makedirs(path.parent, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=None)
-        os.replace(tmp, str(path))
+        safe_replace(tmp, str(path))
     except OSError:
         return
 
