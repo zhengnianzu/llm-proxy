@@ -162,7 +162,16 @@
                 <option value="">全部 log_dir</option>
                 <option v-for="mt in config.mtimes" :key="mt" :value="mt">{{ mt }}</option>
             </select>
-            <small class="text-muted" v-if="keyFilter || modelFilter || modelKw || logDirFilter">匹配 {{ filteredKeys.length }} / {{ keys.length }}</small>
+            <select class="input input-sm" v-model="statusFilter" style="max-width:150px">
+                <option value="">全部状态</option>
+                <option value="success">已完成</option>
+                <option value="failed">失败</option>
+                <option value="running">运行中</option>
+                <option value="queued">排队中</option>
+                <option value="cancelled">已取消</option>
+                <option value="none">无导出记录</option>
+            </select>
+            <small class="text-muted" v-if="keyFilter || modelFilter || modelKw || logDirFilter || statusFilter">匹配 {{ filteredKeys.length }} / {{ keys.length }}</small>
             <small class="text-muted" v-if="modelFilter || modelKw">· <strong>{{ modelFilter || modelKw }}</strong> 共 {{ modelFilterCount }} 条</small>
         </div>
 
@@ -209,11 +218,12 @@
             <div v-if="k.records && k.records.length" style="margin-top:10px;">
                 <small class="text-muted" style="font-weight:600">导出历史:</small>
                 <div v-for="r in k.records" :key="r.id" class="record-row">
-                    <span class="badge" :class="{'badge-success': r.status === 'success', 'badge-danger': r.status === 'failed', 'badge-warning': r.status === 'running' || r.status === 'queued', 'badge-muted': r.status === 'pending' || r.status === 'cancelled'}">{{ statusText(r.status, r.mode) }}</span>
+                    <span class="badge" :class="{'badge-success': r.status === 'success', 'badge-danger': r.status === 'failed', 'badge-warning': r.status === 'running' || r.status === 'queued' || r.status === 'pending', 'badge-muted': r.status === 'cancelled'}">{{ statusText(r.status, r.mode) }}</span>
                     <span v-if="r.mode === 'eval'" class="badge badge-info" style="font-size:.68rem">质检</span>
+                    <span v-else-if="r.mode === 'reformat'" class="badge badge-info" style="font-size:.68rem">合并</span>
                     <span>{{ r.created_at }}</span>
                     <span class="text-muted">
-                        {{ r.total_sessions }} sessions<span v-if="r.mode !== 'eval'"> / {{ r.files_uploaded }} files</span>
+                        {{ r.total_sessions }} sessions<span v-if="r.mode === 'export'"> / {{ r.files_uploaded }} files</span>
                     </span>
                     <span v-if="r.obs_dst && r.status === 'success'"
                           style="cursor:pointer;font-size:.8rem;color:var(--primary)" @click="openDrawer(r.obs_dst)">
@@ -222,10 +232,15 @@
                     <span style="cursor:pointer;font-size:.8rem;color:var(--primary)" @click="openLogDrawer(r.id)">
                         [详情]
                     </span>
-                    <span v-if="r.status === 'queued'"
+                    <span v-if="r.status === 'running' || r.status === 'queued' || r.status === 'pending'"
                           style="cursor:pointer;font-size:.8rem;color:var(--destructive);font-weight:600"
                           @click="cancelTask(r)">
-                        [取消]
+                        [终止]
+                    </span>
+                    <span v-if="r.status === 'failed' || r.status === 'cancelled'"
+                          style="cursor:pointer;font-size:.8rem;color:var(--primary);font-weight:600"
+                          @click="retryTask(r)">
+                        [重试]
                     </span>
                     <span v-if="r.status === 'failed' && r.obs_dst && r.local_copy_dir"
                           style="cursor:pointer;font-size:.8rem;color:var(--warning);font-weight:600"
@@ -247,17 +262,19 @@
                           @click="openNameModal(r)">
                         {{ r._importing ? '[导入中…]' : '[导入数据集管理]' }}
                     </span>
-                    <span v-if="r.error_message" style="font-size:.78rem;color:var(--destructive)">{{ r.error_message }}</span>
+                    <span v-if="r.error_message && r.status === 'failed'" style="font-size:.78rem;color:var(--destructive)">{{ r.error_message }}</span>
                 </div>
             </div>
         </div>
     </div>
 
-    <div v-else-if="!loading" class="card no-data">
+    <div v-else-if="keysLoaded && !loading" class="card no-data">
         暂无 Key 统计数据，请点击「刷新统计」
     </div>
 
-    <div v-if="loading" class="text-center text-muted py-3">加载中…</div>
+    <div v-if="loading" class="card text-center text-muted py-3">
+        统计加载中…（首次或导出高峰时需扫盘，稍候；此期间其他操作不受影响）
+    </div>
     <div v-if="error" class="alert alert-danger py-2 small mt-2">{{ error }}</div>
 
     <!-- Log Drawer -->
@@ -273,7 +290,8 @@
             <div class="drawer-body">
                 <div v-if="logLoading" class="text-muted small py-3 text-center">加载中…</div>
                 <div v-else-if="logEntries.length" style="font-family:var(--font-mono);font-size:.8rem;line-height:1.6;background:var(--panel-dark-bg);color:var(--panel-dark-text);padding:10px;border-radius:var(--radius);">
-                    <div v-for="(entry, i) in logEntries" :key="i">
+                    <div v-if="logEntries.length > logTailLimit" style="color:var(--panel-dark-muted);padding-bottom:4px;">…省略前 {{ logEntries.length - logTailLimit }} 条，仅显示最后 {{ logTailLimit }} 条</div>
+                    <div v-for="(entry, i) in visibleLogEntries" :key="i">
                         <span style="color:var(--panel-dark-muted);">{{ entry.ts }}</span> {{ entry.msg }}
                     </div>
                 </div>
@@ -310,12 +328,16 @@
                 <input type="text" class="input input-sm" v-model="obsPrefix" placeholder="obs://bucket/path（可选，留空仅本地复制）">
             </div>
             <div v-if="obsPrefix" class="obs-preview">
-                目标: {{ obsPrefix.replace(/\/+$/, '') }}/{{ autoEval ? 'session_analysis' : 'session' }}/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
+                目标: {{ obsPrefix.replace(/\/+$/, '') }}/{{ exportMode === 'export' ? 'session' : 'session_analysis' }}/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
             </div>
             <div class="mb-3 mt-2">
-                <div class="form-check">
-                    <input type="checkbox" class="form-check-input" v-model="autoEval" id="eval-check">
-                    <label class="form-check-label small" for="eval-check">质检模式（reformat+分析，不导出原始文件）</label>
+                <div class="mb-2">
+                    <label class="form-label small mb-1">导出模式</label>
+                    <select class="input input-sm" v-model="exportMode">
+                        <option value="export">导出原始文件（三元组，不分析）</option>
+                        <option value="reformat">合并导出（三元组合并成单 JSON，不质检）</option>
+                        <option value="eval">质检模式（reformat+分析，出报告）</option>
+                    </select>
                 </div>
                 <div class="form-check mt-1">
                     <input type="checkbox" class="form-check-input" v-model="forceExport" id="force-check">
@@ -325,7 +347,7 @@
             <div class="flex justify-end gap-2">
                 <button class="btn btn-outline btn-sm" @click="showModal = false">取消</button>
                 <button class="btn btn-primary btn-sm" style="background:var(--success);border-color:var(--success);" @click="runExport" :disabled="exporting || !selectedMtimes.length">
-                    {{ exporting ? '执行中…' : (autoEval ? '开始质检' : '开始导出') }}
+                    {{ exporting ? '执行中…' : ({export:'开始导出', reformat:'开始合并导出', eval:'开始质检'}[exportMode]) }}
                 </button>
             </div>
         </div>
@@ -392,6 +414,7 @@ new Vue({
         obsPrefix: '',
         keys: [],
         loading: false,
+        keysLoaded: false,
         lastRefreshTs: 0,
         error: '',
         keyFilter: '',
@@ -399,6 +422,7 @@ new Vue({
         modelFilter: '',
         modelKw: '',
         logDirFilter: '',
+        statusFilter: '',
         pillsOpen: {},
         pillsOverflow: {},
 
@@ -408,6 +432,7 @@ new Vue({
         selectedMtimes: [],
         forceExport: false,
         autoEval: false,
+        exportMode: 'export',
         exporting: false,
         nowTag: '',
 
@@ -426,11 +451,13 @@ new Vue({
         logVisible: false,
         logRecordId: null,
         logEntries: [],
+        logTailLimit: 50,
         logLoading: false,
         logPollTimer: null,
 
         backfill: { enabled: false, running: false, current_name: null, current_status: null, queued: [], queue_len: 0, roots: [] },
         backfillTimer: null,
+        recordsTimer: null,
     },
     directives: {
         pillClamp: {
@@ -453,6 +480,11 @@ new Vue({
         },
     },
     computed: {
+        // 日志只渲染最后 logTailLimit 条，避免 reformat/analyze 上万条进度拖垮抽屉、跟不上进度
+        visibleLogEntries: function() {
+            if (this.logEntries.length <= this.logTailLimit) return this.logEntries;
+            return this.logEntries.slice(this.logEntries.length - this.logTailLimit);
+        },
         lastRefreshTime: function() {
             if (!this.lastRefreshTs) return '';
             var d = new Date(this.lastRefreshTs * 1000);
@@ -485,7 +517,16 @@ new Vue({
                 });
                 var ld = this.logDirFilter;
                 var logDirOk = !ld || (k.mtime_distribution && k.mtime_distribution[ld]);
-                return textOk && modelOk && kwOk && logDirOk;
+                var sf = this.statusFilter;
+                var recs = k.records || [];
+                // queued 筛选同时命中 pending（UI 都显示「排队中」）
+                var statusOk = !sf ||
+                       (sf === 'none' ? recs.length === 0
+                                      : recs.some(function(r) {
+                                            return r.status === sf ||
+                                                   (sf === 'queued' && r.status === 'pending');
+                                        }));
+                return textOk && modelOk && kwOk && logDirOk && statusOk;
             }, this);
         },
         modelFilterCount: function() {
@@ -537,11 +578,14 @@ new Vue({
         // 回填在后台串行跑，页面轮询展示进度；跑完后自动刷新统计让数字收敛
         var self = this;
         this.backfillTimer = setInterval(function() { self.fetchBackfill(); }, 4000);
+        // 轻量记录轮询：每 3s 只更新每张卡片的记录状态/进度（不触发重的 /keys 扫盘）
+        this.recordsTimer = setInterval(function() { self.fetchRecordsSlim(); }, 3000);
     },
     beforeDestroy: function() {
         if (this.pollTimer) clearInterval(this.pollTimer);
         if (this.logPollTimer) clearInterval(this.logPollTimer);
         if (this.backfillTimer) clearInterval(this.backfillTimer);
+        if (this.recordsTimer) clearInterval(this.recordsTimer);
     },
     methods: {
         isPillsOpen: function(k) {
@@ -617,14 +661,34 @@ new Vue({
                 if (e !== 'auth') this.error = '加载失败: ' + e;
             }.bind(this)).finally(function() {
                 this.loading = false;
+                this.keysLoaded = true;
             }.bind(this));
         },
 
+        fetchRecordsSlim: function() {
+            // 轻量轮询：只拉 export_records（按 slot 分组），就地更新每张卡片的
+            // records，让 queued→running→success 的状态切换及时可见，
+            // 而不触发重的 /api/export/keys（含跨 root 统计扫盘）。
+            var self = this;
+            fetch('/api/export/records-slim', {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var bySlot = d.records_by_slot || {};
+                    self.keys.forEach(function(k) {
+                        var recs = bySlot[k.key_slot];
+                        if (recs) self.$set(k, 'records', recs);
+                    });
+                })
+                .catch(function() {});
+        },
+
         statusText: function(s, mode) {
-            if (mode === 'eval') {
-                return { pending: '等待中', queued: '排队中', running: '质检中', success: '成功', failed: '失败', cancelled: '已取消' }[s] || s;
-            }
-            return { pending: '等待中', queued: '排队中', running: '导出中', success: '成功', failed: '失败', cancelled: '已取消' }[s] || s;
+            // 统一文案，不再按 mode（export/reformat/eval）分「导出中/合并中/质检中」。
+            // pending 视作即将排队，并入「排队中」。
+            return {
+                pending: '排队中', queued: '排队中', running: '运行中',
+                success: '已完成', failed: '失败', cancelled: '已取消',
+            }[s] || s;
         },
 
         openExportModal: function(k) {
@@ -650,7 +714,7 @@ new Vue({
                 mtime_dirs: this.selectedMtimes,
                 obs_prefix: this.obsPrefix,
                 force: this.forceExport,
-                auto_eval: this.autoEval,
+                mode: this.exportMode,
             };
             fetch('/api/export/run', {
                 method: 'POST',
@@ -832,9 +896,30 @@ new Vue({
                 body: JSON.stringify({record_id: r.id}),
             }).then(function(res) { return res.json(); }).then(function(d) {
                 if (d.status === 'cancelled') {
-                    this.fetchKeys();
+                    // 乐观更新本地状态，即时反馈；records-slim 3s 轮询会确认。
+                    // 不调重的 fetchKeys（导出高峰时可能慢）。
+                    this.$set(r, 'status', 'cancelled');
                 } else {
-                    this.error = d.detail || '取消失败';
+                    this.error = d.detail || '终止失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this));
+        },
+
+        retryTask: function(r) {
+            // 整任务重跑：后端用原记录参数新建一条记录入队；原记录保留作历史。
+            fetch('/api/export/retry', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({record_id: r.id}),
+            }).then(function(res) { return res.json(); }).then(function(d) {
+                if (d.record_id) {
+                    // 新记录属同一 key_slot，records-slim 3s 轮询会自动带出并显示"排队中"。
+                    // 先立即拉一次轻量记录，缩短可见延迟；不调重的 fetchKeys。
+                    this.fetchRecordsSlim();
+                } else {
+                    this.error = d.detail || '重试失败';
                 }
             }.bind(this)).catch(function(e) {
                 this.error = '请求失败: ' + e;

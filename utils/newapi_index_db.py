@@ -16,13 +16,51 @@ q1_hash/msg_count/user_turns，导致历史/导出聚合必须逐个打开 ~1MB 
 """
 
 import json
+import multiprocessing as mp
 import os
 import sqlite3
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# enrich 进程池用 spawn 启动，而非默认 fork。
+# 本进程是多线程（Flask + 后台调度 + asyncio 线程池），fork worker 会继承父进程
+# 在 fork 那一刻处于加锁状态的锁（stdout flush 锁 / sqlite 锁等），worker 一 flush
+# 便永久阻塞在 _flush_std_streams，进而 ProcessPoolExecutor.__exit__ 的 join 死等——
+# 回填卡死不前。spawn 每个 worker 全新解释器、不继承父进程锁，彻底规避此类挂死。
+# （Python 3.14 起 fork 多线程程序即弃用；此处提前显式指定 spawn。）
+_MP_CTX = mp.get_context("spawn")
+
+
+class LeafStalledError(Exception):
+    """enrich 某叶子的进程池长时间无进展（多为 NFS 读被 hard 挂载死等阻塞）。
+    上层据此「跳过该叶子 + 预警」，让整轮回填继续，而非被单个卡死叶子拖住。"""
+
+    def __init__(self, leaf_dir: str, done: int, total: int, elapsed: float):
+        self.leaf_dir = leaf_dir
+        self.done = done
+        self.total = total
+        self.elapsed = elapsed
+        super().__init__(
+            f"leaf enrich stalled: {leaf_dir} done={done}/{total} elapsed={elapsed:.0f}s"
+        )
+
+
+def _reap_pool_async(pool: "ProcessPoolExecutor") -> None:
+    """后台收尸卡死的进程池：不阻塞主流程。
+    残留 worker 多处于 D（不可中断）状态，SIGKILL 也未必能立刻杀掉，需等 NFS
+    读 RPC 返回后才退出——故此处在 daemon 线程里 shutdown(wait=True) 慢慢等，
+    调用方已 shutdown(wait=False, cancel_futures=True) 抛弃它、继续往下跑。"""
+    def _reap():
+        try:
+            pool.shutdown(wait=True)
+        except Exception:  # noqa: BLE001 — 收尸尽力而为，失败不影响主流程
+            pass
+
+    t = threading.Thread(target=_reap, name="newapi-enrich-pool-reaper", daemon=True)
+    t.start()
 
 _INDEX_NAME = "index.jsonl"
 _DB_NAME = "index.db"
@@ -30,6 +68,16 @@ _DB_NAME = "index.db"
 # enrich 失败重试上限：合并文件「尚未落盘」是活跃叶子的常态瞬态失败，
 # 保持 q1_hash=NULL 让后续构建重扫重试；累计到此上限仍失败才标死（q1_hash=''）永久跳过。
 _MAX_ENRICH_ATTEMPTS = 3
+
+# enrich 分片粒度：每个进程池任务处理的合并文件数（固定，不随文件总数放大）。
+# 关键——单 worker 常驻内存 ≈ 一个分片的解析结果 × 并行 worker 数；分片按 worker 均分时，
+# 巨型叶子（如单小时 10w+ 文件）每片会攒上千条结果 ×8 并行，峰值溢出被 OOM kill。
+# 固定小片让单 worker 内存与文件总数解耦：份数随文件数增长，每份始终 ~此值。
+# 可用 NEWAPI_ENRICH_CHUNK_SIZE 覆盖。
+try:
+    _ENRICH_CHUNK_SIZE = max(1, int(os.getenv("NEWAPI_ENRICH_CHUNK_SIZE", "200")))
+except ValueError:
+    _ENRICH_CHUNK_SIZE = 200
 
 # 每叶子一把写锁（同进程内串行写；跨实例互斥由上层 dispatcher + leader_lock 负责）
 _leaf_locks: Dict[str, threading.Lock] = {}
@@ -288,10 +336,13 @@ def _chunk(items: List[Any], n: int) -> List[List[Any]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def enrich(leaf_dir: str, workers: int = 8, progress_cb=None) -> Dict[str, Any]:
+def enrich(leaf_dir: str, workers: int = 8, progress_cb=None,
+           stall_timeout: float = 300.0) -> Dict[str, Any]:
     """Stage 2：把 requests 中 q1_hash IS NULL 的行补齐 meta。叶子内分片并行。
 
     progress_cb(done, total) 可选，供上层刷新进度。返回 {enriched, total}。
+    stall_timeout：进程池「距上次有分片完成」超过此秒数仍有未完成分片，判定卡住
+    （多为 NFS 读被 hard 挂载死等），抛弃池并 raise LeafStalledError，交上层跳过。
     """
     if not _db_exists(leaf_dir):
         return {"enriched": 0, "total": 0}
@@ -308,7 +359,10 @@ def enrich(leaf_dir: str, workers: int = 8, progress_cb=None) -> Dict[str, Any]:
         return {"enriched": 0, "total": 0}
 
     workers = max(1, min(int(workers or 1), (os.cpu_count() or 4)))
-    chunks = _chunk(pending, workers * 4)  # 多于 worker 数，便于负载均衡与进度粒度
+    # 固定片大小切分：份数 = ceil(total / chunk_size)，至少 workers 份（保证并行用满）。
+    # 每片 ~_ENRICH_CHUNK_SIZE 条，单 worker 常驻内存不随文件总数放大 → 巨型叶子不再 OOM。
+    n_chunks = max(workers, (total + _ENRICH_CHUNK_SIZE - 1) // _ENRICH_CHUNK_SIZE)
+    chunks = _chunk(pending, n_chunks)
     done = 0
 
     def _apply(rows: List[tuple]) -> None:
@@ -347,10 +401,34 @@ def enrich(leaf_dir: str, workers: int = 8, progress_cb=None) -> Dict[str, Any]:
         for ch in chunks:
             _apply(_worker_enrich(leaf_dir, ch))
     else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
+        # 手动持有池（不用 with：其 __exit__ 会 join 死等卡死的 D-worker）。
+        # 盯「上次有分片完成」的时刻：一段 stall_timeout 内无任何分片完成，
+        # 判定卡住 → 抛弃池（后台收尸）并 raise，交上层跳过该叶子。
+        pool = ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CTX)
+        clean = False
+        try:
             futs = {pool.submit(_worker_enrich, leaf_dir, ch): ch for ch in chunks}
-            for fut in as_completed(futs):
-                _apply(fut.result())
+            pending = set(futs)
+            last_progress = time.monotonic()
+            while pending:
+                finished, pending = wait(
+                    pending, timeout=stall_timeout, return_when=FIRST_COMPLETED)
+                if not finished:
+                    # 本轮超时窗口内一个分片都没完成 → 卡住
+                    raise LeafStalledError(
+                        leaf_dir, done, total, time.monotonic() - last_progress)
+                for fut in finished:
+                    _apply(fut.result())
+                last_progress = time.monotonic()
+            clean = True
+        finally:
+            if clean:
+                # 全部分片正常完成：worker 已空闲，join 立即返回
+                pool.shutdown(wait=True)
+            else:
+                # 卡死 or 其它异常：不 join（可能被 D-worker 拖死），抛弃 + 后台收尸
+                pool.shutdown(wait=False, cancel_futures=True)
+                _reap_pool_async(pool)
 
     return {"enriched": done, "total": total}
 
@@ -483,10 +561,13 @@ def _agg_one(r: sqlite3.Row, sessions: Dict[str, Dict[str, Any]],
 
 # ── 一条龙（批量构建用）────────────────────────────────────────────────────
 
-def build_leaf(leaf_dir: str, workers: int = 8, progress_cb=None) -> Dict[str, Any]:
-    """ingest → enrich → rebuild_sessions 一条龙。返回汇总统计。"""
+def build_leaf(leaf_dir: str, workers: int = 8, progress_cb=None,
+               stall_timeout: float = 300.0) -> Dict[str, Any]:
+    """ingest → enrich → rebuild_sessions 一条龙。返回汇总统计。
+    enrich 卡住会 raise LeafStalledError（不吞），交上层 _run 跳过该叶子。"""
     ingested = ingest(leaf_dir)
-    en = enrich(leaf_dir, workers=workers, progress_cb=progress_cb)
+    en = enrich(leaf_dir, workers=workers, progress_cb=progress_cb,
+                stall_timeout=stall_timeout)
     n_sessions = rebuild_sessions(leaf_dir)
     return {
         "ingested": ingested,
@@ -519,6 +600,11 @@ def needs_build(leaf_dir: str) -> bool:
         offset = int(_meta_get(conn, "ingest_offset", "0") or "0")
         pending = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE q1_hash IS NULL").fetchone()["c"]
         dirty = _meta_get(conn, "sessions_dirty", "1") == "1"
+    except sqlite3.OperationalError:
+        # db 文件存在但表缺失/损坏（多为上次构建中途被 kill，如 OOM，留下的半成品）：
+        # 视为「需要重建」，切勿抛异常——否则会拖垮整个 root 的 needs_build 遍历，
+        # 导致「增量构建」对该 root 一个叶子都不跑（整批被外层 except 判 error）。
+        return True
     finally:
         conn.close()
     try:

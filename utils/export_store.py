@@ -150,7 +150,10 @@ def update_status(record_id: int, status: str, **kwargs):
 
 def get_record(record_id: int) -> Optional[dict]:
     conn = _get_conn()
-    row = conn.execute("SELECT * FROM export_records WHERE id = ?", (record_id,)).fetchone()
+    # 共享连接（check_same_thread=False）：读也必须持锁，否则与并发写交错会触发
+    # sqlite3 "another row available"（同一连接上有未取完的语句时再 execute）。
+    with _lock:
+        row = conn.execute("SELECT * FROM export_records WHERE id = ?", (record_id,)).fetchone()
     return dict(row) if row else None
 
 
@@ -178,18 +181,20 @@ def get_record_with_analysis(record_id: int) -> Optional[dict]:
 
 def list_records(limit: int = 100) -> list:
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM export_records ORDER BY created_at DESC LIMIT ?", (limit,)
-    ).fetchall()
+    with _lock:
+        rows = conn.execute(
+            "SELECT * FROM export_records ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
 def list_records_by_key(key_slot: str, limit: int = 50) -> list:
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM export_records WHERE key_slot = ? ORDER BY created_at DESC LIMIT ?",
-        (key_slot, limit),
-    ).fetchall()
+    with _lock:
+        rows = conn.execute(
+            "SELECT * FROM export_records WHERE key_slot = ? ORDER BY created_at DESC LIMIT ?",
+            (key_slot, limit),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -222,7 +227,8 @@ def list_records_for_datasets(limit: int = 1000, in_manage: Optional[bool] = Non
         params.append(1 if in_manage else 0)
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
-    rows = conn.execute(sql, params).fetchall()
+    with _lock:
+        rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -264,18 +270,20 @@ def get_records_summary() -> tuple:
     """返回 (max_id, count, running_count)，用于快速判断 export_records 是否有变化。
     running_count 用于检测 status 从 running/queued → success/failed 的变化。"""
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT MAX(id), COUNT(*), SUM(CASE WHEN status IN ('running','queued') THEN 1 ELSE 0 END) FROM export_records"
-    ).fetchone()
+    with _lock:
+        row = conn.execute(
+            "SELECT MAX(id), COUNT(*), SUM(CASE WHEN status IN ('running','queued') THEN 1 ELSE 0 END) FROM export_records"
+        ).fetchone()
     return (row[0] or 0, row[1] or 0, row[2] or 0)
 
 
 def list_records_all_slim(limit_per_key: int = 10) -> dict:
     """一次查询所有 records（排除 progress_log 等大字段），按 key_slot 分组返回。"""
     conn = _get_conn()
-    rows = conn.execute(
-        f"SELECT {_SLIM_COLS} FROM export_records ORDER BY created_at DESC"
-    ).fetchall()
+    with _lock:
+        rows = conn.execute(
+            f"SELECT {_SLIM_COLS} FROM export_records ORDER BY created_at DESC"
+        ).fetchall()
     grouped: dict = {}
     for r in rows:
         d = dict(r)
@@ -288,7 +296,11 @@ def list_records_all_slim(limit_per_key: int = 10) -> dict:
 
 
 def mark_interrupted():
-    """启动时将遗留的 running/queued 记录标记为 failed/cancelled。"""
+    """启动时将遗留的 running/queued 记录标记为 failed/cancelled。
+
+    已被 requeue_interrupted() 取代（自动重新入队而非直接判失败）；保留供无法
+    重建任务的场景兜底。当前不再由启动流程调用。
+    """
     conn = _get_conn()
     with _lock:
         conn.execute(
@@ -300,6 +312,52 @@ def mark_interrupted():
             "finished_at = datetime('now','localtime') WHERE status = 'queued'"
         )
         conn.commit()
+
+
+def cancel_interrupted() -> int:
+    """启动时把所有遗留的 running/queued/pending 任务直接取消，队列从零开始。
+
+    不再重新入队（此前的 take_interrupted + _requeue_interrupted 会在频繁重启时
+    反复重建任务并刷屏日志）。重启即视为放弃上一轮排队：全部标 cancelled，
+    用户可在页面上按需手动重跑。返回受影响行数。
+    """
+    conn = _get_conn()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE export_records SET status = 'cancelled', "
+            "error_message = '服务重启，队列已清空', "
+            "finished_at = datetime('now','localtime') "
+            "WHERE status IN ('running', 'queued', 'pending')"
+        )
+        conn.commit()
+    return cur.rowcount
+
+
+def take_interrupted() -> list:
+    """启动时取出被重启打断的记录（running/queued），置回 pending 待重新入队。
+
+    返回完整记录行（dict）列表，供上层用其持久化字段重建任务再入队。
+    置为 pending（而非直接 failed）：这样即使重建/入队失败，记录也停在 pending
+    而非误报成功；成功重新入队后 _enqueue_task 会把它推进为 queued。
+
+    已被 cancel_interrupted() 取代（重启即清空队列而非重建）；保留供需要
+    「重启后自动续跑」的场景切回使用。当前不再由启动流程调用。
+    """
+    conn = _get_conn()
+    with _lock:
+        rows = conn.execute(
+            "SELECT * FROM export_records WHERE status IN ('running', 'queued') "
+            "ORDER BY id"
+        ).fetchall()
+        recs = [dict(r) for r in rows]
+        if recs:
+            conn.execute(
+                "UPDATE export_records SET status = 'pending', error_message = '', "
+                "started_at = NULL, finished_at = NULL "
+                "WHERE status IN ('running', 'queued')"
+            )
+            conn.commit()
+    return recs
 
 
 def append_log(record_id: int, message: str):

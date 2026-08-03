@@ -100,9 +100,40 @@ do_stop() {
         echo "[server] Force-killing PID $PID (group $PGID)"
         _sig KILL
     fi
+    # 兜底清理残余的 multiprocessing spawn worker。
+    # 这些是 index.db 回填/reformat 进程池 fork 出的子进程；父 master 崩溃/被强杀时它们会
+    # 被 reparent 成 PPID=1 的孤儿、脱离原进程组，上面按进程组的 KILL 杀不到它们，
+    # 于是每次 stop 后残留、随重启单调累积 → 吃爆内存 → OOM 反复重启。此处按命令特征收尾清掉。
+    _reap_spawn_orphans
     rm -f "$PID_FILE"
     wait_port_free
     echo "[server] Stopped"
+}
+
+_reap_spawn_orphans() {
+    # 只清 PPID=1（父已死）、命令行含 multiprocessing-fork 的孤儿 worker，绝不碰仍挂在活进程下的。
+    local pids
+    pids=$(pgrep -f "multiprocessing.spawn.*multiprocessing-fork" 2>/dev/null || true)
+    [ -z "$pids" ] && return 0
+    local orphans="" p ppid
+    for p in $pids; do
+        ppid=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo "")
+        [ "$ppid" = "1" ] && orphans="$orphans $p"
+    done
+    [ -z "${orphans// }" ] && return 0
+    echo "[server] Reaping orphan spawn workers:$orphans"
+    # shellcheck disable=SC2086
+    kill -TERM $orphans 2>/dev/null || true
+    sleep 2
+    # 补刀仍存活的
+    local survivors=""
+    for p in $orphans; do
+        kill -0 "$p" 2>/dev/null && survivors="$survivors $p"
+    done
+    if [ -n "${survivors// }" ]; then
+        # shellcheck disable=SC2086
+        kill -KILL $survivors 2>/dev/null || true
+    fi
 }
 
 do_status() {

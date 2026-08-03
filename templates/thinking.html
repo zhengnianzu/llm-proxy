@@ -20,7 +20,7 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
 .file-item{padding:6px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between}.file-name{font-family:var(--font-mono,monospace);color:var(--primary);font-size:.8rem}.file-size{color:var(--muted-foreground);font-size:.76rem}
 .action-cell{display:flex;gap:4px;align-items:center;position:relative}
 .dropdown{position:relative;display:inline-block}
-.dropdown-menu{display:none;position:absolute;right:0;top:100%;min-width:120px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:50;padding:4px 0}
+.dropdown-menu{display:none;position:fixed;min-width:120px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:950;padding:4px 0}
 .dropdown.open .dropdown-menu{display:block}
 .dropdown-item{display:block;width:100%;padding:6px 12px;border:none;background:none;color:var(--foreground);font-size:.78rem;text-align:left;cursor:pointer;white-space:nowrap}
 .dropdown-item:hover{background:var(--accent)}
@@ -78,8 +78,8 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
             <div class="action-cell">
               <a class="btn" :href="'/thinking/dataset/'+d.id">查看</a>
               <div class="dropdown" :class="{open:openDropdown===d.id}">
-                <button class="btn" @click.stop="toggleDropdown(d.id)" style="padding:6px 6px;font-size:.72rem">▼</button>
-                <div class="dropdown-menu">
+                <button class="btn" @click.stop="toggleDropdown(d.id,$event)" style="padding:6px 6px;font-size:.72rem">▼</button>
+                <div class="dropdown-menu" :style="openDropdown===d.id?dropdownStyle:null">
                   <button v-if="d.obs_dst" class="dropdown-item" @click="doDownload(d)" :disabled="d.has_tasks||d._downloading">
                     {{d._downloading?'下载中...':'下载到本地'}}
                   </button>
@@ -225,7 +225,7 @@ button{cursor:pointer}.btn{border:1px solid var(--border);background:var(--card)
 new Vue({el:'#thinkingApp',data:{
   allDatasets:[],loading:false,error:'',config:null,
   stats:{exports:0,keys:0},
-  openDropdown:null,
+  openDropdown:null,dropdownStyle:{},
   obsDrawer:false,obsPath:'',obsFiles:[],obsLoading:false,obsError:'',
   registerDrawer:false,regObs:'',regName:'',regSessions:null,regBusy:false,regError:'',
   addDrawer:false,avail:[],availLoading:false,availSearch:'',selectedIds:[],addBusy:false,
@@ -235,6 +235,8 @@ new Vue({el:'#thinkingApp',data:{
 },async mounted(){
   var self=this;
   document.addEventListener('click',function(){self.openDropdown=null});
+  // fixed 定位的菜单不跟随滚动，滚动时直接收起，避免位置错位
+  window.addEventListener('scroll',function(){self.openDropdown=null},true);
   try{await this.load()}catch(e){this.error='初始化失败: '+e.message}
 },
 computed:{
@@ -248,7 +250,18 @@ methods:{
   async json(url,opt){var r=await fetch(url,opt);var d=await r.json();if(!r.ok)throw Error(d.detail||'请求失败');return d},
   headers:function(){return{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
   maskKey:function(k){if(!k)return'';if(k.length<=10)return k;return k.substring(0,6)+'...'+k.substring(k.length-4)},
-  toggleDropdown:function(id){this.openDropdown=this.openDropdown===id?null:id},
+  toggleDropdown:function(id,ev){
+    if(this.openDropdown===id){this.openDropdown=null;return}
+    this.openDropdown=id;
+    // 菜单用 position:fixed 渲染到 .table-wrap 的 overflow 裁剪之外，
+    // 按触发按钮的位置动态计算坐标，并做右对齐 + 视口边界修正
+    if(ev&&ev.currentTarget){
+      var r=ev.currentTarget.getBoundingClientRect();
+      var menuW=140,gap=2;
+      var left=Math.max(8,Math.min(r.right-menuW,window.innerWidth-menuW-8));
+      this.dropdownStyle={left:left+'px',top:(r.bottom+gap)+'px'};
+    }
+  },
   runLabel:function(r){
     if(!r)return'-';
     var s=r.status;

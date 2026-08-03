@@ -3,16 +3,14 @@ utils/eval/reformat.py — 格式重整 + 质检一体化
 
 将三元组文件（req/headers/res）合并为单个 JSON，只处理 latest_file。
 合并后立即跑 analyze_best_data，返回分析结果，省掉二次读取。
-使用多进程并行处理。
+使用线程池并行处理（IO 密集 + 轻量本地质检，无需多进程）。
 """
 
 import json
 import logging
 import os
 from utils.atomic_write import safe_replace
-import signal
-import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -20,46 +18,6 @@ from utils.eval.eval import analyze_best_data, fmt_quality
 from utils.message_common import parse_response
 
 logger = logging.getLogger(__name__)
-
-# 无进展超时：距上一个 future 完成超过该秒数没有任何新进展，判定卡死
-_NO_PROGRESS_TIMEOUT = int(os.getenv("EVAL_NO_PROGRESS_TIMEOUT", "600"))
-# 进程池关闭宽限：所有 future 已完成后，等待 executor 正常收尾的最长秒数
-_SHUTDOWN_GRACE = int(os.getenv("EVAL_SHUTDOWN_GRACE", "60"))
-
-
-def _terminate_pool_workers(executor: ProcessPoolExecutor, log: Callable[[str], None]) -> None:
-    """强制回收进程池内残留的 worker 进程（参考 backup_routes 的 SIGTERM->SIGKILL 模式）。
-
-    executor.shutdown(wait=False, cancel_futures=True) 之后，仍可能有 worker
-    卡在收尾阶段不退出，这里直接对存活进程发信号回收，避免僵尸进程堆积。
-    """
-    procs = list(getattr(executor, "_processes", {}).values())
-    if not procs:
-        return
-    log(f"强制回收 {len(procs)} 个 worker 进程")
-    for p in procs:
-        pid = getattr(p, "pid", None)
-        if not pid:
-            continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.monotonic() + 10
-    for p in procs:
-        remaining = max(0.0, deadline - time.monotonic())
-        try:
-            p.join(timeout=remaining)
-        except Exception:
-            pass
-    for p in procs:
-        if p.is_alive():
-            pid = getattr(p, "pid", None)
-            if pid:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
 
 
 def _load_json(path: Path) -> Any:
@@ -117,12 +75,60 @@ def _load_merged(src_dir: Path, stem: str, latest_file: str,
     return None
 
 
-def _process_one(args: tuple) -> Optional[dict]:
-    """单个 session 的 reformat + analyze，多进程可调用。
+def _reformat_only_record(src_dir_s, first_ts, latest_file, stem,
+                          trace_list, api_key, models) -> dict:
+    """reformat-only：只合并落盘，不跑 analyze。
 
-    返回分析结果 dict（含 session/start_time 等字段），失败返回 None。
+    返回统一 schema 记录，但所有评估字段用零值/空占位（键集合与
+    _process_one 对齐，下游读取方无需判 key 存在性）。
     """
-    src_dir_s, out_dir_s, first_ts, latest_file, trace_list, api_key, models = args
+    from utils.eval.eval import _parse_folder_ts
+    start_ts = _parse_folder_ts(first_ts)
+    end_ts = _parse_folder_ts(stem)
+    models_list = list(models) if models else []
+    return {
+        "session": first_ts,
+        "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S") if start_ts else None,
+        "end_time": end_ts.strftime("%Y-%m-%d %H:%M:%S") if end_ts else None,
+        "duration_s": None,
+        "api_call_count": len(trace_list) if trace_list else 1,
+        "api_errors": 0,
+        "user_turns": 0,
+        "total_messages": 0,
+        "tool_use_count": 0,
+        "tool_result_count": 0,
+        "tool_success": 0,
+        "tool_fail_flag": 0,
+        "tool_fail_keyword": 0,
+        "tool_fail_total": 0,
+        "tool_success_rate": None,
+        "model": models_list[0] if models_list else "",
+        "q1": "",
+        "latest_file": latest_file,
+        "log_dir": Path(src_dir_s).name,
+        "tool_use_detail": {},
+        "tool_success_detail": {},
+        "tool_fail_detail": {},
+        "skills_used": {},
+        "api_key": api_key,
+        "models": models_list,
+        "trace_list": trace_list or [],
+        "_key": first_ts,
+        "first_ts": first_ts,
+        "last_ts": stem,
+        "msg_count": 0,
+        "completed": 0,
+        "completed_note": "",
+    }
+
+
+def _process_one(args: tuple) -> Optional[dict]:
+    """单个 session 的 reformat (+ 可选 analyze)，多进程可调用。
+
+    args 末位 analyze=False 时只合并落盘、跳过 analyze（评估字段占位）。
+    返回结果 dict（含 session/start_time 等字段），失败返回 None。
+    """
+    src_dir_s, out_dir_s, first_ts, latest_file, trace_list, api_key, models, analyze = args
 
     src_dir = Path(src_dir_s)
     out_dir = Path(out_dir_s)
@@ -143,6 +149,10 @@ def _process_one(args: tuple) -> Optional[dict]:
     out_file = session_dir / f"{stem}.json"
     with open(out_file, "w", encoding="utf-8") as fh:
         json.dump(merged, fh, ensure_ascii=False, separators=(",", ":"))
+
+    if not analyze:
+        return _reformat_only_record(src_dir_s, first_ts, latest_file, stem,
+                                     trace_list, api_key, models)
 
     # 直接分析，不再二次读取
     analyzed = analyze_best_data(merged)
@@ -353,9 +363,15 @@ def reformat_and_analyze(
     workers: int = 4,
     progress_cb: Optional[Callable[[str], None]] = None,
     log_dir: Optional[str] = None,
+    analyze: bool = True,
 ) -> dict:
     """
-    多进程并行: 对每个 session 的 latest_file 做 reformat + analyze_best_data。
+    线程池并行: 对每个 session 的 latest_file 做 reformat (+ 可选 analyze_best_data)。
+
+    workers: 线程数，硬上限 32（IO 密集，超过收益递减且徒增争用）。
+
+    analyze=False: reformat-only，只把三元组合并成单 JSON 落盘（+上传由上层做），
+        跳过 analyze/质检；结果记录评估字段占位为空，且不走 _eval 缓存复用。
 
     log_dir: 写入每个 result 的历史目录标识（相对 root 的 posix 路径，
         如 "260728/26072813"）；供报告生成 /history 链接用。缺省时退回
@@ -365,6 +381,7 @@ def reformat_and_analyze(
         {"total_sessions": N, "total_files": M, "errors": [...], "results": [analyzed_dict, ...]}
     """
     _log = progress_cb or (lambda msg: None)
+    workers = max(1, min(int(workers), 32))  # 线程数硬上限 32
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -391,13 +408,14 @@ def reformat_and_analyze(
         s_models = sess.get("models", []) or []
         if not first_ts or not latest_file:
             continue
-        cached = _rebuild_from_cache(sess)
+        # reformat-only 不复用 analyze 缓存（缓存里是 analyze 结果，与本次意图不符）
+        cached = _rebuild_from_cache(sess) if analyze else None
         if cached:
             cached["log_dir"] = resolved_log_dir
             cached_results.append(cached)
             copy_tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list, s_api_key, s_models))
         else:
-            tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list, s_api_key, s_models))
+            tasks.append((src_dir, out_dir, first_ts, latest_file, trace_list, s_api_key, s_models, analyze))
 
     for ct in copy_tasks:
         _copy_session_to_outdir(ct)
@@ -412,74 +430,34 @@ def reformat_and_analyze(
     if n_tasks == 0:
         return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results}
 
-    executor = ProcessPoolExecutor(max_workers=workers)
+    # 线程池并行（而非进程池）：每个任务只做「读三元组 JSON → 合并落盘 →（可选）纯本地
+    # 质检」，是 IO 密集 + 轻量 CPU，线程足矣。用线程避免了进程池的两大历史顽疾：
+    #   1) spawn 子进程会重新 import app.py，跑一遍模块级启动（init_db/leader 选举/
+    #      load_index…），刷屏 "leader_lock: another worker is leader" 且浪费初始化；
+    #   2) worker 挂死变孤儿（PPID=1）堆积吃内存，需要 pid 快照 + SIGKILL 兜底回收。
+    # 线程共享本进程解释器，无以上问题，收尾直接 shutdown 即可，无需看门狗/强杀。
+    # 进度日志节流：每条 append_log 都会全量重写外部日志文件（O(n²) 写放大），
+    # 且几万条会淹没抽屉、跟不上进度。按约 5% 一档打点（下限每 200 个一条），
+    # 无论 1k 还是 6 万 session，进度日志都控制在 ~20 条以内。
+    log_every = max(200, n_tasks // 20)
+    executor = ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = {executor.submit(_process_one, t): t for t in tasks}
-        pending = set(futures.keys())
-        last_progress = time.monotonic()
+        for future in as_completed([executor.submit(_process_one, t) for t in tasks]):
+            done += 1
+            try:
+                result = future.result()
+                if result:
+                    # worker 内 log_dir=Path(src_dir).name 会丢失日期层，统一覆盖
+                    result["log_dir"] = resolved_log_dir
+                    results.append(result)
+                else:
+                    errors.append("处理失败")
+            except Exception as e:
+                errors.append(str(e))
 
-        # 逐批等待完成；用 wait(timeout) 做无进展看门狗，避免某个 future
-        # 永不返回时整个循环无限阻塞（历史卡死正是停在这里之后）。
-        from concurrent.futures import wait as _fwait, FIRST_COMPLETED
-        while pending:
-            completed, pending = _fwait(pending, timeout=30, return_when=FIRST_COMPLETED)
-            if not completed:
-                # 本轮无任何 future 完成，检查是否超过无进展阈值
-                if time.monotonic() - last_progress > _NO_PROGRESS_TIMEOUT:
-                    _log(f"reformat+analyze 无进展超时（{_NO_PROGRESS_TIMEOUT}s）: "
-                         f"已完成 {done}/{n_tasks}, 待处理 {len(pending)}，强制终止")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    _terminate_pool_workers(executor, _log)
-                    raise TimeoutError(
-                        f"reformat_and_analyze no progress for {_NO_PROGRESS_TIMEOUT}s "
-                        f"(done={done}/{n_tasks}, pending={len(pending)})"
-                    )
-                continue
-
-            last_progress = time.monotonic()
-            for future in completed:
-                done += 1
-                task = futures[future]
-                first_ts = task[2]
-                try:
-                    result = future.result()
-                    if result:
-                        # worker 内 log_dir=Path(src_dir).name 会丢失日期层，统一覆盖
-                        result["log_dir"] = resolved_log_dir
-                        results.append(result)
-                    else:
-                        errors.append(f"处理失败: {first_ts}")
-                except Exception as e:
-                    errors.append(f"{first_ts}: {e}")
-
-                if done % 10 == 0 or done == n_tasks:
-                    _log(f"reformat+analyze: {done}/{n_tasks}, 成功 {len(results)}")
+            if done % log_every == 0 or done == n_tasks:
+                _log(f"进度 {done}/{n_tasks}，成功 {len(results)}")
     finally:
-        # 显式关闭进程池，并对收尾挂起做宽限超时兜底。
-        # 历史卡死表现为：所有 future 已完成，但 with 块隐式 shutdown 永久阻塞。
-        _log("reformat+analyze 完成，开始关闭进程池")
-        shutdown_done = {"ok": False}
-
-        import threading as _threading
-
-        def _do_shutdown():
-            try:
-                executor.shutdown(wait=True)
-                shutdown_done["ok"] = True
-            except Exception:
-                pass
-
-        t = _threading.Thread(target=_do_shutdown, daemon=True)
-        t.start()
-        t.join(timeout=_SHUTDOWN_GRACE)
-        if not shutdown_done["ok"]:
-            _log(f"进程池关闭超时（{_SHUTDOWN_GRACE}s），强制回收 worker")
-            try:
-                executor.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                pass
-            _terminate_pool_workers(executor, _log)
-        else:
-            _log("进程池已关闭")
+        executor.shutdown(wait=True)
 
     return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results}

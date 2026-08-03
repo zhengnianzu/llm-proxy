@@ -107,7 +107,8 @@
                 </tr>
             </thead>
             <tbody>
-                <tr v-for="r in rows" :key="r.path">
+                <template v-for="r in rows">
+                <tr :key="r.path">
                     <td><span class="badge badge-fmt">{{ r.name || 'default' }}</span></td>
                     <td class="mono">{{ r.root_id || '-' }}</td>
                     <td class="mono path-cell">
@@ -130,15 +131,28 @@
                     <td class="text-center">
                         <template v-if="r.exists && r.format === 'newapi'">
                             <span v-if="bf[r.path] && bf[r.path].status === 'running'" style="font-size:.8rem;">
-                                叶子 {{ bf[r.path].done_leaves }}/{{ bf[r.path].total_leaves }}<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }}）</span>
+                                构建中 · 叶子 {{ bf[r.path].done_leaves }}/{{ bf[r.path].total_leaves }}<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }}）</span>
                                 <template v-if="bf[r.path].current_leaf">
                                     · {{ bf[r.path].current_leaf }}<span v-if="bf[r.path].leaf_total"> 补meta {{ bf[r.path].leaf_done }}/{{ bf[r.path].leaf_total }}</span>
                                 </template> …
                             </span>
-                            <span v-else-if="bf[r.path] && bf[r.path].status === 'queued'" style="font-size:.8rem; color:var(--muted-foreground);">排队中…</span>
-                            <span v-else-if="bf[r.path] && bf[r.path].status === 'done'" class="msg-ok" style="font-size:.78rem;">已就绪<span v-if="bf[r.path].skipped_leaves">（跳过 {{ bf[r.path].skipped_leaves }} 个已构建）</span></span>
+                            <span v-else-if="bf[r.path] && bf[r.path].status === 'queued'" style="font-size:.8rem; color:var(--muted-foreground);">
+                                排队中<span v-if="queuePos[r.path]">（第 {{ queuePos[r.path] }} 位）</span>…
+                            </span>
+                            <span v-else-if="bf[r.path] && bf[r.path].status === 'ready'" class="msg-ok" style="font-size:.78rem;">已就绪</span>
+                            <span v-else-if="bf[r.path] && bf[r.path].status === 'partial'" style="font-size:.78rem; color:var(--warning, #b8860b);"
+                                :title="'共 ' + bf[r.path].total_leaves + ' 个叶子，已构建 ' + bf[r.path].done_leaves + '，待构建 ' + (bf[r.path].pending_leaves || (bf[r.path].total_leaves - bf[r.path].done_leaves)) + '。点「增量构建」补齐。'">
+                                部分就绪 {{ bf[r.path].done_leaves }}/{{ bf[r.path].total_leaves }}
+                                <span v-if="bf[r.path].error_leaves">· 失败 {{ bf[r.path].error_leaves }}</span>
+                            </span>
+                            <span v-else-if="bf[r.path] && bf[r.path].status === 'unsynced'" style="font-size:.78rem; color:var(--muted-foreground);"
+                                title="尚未同步到索引库，计数未知。请先点「同步」扫描叶子清单。">未同步（先点「同步」）</span>
                             <span v-else-if="bf[r.path] && bf[r.path].status === 'error'" class="msg-err" style="font-size:.78rem;">失败</span>
                             <span v-else style="color:var(--muted-foreground); font-size:.8rem;">未构建</span>
+                            <span v-if="bf[r.path] && bf[r.path].stuck_leaves" class="msg-err" style="font-size:.72rem; display:block;"
+                                :title="'疑似 NFS 读阻塞被跳过：' + (bf[r.path].last_stuck || '') + '。NFS 恢复后点「增量构建」补跑。'">
+                                ⚠ 卡住 {{ bf[r.path].stuck_leaves }}（待补跑）
+                            </span>
                         </template>
                         <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
                     </td>
@@ -153,6 +167,8 @@
                             <button class="btn btn-outline btn-sm" @click="toggleMenu(r.path)">更多 ▾</button>
                             <div class="dropdown-menu" v-if="openMenu === r.path">
                                 <template v-if="r.exists && r.format === 'newapi'">
+                                    <button @click="menuAction(r.path, 'leaves')">叶子详情</button>
+                                    <button @click="menuAction(r.path, 'buildlog')">构建日志</button>
                                     <button @click="menuAction(r.path, 'incremental')"
                                         :disabled="isBuilding(r)">增量构建</button>
                                     <button @click="menuAction(r.path, 'full')"
@@ -165,6 +181,69 @@
                         <span v-if="!hasSync(r) && !hasMore(r)" style="color:var(--muted-foreground); font-size:.8rem;">—</span>
                     </td>
                 </tr>
+                <tr v-if="leavesOpen[r.path]" :key="r.path + '-leaves'">
+                    <td :colspan="withSize ? 9 : 8" style="background:var(--muted, #f7f7f8); padding:12px 16px;">
+                        <div v-if="leaves[r.path] && leaves[r.path].loading" style="color:var(--muted-foreground); font-size:.82rem;">加载中…</div>
+                        <div v-else-if="leaves[r.path] && !leaves[r.path].synced" style="color:var(--muted-foreground); font-size:.82rem;">
+                            尚未同步到索引库。请先点该行「同步」，再查看叶子详情。
+                        </div>
+                        <div v-else-if="leaves[r.path]">
+                            <div style="font-size:.8rem; color:var(--muted-foreground); margin-bottom:8px;">
+                                共 {{ leaves[r.path].summary.total }} 个叶子 ·
+                                <span class="msg-ok">已建 {{ leaves[r.path].summary.built }}</span> ·
+                                待建 {{ leaves[r.path].summary.pending }}
+                                <span v-if="leaves[r.path].summary.building"> · 构建中 {{ leaves[r.path].summary.building }}</span>
+                                <span v-if="leaves[r.path].summary.error" class="msg-err"> · 失败 {{ leaves[r.path].summary.error }}</span>
+                            </div>
+                            <table class="table" style="font-size:.8rem; margin:0;">
+                                <thead>
+                                    <tr>
+                                        <th>叶子（天/小时）</th>
+                                        <th>完整路径</th>
+                                        <th style="width:90px;">状态</th>
+                                        <th>错误</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="lf in leaves[r.path].leaves" :key="lf.dir_key">
+                                        <td class="mono">{{ lf.dir_key }}</td>
+                                        <td class="mono" style="font-size:.74rem; color:var(--muted-foreground); word-break:break-all;" :title="lf.full_path">{{ lf.full_path }}</td>
+                                        <td><span class="badge" :class="leafBadge(lf.state)">{{ leafStateLabel(lf.state) }}</span></td>
+                                        <td class="mono" style="color:var(--destructive, #c0392b); font-size:.74rem;" :title="lf.last_error">{{ lf.last_error || '' }}</td>
+                                    </tr>
+                                    <tr v-if="leaves[r.path].leaves.length === 0">
+                                        <td colspan="4" style="text-align:center; color:var(--muted-foreground); padding:12px;">无叶子记录</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </td>
+                </tr>
+                <tr v-if="logOpen[r.path]" :key="r.path + '-buildlog'">
+                    <td :colspan="withSize ? 9 : 8" style="background:#1e1e1e; padding:12px 16px;">
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <span style="font-size:.8rem; color:#bbb;">构建日志（该源，最近 {{ (buildLog[r.path] && buildLog[r.path].lines ? buildLog[r.path].lines.length : 0) }} 行）</span>
+                            <span>
+                                <button class="btn btn-outline btn-sm" @click="loadBuildLog(r.path)"
+                                    :disabled="buildLog[r.path] && buildLog[r.path].loading">
+                                    {{ (buildLog[r.path] && buildLog[r.path].loading) ? '刷新中…' : '刷新' }}
+                                </button>
+                            </span>
+                        </div>
+                        <div v-if="buildLog[r.path] && buildLog[r.path].loading" style="color:#999; font-size:.82rem;">加载中…</div>
+                        <div v-else-if="buildLog[r.path] && buildLog[r.path].note && (!buildLog[r.path].lines || !buildLog[r.path].lines.length)"
+                             style="color:#999; font-size:.82rem;">{{ buildLog[r.path].note }}</div>
+                        <div v-else-if="buildLog[r.path] && buildLog[r.path].lines && buildLog[r.path].lines.length"
+                             :ref="'log-' + r.path"
+                             style="max-height:340px; overflow:auto; background:#141414; border-radius:6px; padding:10px 12px;">
+                            <pre style="margin:0; font-size:.74rem; line-height:1.5; color:#d4d4d4; white-space:pre-wrap; word-break:break-all; font-family:ui-monospace,Menlo,Consolas,monospace;"><span
+                                v-for="(ln, i) in buildLog[r.path].lines" :key="i"
+                                :style="{ color: logLineColor(ln), display:'block' }">{{ ln }}</span></pre>
+                        </div>
+                        <div v-else style="color:#999; font-size:.82rem;">暂无该源的构建记录（点「增量构建」后会产生）。</div>
+                    </td>
+                </tr>
+                </template>
                 <tr v-if="rows.length === 0">
                     <td :colspan="withSize ? 9 : 8" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
                 </tr>
@@ -194,6 +273,11 @@ new Vue({
         syncing: {},     // path -> 同步进行中
         expanded: {},    // path -> 路径是否展开
         openMenu: null,  // 当前打开「更多」菜单的行 path
+        leavesOpen: {},  // path -> 叶子详情是否展开
+        leaves: {},      // path -> { loading, synced, summary, leaves[] }
+        logOpen: {},     // path -> 构建日志是否展开
+        buildLog: {},    // path -> { loading, lines[], note }
+        queuePos: {},    // path -> 排队位次（1 起）；正在跑的不在此
     },
     methods: {
         fmtLabel: function(f) {
@@ -201,10 +285,11 @@ new Vue({
             return m[f] || f;
         },
         builtOf: function(r) {
-            // 已回填叶子数：优先用实时轮询状态（回填进行中会更新），否则用 list 返回的初值
+            // 已回填叶子数：优先用 backfill-status 的实时/DB 汇总（done_leaves 已统一为
+            // log_dir.db 的 built）；无该状态时回退 list 返回的 built_count（同源，也读 DB）。
             var s = this.bf[r.path];
-            if (s && (s.status === 'running' || s.status === 'queued' || s.status === 'done' || s.status === 'error')
-                    && typeof s.done_leaves === 'number') {
+            var states = ['running', 'queued', 'ready', 'partial', 'error'];
+            if (s && states.indexOf(s.status) !== -1 && typeof s.done_leaves === 'number') {
                 return s.done_leaves;
             }
             return r.built_count || 0;
@@ -231,6 +316,73 @@ new Vue({
             if (action === 'incremental') this.startBackfill(path, false);
             else if (action === 'full') this.startBackfill(path, true);
             else if (action === 'remove') this.removePath(path);
+            else if (action === 'leaves') this.toggleLeaves(path);
+            else if (action === 'buildlog') this.toggleBuildLog(path);
+        },
+        toggleLeaves: function(path) {
+            var open = !this.leavesOpen[path];
+            this.$set(this.leavesOpen, path, open);
+            if (open) this.loadLeaves(path);
+        },
+        loadLeaves: function(path) {
+            this.$set(this.leaves, path, { loading: true, synced: true, summary: {}, leaves: [] });
+            fetch('/api/logs-admin/leaves?path=' + encodeURIComponent(path),
+                  { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (!d.ok) { this.$set(this.leaves, path, { loading: false, synced: false, summary: {}, leaves: [] }); return; }
+                    this.$set(this.leaves, path, {
+                        loading: false,
+                        synced: !!d.synced,
+                        summary: d.summary || {},
+                        leaves: d.leaves || [],
+                    });
+                }.bind(this))
+                .catch(function() {
+                    this.$set(this.leaves, path, { loading: false, synced: false, summary: {}, leaves: [] });
+                }.bind(this));
+        },
+        leafStateLabel: function(s) {
+            var m = { done: '已建', pending: '待建', building: '构建中', error: '失败' };
+            return m[s] || s;
+        },
+        leafBadge: function(s) {
+            var m = { done: 'badge-active', pending: 'badge-history', building: 'badge-fmt', error: 'badge-missing' };
+            return m[s] || 'badge-history';
+        },
+        toggleBuildLog: function(path) {
+            var open = !this.logOpen[path];
+            this.$set(this.logOpen, path, open);
+            if (open) this.loadBuildLog(path);
+        },
+        loadBuildLog: function(path) {
+            var prev = this.buildLog[path] || {};
+            this.$set(this.buildLog, path, { loading: true, lines: prev.lines || [], note: '' });
+            fetch('/api/logs-admin/build-log?path=' + encodeURIComponent(path) + '&limit=400',
+                  { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    this.$set(this.buildLog, path, {
+                        loading: false,
+                        lines: d.lines || [],
+                        note: d.note || '',
+                    });
+                    // 渲染后滚到底（看最新）
+                    this.$nextTick(function() {
+                        var refs = this.$refs['log-' + path];
+                        var el = Array.isArray(refs) ? refs[0] : refs;
+                        if (el) el.scrollTop = el.scrollHeight;
+                    }.bind(this));
+                }.bind(this))
+                .catch(function() {
+                    this.$set(this.buildLog, path, { loading: false, lines: [], note: '读取失败' });
+                }.bind(this));
+        },
+        logLineColor: function(ln) {
+            if (/\bERROR\b|CRASH|FAIL|Traceback|Exception/.test(ln)) return '#f48771';
+            if (/\bWARNING\b|STALLED/.test(ln)) return '#dcdcaa';
+            if (/ROOT (START|DONE)|ENQUEUE\b|LEAF OK/.test(ln)) return '#9cdcfe';
+            return '#d4d4d4';
         },
         load: function() {
             this.loading = true;
@@ -241,12 +393,52 @@ new Vue({
                     this.rows = data.rows || [];
                     this.activeBase = data.active_base || '';
                     this.loading = false;
-                    // 读一次每个 newapi 源的持久化状态（无轮询）；running 时点「刷新」再读
-                    this.rows.forEach(function(r) {
-                        if (r.exists && r.format === 'newapi') this.refreshStatus(r.path);
+                    // 先读一次全局队列快照：把"正在跑的源(实时进度)+排队位次"直接写到对应行；
+                    // 再逐源读持久化状态（正在跑的那条已由队列快照给出最新值，不再被覆盖）。无轮询。
+                    this.refreshQueue(function(current) {
+                        var cur = this.normPath(current);
+                        this.rows.forEach(function(r) {
+                            if (r.exists && r.format === 'newapi' && this.normPath(r.path) !== cur) {
+                                this.refreshStatus(r.path);
+                            }
+                        }.bind(this));
                     }.bind(this));
                 }.bind(this))
                 .catch(function() { this.loading = false; }.bind(this));
+        },
+        refreshQueue: function(done) {
+            // 读全局回填队列：current(正在跑，含 current_status 实时进度) + queued(排队列表)。
+            // 队列里的 path 是 normpath 后的；映射回 rows 里的原始 r.path 作为 bf/queuePos 的键，
+            // 与模板渲染(按 r.path 查)保持一致。
+            fetch('/api/logs-admin/queue', { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .then(function(q) {
+                    this.queuePos = {};
+                    var current = q.current || null;
+                    var curRowPath = this.rowPathOf(current);
+                    if (curRowPath && q.current_status) {
+                        // 正在跑的源：把内存实时进度直接更新到它的状态位
+                        this.$set(this.bf, curRowPath, q.current_status);
+                    }
+                    (q.queued || []).forEach(function(p, i) {
+                        var rp = this.rowPathOf(p);
+                        if (rp) this.$set(this.queuePos, rp, i + 1);  // 排队位次，1 起
+                    }.bind(this));
+                    if (done) done(curRowPath);
+                }.bind(this))
+                .catch(function() { if (done) done(null); }.bind(this));
+        },
+        normPath: function(p) {
+            // 归一化：去掉尾部斜杠，与后端 os.path.normpath 的尾斜杠处理对齐（够用即可）
+            if (!p) return '';
+            return p.replace(/\/+$/, '');
+        },
+        rowPathOf: function(normed) {
+            // 用 normpath 后的路径反查 rows 里的原始 r.path（模板按 r.path 查 bf/queuePos）
+            if (!normed) return null;
+            var target = this.normPath(normed);
+            var hit = this.rows.filter(function(r) { return this.normPath(r.path) === target; }.bind(this))[0];
+            return hit ? hit.path : null;
         },
         openAdd: function() {
             this.newPath = '';
@@ -300,6 +492,7 @@ new Vue({
                     this.showMsg((force ? '全量构建' : '增量构建') + '已启动，请稍后点「刷新」查看进度', true);
                     // 严格零轮询：只读一次当前状态（可能已进入 running/queued），之后靠手动刷新
                     this.refreshStatus(path);
+                    if (this.logOpen[path]) this.loadBuildLog(path);  // 日志已展开则同步刷新
                 }.bind(this))
                 .catch(function() { this.showMsg('请求失败', false); }.bind(this));
         },
@@ -314,7 +507,10 @@ new Vue({
                 .then(function(data) {
                     this.$set(this.syncing, path, false);
                     this.showMsg(data.msg || (data.ok ? '同步完成' : '同步失败'), data.ok);
-                    if (data.ok) this.load();   // 刷新一次列表（读 DB 汇总）
+                    if (data.ok) {
+                        this.load();   // 刷新一次列表（读 DB 汇总）
+                        if (this.leavesOpen[path]) this.loadLeaves(path);  // 详情已展开则同步刷新
+                    }
                 }.bind(this))
                 .catch(function() { this.$set(this.syncing, path, false); this.showMsg('请求失败', false); }.bind(this));
         },

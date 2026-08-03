@@ -176,6 +176,17 @@ def _ensure_config() -> dict:
     return data
 
 
+def _is_ancestor(anc: str, desc: str) -> bool:
+    """anc 是否为 desc 的严格祖先目录（两者均须已 normpath）。
+
+    用「加分隔符做前缀」判定，避免 `/a/details` 误判为 `/a/details2` 的祖先。
+    相等不算祖先（相等由调用方的「路径已存在」分支单独处理）。
+    """
+    if anc == desc:
+        return False
+    return desc.startswith(anc + os.sep)
+
+
 def add_history_path(path: str, name: str = "") -> tuple[bool, str]:
     """新增历史路径（可带名称）。返回 (成功, 消息)。"""
     p = (path or "").strip()
@@ -191,6 +202,19 @@ def add_history_path(path: str, name: str = "") -> tuple[bool, str]:
         existing = {os.path.normpath(_entry_path_name(x)[0]) for x in data["history"]}
         if norm in existing:
             return False, "路径已存在"
+        # 拒绝与已有历史路径「嵌套」（互为祖先/后代）：叶子扫描是递归的，
+        # 外层 root 会把内层 root 的叶子也扫进来，同一物理叶子被两个源各扫各建、
+        # 在 log_dir.db 里存成两条、列表里显示两遍、构建两遍（见 jumper-003 vs -latest）。
+        # 让用户改成互不包含的登记，从根上避免重复。
+        for x in data["history"]:
+            ep, en = _entry_path_name(x)
+            enorm = os.path.normpath(ep)
+            if _is_ancestor(enorm, norm):
+                return False, (f"新路径在已有历史「{en}」（{ep}）之下，会被其递归扫描重复收录。"
+                               f"请改登记不与它嵌套的路径，或先移除该历史再登记外层。")
+            if _is_ancestor(norm, enorm):
+                return False, (f"新路径是已有历史「{en}」（{ep}）的上层，会把它递归收录导致重复。"
+                               f"请改登记不与它嵌套的路径，或先移除该历史再登记外层。")
         # 不允许与活跃 base 的 env_dir 重复（活跃目录本就在统计中）
         data["history"].append({"path": p, "name": n})
         _save_raw(data)

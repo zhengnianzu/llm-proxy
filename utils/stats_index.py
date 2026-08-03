@@ -257,18 +257,9 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
         active_tag = _get_active_tag()
         changed_buckets: list = []
 
-        # 访问时懒构建（new-api，异步）：把该 root 入后台串行队列，逐叶子增量构建
-        # index.db（ingest+enrich+rebuild，跳过已就绪叶子）——不阻塞本次页面请求。
-        # 本次刷新未构建的叶子先走裸计数近似（下方 use_index 分支），后台跑完后
-        # 下次刷新即读到 sessions 走归并快路径，数字自动收敛。start_backfill 幂等，
-        # 已在跑/无新叶子时几乎零成本。
-        try:
-            from utils.log_scan import detect_format as _detect_fmt
-            if _detect_fmt(env_dir_str) == "newapi":
-                from utils.newapi_backfill import start_backfill
-                start_backfill(env_dir_str, force=False)
-        except Exception:
-            pass
+        # new-api：页面刷新**不再自动触发回填**（回填是重操作、会起进程池，只应在数据管理
+        # 界面手动执行）。未构建的叶子在下方 use_index 分支走裸计数近似（前端标「聚合中·近似」）；
+        # 手动回填跑完后，下次刷新读到 sessions 即自动收敛为归并值。
 
         current_dirs = set()
         for sub in iter_index_dirs(env_dir):

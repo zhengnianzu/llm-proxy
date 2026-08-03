@@ -12,6 +12,8 @@ utils/newapi_backfill.py — new-api 富 index（index.db）的批量构建
 """
 
 import os
+import logging
+import logging.handlers
 import threading
 import time
 from collections import deque
@@ -20,6 +22,80 @@ from typing import Dict, Optional
 
 from utils.log_scan import iter_index_dirs, detect_format, dir_key_for
 import utils.newapi_index_db as nidb
+
+logger = logging.getLogger(__name__)
+
+# 专用构建日志：new-api index 回填的生命周期事件（入队/开始/单叶成功失败/卡死/root 崩溃/完成）
+# 单独落一份 {SERVICE_LOG_DIR}/backfill.log，便于事后单独排查构建历史——
+# 此前整条链路几乎无日志，root 级崩溃只写进程内存且被前端 DB 权威状态盖掉，异常静默丢失。
+# 该 logger 不向 root 传播（propagate=False），避免把逐叶细节灌进 app.log；
+# 真正需要 app.log 也看到的（root 崩溃）仍另经模块级 logger.error 打一份。
+bf_logger = logging.getLogger("newapi_backfill_events")
+bf_logger.setLevel(logging.INFO)
+bf_logger.propagate = False
+
+
+def init_backfill_logger(log_dir: str) -> None:
+    """挂 RotatingFileHandler 到 backfill.log。幂等：重复调用不叠加 handler。"""
+    for h in bf_logger.handlers:
+        if isinstance(h, logging.handlers.RotatingFileHandler):
+            return
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, "backfill.log")
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S"))
+        bf_logger.addHandler(handler)
+        bf_logger.info("=== backfill logger initialized -> %s ===", path)
+    except Exception:  # noqa: BLE001 — 日志初始化失败不应拖垮服务启动
+        logger.exception("init_backfill_logger failed")
+
+
+def _backfill_log_path() -> Optional[str]:
+    """从已挂的 handler 拿 backfill.log 绝对路径（未初始化则 None）。"""
+    for h in bf_logger.handlers:
+        if isinstance(h, logging.handlers.RotatingFileHandler):
+            return h.baseFilename
+    return None
+
+
+def read_backfill_log(root_filter: str = "", limit: int = 400) -> dict:
+    """读 backfill.log 尾部；给了 root_filter 则只返回含该源 root 的行。
+
+    每条构建日志都带 `root=<normpath>`，据此按源过滤。返回最后 limit 条匹配行。
+    读文件尾部即可（回填日志按时间追加），不做全量读，避免大文件卡住请求。
+    """
+    path = _backfill_log_path()
+    if not path or not os.path.isfile(path):
+        return {"ok": True, "path": path or "", "lines": [], "note": "日志文件尚未生成"}
+    norm = os.path.normpath(root_filter) if root_filter else ""
+    try:
+        # 只读尾部一段（约 2MB 足够覆盖近期若干次构建），逐行匹配。
+        size = os.path.getsize(path)
+        tail_bytes = min(size, 2 * 1024 * 1024)
+        with open(path, "rb") as f:
+            if size > tail_bytes:
+                f.seek(size - tail_bytes)
+                f.readline()  # 丢弃可能被截断的半行
+            raw = f.read().decode("utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "path": path, "lines": [], "note": f"读取失败: {e}"}
+    lines = raw.splitlines()
+    if norm:
+        # 行内以 `root=<path> ` 形式出现；用带空格/行尾的边界避免前缀误匹配
+        needle = f"root={norm}"
+        lines = [ln for ln in lines
+                 if f"{needle} " in ln or ln.rstrip().endswith(needle)]
+    return {"ok": True, "path": path, "lines": lines[-limit:]}
+
+# 单叶子 enrich「距上次分片完成」超过此秒数无进展即判卡住（多为 NFS 读死等），
+# 跳过该叶子 + 预警。可经环境变量覆盖，便于按网络盘抖动实际调。
+try:
+    _STALL_TIMEOUT = float(os.getenv("NEWAPI_BACKFILL_STALL_TIMEOUT", "300"))
+except ValueError:
+    _STALL_TIMEOUT = 300.0
 
 # root(normpath) -> 状态 dict
 _status: Dict[str, dict] = {}
@@ -118,8 +194,11 @@ def _root_id(root: str) -> str:
 def sync_leaves(path: str) -> dict:
     """扫描某源的叶子目录，把节点清单同步进 logdir_store（不触发回填）。
 
-    - 新增节点写入（state=pending 或 done，据当前 index.db 状态）
-    - 已存在节点更新其构建状态
+    只做「清单 + 是否已建」的轻量同步：
+    - built 用 _db_exists（一次 stat）判定，不打开 SQLite、不跑统计查询——
+      网络盘上每叶 open+多查询会让同步卡很久，故此处只判是否已建。
+    - ingested/pending/sessions 精确数不在此写：这些留给「构建」阶段填。
+      对已存在叶子不传这几个字段 → upsert 保留其上次构建写入的值（不清零）。
     返回 {total, built, added, updated}。
     """
     import utils.logdir_store as lds
@@ -130,17 +209,12 @@ def sync_leaves(path: str) -> dict:
     for leaf in iter_index_dirs(root_path):
         dir_key = dir_key_for(root_path, leaf)
         total += 1
-        try:
-            st = nidb.status(str(leaf))
-        except Exception:
-            st = {"built": False, "ingested": 0, "pending": 0, "sessions": 0}
-        is_built = bool(st.get("built"))
+        is_built = nidb._db_exists(str(leaf))   # 一次 stat，轻量
         if is_built:
             built += 1
         res = lds.upsert_leaf(
             rid, dir_key, root_path=root,
-            built=is_built, ingested=st.get("ingested", 0),
-            pending=st.get("pending", 0), sessions=st.get("sessions", 0),
+            built=is_built,
             state="done" if is_built else "pending",
         )
         if res == "added":
@@ -170,13 +244,21 @@ def _run(root: str, workers: int, force: bool = False):
     total = len(all_leaves)
     _set(root, status="running", total_leaves=total, done_leaves=skipped,
          skipped_leaves=skipped, force=force, started_at=time.time(), error="",
-         current_leaf="", leaf_total=0, leaf_done=0)
+         current_leaf="", leaf_total=0, leaf_done=0,
+         stuck_leaves=0, last_stuck="")
+
+    bf_logger.info("ROOT START root=%s force=%s total=%d to_build=%d skipped=%d workers=%d",
+                   root, force, total, len(leaves), skipped, workers)
 
     if not leaves:
         _set(root, status="done", finished_at=time.time())
+        bf_logger.info("ROOT DONE root=%s nothing to build (all %d up-to-date)", root, total)
         return
 
     done = skipped
+    stuck = 0
+    failed = 0
+    ok = 0
     try:
         for leaf in leaves:
             _set(root, current_leaf=os.path.basename(leaf.rstrip("/")),
@@ -187,10 +269,12 @@ def _run(root: str, workers: int, force: bool = False):
             def _progress(d, t, _root=root):
                 _set(_root, leaf_done=d, leaf_total=t)
 
+            t0 = time.time()
             try:
                 if force:
                     nidb.remove_db(leaf)
-                nidb.build_leaf(leaf, workers=workers, progress_cb=_progress)
+                nidb.build_leaf(leaf, workers=workers, progress_cb=_progress,
+                                stall_timeout=_STALL_TIMEOUT)
                 # 构建后读事实源，逐叶落盘（重启后据此显示，无需再全盘 stat）
                 try:
                     st = nidb.status(leaf)
@@ -202,14 +286,46 @@ def _run(root: str, workers: int, force: bool = False):
                     built=is_built, ingested=st.get("ingested", 0),
                     pending=st.get("pending", 0), sessions=st.get("sessions", 0),
                 )
+                ok += 1
+                bf_logger.info(
+                    "LEAF OK root=%s leaf=%s built=%s ingested=%d pending=%d sessions=%d took=%.1fs",
+                    root, dir_key, is_built, st.get("ingested", 0),
+                    st.get("pending", 0), st.get("sessions", 0), time.time() - t0)
+            except nidb.LeafStalledError as e:
+                # 疑似 NFS 读死等：跳过该叶子 + 预警。标 error → needs_build 下次重扫，
+                # 待人在日志管理页手动「增量构建」补跑（NFS 恢复后）。
+                leaf_name = os.path.basename(leaf.rstrip("/"))
+                stuck += 1
+                _set(root, last_error=f"{leaf}: {e}",
+                     stuck_leaves=stuck,
+                     last_stuck=f"{leaf_name}（{e.elapsed:.0f}s 无进展）")
+                lds.set_leaf_state(rid, dir_key, "error",
+                                   last_error=f"stalled: NFS read timeout ({e.elapsed:.0f}s)")
+                bf_logger.warning(
+                    "LEAF STALLED root=%s leaf=%s done=%d/%d elapsed=%.0fs (疑似 NFS 阻塞，已跳过待补跑)",
+                    root, dir_key, e.done, e.total, e.elapsed)
+                logger.warning(
+                    "new-api 回填叶子卡住（疑似 NFS 阻塞），已跳过并待补跑: %s "
+                    "done=%d/%d elapsed=%.0fs", leaf, e.done, e.total, e.elapsed)
             except Exception as e:  # noqa: BLE001 — 单叶子失败不拖垮整个 root
+                failed += 1
                 _set(root, last_error=f"{leaf}: {e}")
                 lds.set_leaf_state(rid, dir_key, "error", last_error=str(e))
+                bf_logger.exception(
+                    "LEAF FAIL root=%s leaf=%s took=%.1fs err=%s",
+                    root, dir_key, time.time() - t0, e)
             done += 1
             _set(root, done_leaves=done, current_leaf="", leaf_total=0, leaf_done=0)
         _set(root, status="done", finished_at=time.time())
+        bf_logger.info(
+            "ROOT DONE root=%s ok=%d failed=%d stalled=%d skipped=%d total=%d",
+            root, ok, failed, stuck, skipped, total)
     except Exception as e:  # noqa: BLE001
         _set(root, status="error", error=str(e), finished_at=time.time())
+        # root 级崩溃（如 needs_build 遍历撞上损坏 db）：既落专用构建日志，也打一份到 app.log，
+        # 避免像这次那样静默——error 只进内存又被前端 DB 权威状态盖掉，全程无痕。
+        bf_logger.exception("ROOT CRASH root=%s err=%s", root, e)
+        logger.exception("new-api 回填 root 崩溃: %s", root)
 
 
 def _dispatch_loop():
@@ -267,6 +383,7 @@ def start_backfill(path: str, workers: Optional[int] = None, force: bool = False
     """
     root = os.path.normpath(path)
     if detect_format(root) != "newapi":
+        bf_logger.info("ENQUEUE SKIP root=%s not a new-api root", root)
         return {"status": "skipped", "reason": "not a new-api root"}
 
     w = workers or _DEFAULT_WORKERS
@@ -275,11 +392,15 @@ def start_backfill(path: str, workers: Optional[int] = None, force: bool = False
         if root in _queued_set:
             # 已排队或正在跑
             pos = _current_root == root
+            bf_logger.info("ENQUEUE DEDUP root=%s already %s",
+                           root, "running" if pos else "queued")
             return {"status": "running" if pos else "queued",
                     "root": root, "queue_len": len(_queue)}
         _queued_set.add(root)
         _queue.append((root, w, force))
         _set(root, status="queued", queued_at=time.time())
         _queue_cond.notify()
+    bf_logger.info("ENQUEUE root=%s workers=%d force=%s queue_len=%d",
+                   root, w, force, len(_queue))
     return {"status": "queued", "root": root, "workers": w, "force": force,
             "queue_len": len(_queue)}

@@ -7,6 +7,10 @@
         .data-table th, .data-table td { font-size: .84rem; }
         .totals-row td { font-weight: 700; background: var(--muted); }
         .flex-grow-1 { flex-grow: 1; }
+        /* 让 Key 选择器卡片整体的层叠优先级高于后面的表格卡片，
+           否则暗色模式下每张 .card 的 backdrop-filter 会各自形成层叠上下文，
+           导致下拉伸进表格区域的部分被表格卡片背景遮挡 */
+        .key-select-card { position: relative; z-index: 30; }
         .key-select { position: relative; }
         .key-select-trigger {
             display: flex; align-items: center; justify-content: space-between;
@@ -101,7 +105,7 @@
     </div>
 
     <!-- Key 选择器 (下拉多选) -->
-    <div class="card mb-3" v-if="allKeys.length">
+    <div class="card key-select-card mb-3" v-if="allKeys.length">
         <div class="flex items-center gap-2 mb-2" style="flex-wrap:wrap;">
             <span class="font-semibold" style="font-size:.9rem;">选择显示的 Key</span>
             <span class="text-muted text-sm">(最多显示 {{ maxColumns }} 列)</span>

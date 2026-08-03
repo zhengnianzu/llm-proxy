@@ -104,8 +104,10 @@ def _read_session_index_meta(logs_dir: str) -> Optional[dict]:
 def _refresh_session_cache(logs_dir: str) -> bool:
     """导出前把 session 缓存追平 index.jsonl 当前状态，确保导出完整。
 
-    new-api：叶子 index.db 是唯一来源，同步调用 ensure_fresh（有变化才构建；含尾部未落盘行的
-    有界重试），返回后 sessions 覆盖所有已落盘请求。native：复用 log_routes 的增量聚合。
+    new-api：叶子 index.db 是唯一来源，但导出**不再触发回填/构建**（回填是重操作、会起
+    进程池，只应在数据管理界面手动执行）。此处只读现有 index.db 是否已有 session，导出即
+    "读多少导多少"；是否需要先回填由上层 _run_task_inner 用 needs_build 前置判定并提示。
+    native：复用 log_routes 的增量聚合（廉价、不起池）。
     """
     if _is_newapi(logs_dir):
         index_path = Path(logs_dir) / "index.jsonl"
@@ -113,10 +115,9 @@ def _refresh_session_cache(logs_dir: str) -> bool:
             return False
         try:
             import utils.newapi_index_db as nidb
-            st = nidb.ensure_fresh(logs_dir)
-            return st.get("sessions", 0) > 0
+            return nidb.status(logs_dir).get("sessions", 0) > 0
         except Exception:
-            logger.warning("new-api ensure_fresh 失败: %s", logs_dir)
+            logger.warning("new-api index.db 状态读取失败: %s", logs_dir)
             return False
 
     from utils.log_routes import _refresh_state
@@ -134,10 +135,11 @@ def export_session_index(logs_dir: str, force: bool = False) -> dict:
     生成 logs_dir/session_index.jsonl。
 
     session 数据优先来自 session_cache.db（DB），降级读 .session_cache.jsonl。
-    每次先从 index.jsonl 增量刷新，确保不遗漏新数据。
+    new-api：只读现有 index.db，不触发回填（回填仅数据管理界面手动执行）。
+    native：每次先从 index.jsonl 增量刷新（廉价、不起池），确保不遗漏新数据。
     Returns dict with total_sessions, avg_msg_count, skipped (bool).
     """
-    # 先刷新 cache（增量），确保包含 index.jsonl 中的最新数据
+    # 先刷新 cache（native 增量；new-api 仅探测现有 index.db，不构建）
     _refresh_session_cache(logs_dir)
 
     cache_path = Path(logs_dir) / SESSION_CACHE_NAME

@@ -20,9 +20,11 @@ from fastapi.templating import Jinja2Templates
 
 from utils.export_store import (
     append_log,
+    cancel_interrupted,
     create_record,
     get_record,
     list_records,
+    list_records_all_slim,
     list_records_by_key,
     update_status,
 )
@@ -59,8 +61,8 @@ _queue_lock = threading.Lock()
 _cancelled_ids: set = set()
 
 # 全局并发上限：同一时刻最多几个导出任务在真正执行（跨 worker）。
-# 用 EXPORT_CONCURRENCY 配置，默认 2。
-_EXPORT_CONCURRENCY = max(1, int(os.getenv("EXPORT_CONCURRENCY", "2")))
+# 用 EXPORT_CONCURRENCY 配置，默认 1（同一时刻只跑一个导出/质检，其余自动排队）。
+_EXPORT_CONCURRENCY = max(1, int(os.getenv("EXPORT_CONCURRENCY", "1")))
 
 # N 个槽位锁文件，任务执行前非阻塞抢占任一空槽，抢到才执行 → 全局并发严格 ≤ N。
 _EXPORT_LOCK_DIR = get_service_log_dir()
@@ -395,7 +397,11 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             ok, msg = _run_upload_cmd(local_copy_dir, obs_parent, upload_script, log_cb=_log)
             if ok:
                 _log("上传成功")
-                update_status(record_id, "success")
+                # 回写已上传数（用记录里的 total_sessions）并清空之前的失败提示
+                rec = get_record(record_id) or {}
+                update_status(record_id, "success",
+                              files_uploaded=rec.get("total_sessions", 0),
+                              error_message="")
             else:
                 _log(f"上传失败: {msg}")
                 update_status(record_id, "failed", error_message=f"OBS upload: {msg}")
@@ -437,6 +443,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             local_base = _env_dir.parent.parent / "logs_session" / _env_key_name / slot / f"ex-{now_tag}"
             obs_sub = "session"
         else:
+            # eval 与 reformat 都产出合并后的 session JSON，落 session_analysis 目录
             local_base = (_env_dir.parent.parent / "logs_session_analysis" / _env_key_name / slot / f"ex-{now_tag}").resolve()
             obs_sub = "session_analysis"
 
@@ -445,12 +452,14 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         update_status(record_id, "running", obs_dst=obs_dst, local_copy_dir=str(local_base))
 
-        _log(f"开始{'质检' if mode == 'eval' else '导出'}: key_slot={slot}, mtime_dirs={mtime_dirs}")
+        _mode_label = {"eval": "质检", "reformat": "合并导出"}.get(mode, "导出")
+        _log(f"开始{_mode_label}: key_slot={slot}, mtime_dirs={mtime_dirs}")
         _log(f"本地目录: {local_base}")
         if obs_dst:
             _log(f"OBS 目标: {obs_dst}")
 
         errors = []
+        warnings = []  # 非致命跳过（如 new-api 索引未构建）：记为提示，不判任务失败
         total_sessions = 0
         total_uploaded = 0
         total_skipped = 0
@@ -458,8 +467,31 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         all_entries = []
 
         for mt in mtime_dirs:
+            # 协作式取消检查点：用户「终止」运行中任务时，在处理下一个目录前退出。
+            # 已处理完的目录成果保留在 local_base，不再上传/收尾。
+            if _is_cancelled(record_id):
+                _log("任务已终止（用户取消）")
+                update_status(record_id, "cancelled", error_message="用户终止")
+                return
             mt_src = _resolve_mt(mt) or str(_env_dir / mt)
             try:
+                # new-api：导出不触发回填。若 index.db 未构建/不完整，不静默导出不完整数据，
+                # 而是提示用户先在数据管理界面手动构建索引（needs_build 只读、不起进程池）。
+                try:
+                    from utils.log_scan import detect_format as _df
+                    if _df(mt_src) == "newapi":
+                        import utils.newapi_index_db as _nidb
+                        if _nidb.needs_build(mt_src):
+                            _log(f"[{mt}] 索引未构建/不完整，跳过；请先在数据管理界面手动构建索引后再导出")
+                            warnings.append(f"{mt}: 索引未构建/不完整，已跳过（请先在数据管理界面手动构建索引）")
+                            continue
+                except Exception as _pe:
+                    # 索引状态检查本身异常（如 index.db 存在但 meta 表未建好、
+                    # 半成品库 no such table: meta 等）与 needs_build=True 是同一语义：
+                    # 叶子索引尚未就绪。跳过并提示，不判整个任务失败（warning 非致命）。
+                    _log(f"[{mt}] 索引未就绪（检查异常: {_pe}），跳过；请先在数据管理界面手动构建索引")
+                    warnings.append(f"{mt}: 索引未构建/不完整，已跳过（检查异常: {_pe}）")
+                    continue
                 _log(f"[{mt}] 生成 session_index...")
                 exp_result = export_session_index(mt_src, force=force)
                 _log(f"[{mt}] session_index: {exp_result.get('total_sessions', 0)} sessions"
@@ -492,25 +524,57 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         continue
                     if api_key:
                         _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 {len(session_entries)}")
-                    _log(f"[{mt}] 进入 reformat+analyze: {len(session_entries)} sessions, workers={workers}...")
+                    _do_analyze = (mode == "eval")
+                    _step = "reformat+analyze" if _do_analyze else "reformat"
+                    _log(f"[{mt}] 进入 {_step}: {len(session_entries)} sessions, workers={workers}...")
                     ra_result = reformat_and_analyze(
                         src_dir=mt_src, out_dir=str(local_base),
                         session_entries=session_entries, api_key=api_key, workers=workers,
                         progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
                         log_dir=_log_dir_key(mt_src),
+                        analyze=_do_analyze,
                     )
                     all_results.extend(ra_result["results"])
                     all_entries.extend(session_entries)
                     total_sessions += len(ra_result["results"])
-                    _log(f"[{mt}] reformat+analyze 返回: results={ra_result['total_files']}, errors={len(ra_result.get('errors', []))}")
+                    _log(f"[{mt}] {_step} 返回: results={ra_result['total_files']}, errors={len(ra_result.get('errors', []))}")
             except Exception as e:
                 _log(f"[{mt}] 错误: {e}")
                 errors.append(f"{mt}: {e}")
                 logger.exception("task failed for %s (mode=%s)", mt, mode)
 
+        # 目录循环结束后、进入收尾（evaluate/上传/判定）前再查一次取消：
+        # 若用户在处理最后一个目录期间点了「终止」，这里退出，避免跑完整个 evaluate
+        # 与 OBS 上传。
+        if _is_cancelled(record_id):
+            _log("任务已终止（用户取消）")
+            update_status(record_id, "cancelled", error_message="用户终止")
+            return
+
         eval_report_path = ""
         analysis_json_stored = ""
-        if mode == "eval":
+        if mode == "reformat":
+            # reformat-only：合并后的 session JSON 已由 worker 落在 local_base/<session>/，
+            # 这里补一份 session_index.jsonl 清单后整目录上传，不跑 evaluate/质检。
+            if all_results:
+                idx_path = local_base / "session_index.jsonl"
+                with open(idx_path, "w", encoding="utf-8") as f:
+                    for entry in all_entries:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                if obs_dst:
+                    _log(f"同步到 OBS: {obs_dst}")
+                    obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
+                    ok, msg = _run_upload_cmd(str(local_base), obs_parent, upload_script, log_cb=_log)
+                    if ok:
+                        _log("上传成功")
+                        # 整目录上传成功：记入本次合并的 session 数（否则 files_uploaded 恒为 0）
+                        total_uploaded = len(all_results)
+                    else:
+                        _log(f"上传失败: {msg}")
+                        errors.append(f"OBS upload: {msg}")
+            else:
+                _log("无 session 数据")
+        elif mode == "eval":
             if all_results:
                 idx_path = local_base / "session_index.jsonl"
                 with open(idx_path, "w", encoding="utf-8") as f:
@@ -550,22 +614,41 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 ok, msg = _run_upload_cmd(str(local_base), obs_parent, upload_script, log_cb=_log)
                 if ok:
                     _log("上传成功")
+                    # 整目录上传成功：记入本次质检的 session 数（否则 files_uploaded 恒为 0）
+                    total_uploaded = len(all_results)
                 else:
                     _log(f"上传失败: {msg}")
                     errors.append(f"OBS upload: {msg}")
 
-        if errors or (mode == "eval" and not all_results):
-            _log(f"{'质检' if mode == 'eval' else '导出'}失败: {'; '.join(errors) if errors else '无数据'}")
+        _done_label = {"eval": "质检", "reformat": "合并导出"}.get(mode, "导出")
+
+        # 判定失败只看「真错误」(errors)：上传失败、异常等。
+        # warnings（如 new-api 索引未构建被跳过）不影响已成功部分的产出，不判失败。
+        no_output = (mode in ("eval", "reformat") and not all_results)
+        warn_suffix = f"（{len(warnings)} 个目录跳过：{'; '.join(warnings)}）" if warnings else ""
+
+        if errors or no_output:
+            # no_output 且无真错误：说明目录全被跳过（多为索引未构建），如实说明而非笼统“失败”
+            if no_output and not errors:
+                reason = f"无 session 数据{warn_suffix}" if warnings else "无 session 数据"
+            else:
+                reason = "; ".join(errors) + warn_suffix
+            _log(f"{_done_label}失败: {reason}")
             update_status(record_id, "failed",
-                          error_message="; ".join(errors) if errors else "无 session 数据",
+                          error_message=reason,
                           total_sessions=total_sessions,
                           files_uploaded=total_uploaded,
                           files_skipped=total_skipped,
                           eval_report_path=eval_report_path,
                           analysis_json=analysis_json_stored)
         else:
-            _log(f"{'质检' if mode == 'eval' else '导出'}完成: {total_sessions} sessions")
+            # 成功；若有跳过目录，把提示写进 error_message 供前端展示，但状态是 success
+            msg = f"{_done_label}完成: {total_sessions} sessions"
+            if warnings:
+                msg += f"，{len(warnings)} 个目录跳过（索引未构建）"
+            _log(msg)
             update_status(record_id, "success",
+                          error_message=(f"部分目录跳过：{'; '.join(warnings)}" if warnings else ""),
                           total_sessions=total_sessions,
                           files_uploaded=total_uploaded,
                           files_skipped=total_skipped,
@@ -588,7 +671,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         mtime_dirs = body.get("mtime_dirs", [])
         obs_prefix = body.get("obs_prefix", "").strip().rstrip("/")
         force = body.get("force", False)
-        mode = "eval" if body.get("auto_eval", False) else "export"
+        # mode 优先显式取值（export / eval / reformat）；兼容旧的 auto_eval 布尔
+        mode = body.get("mode")
+        if mode not in ("export", "eval", "reformat"):
+            mode = "eval" if body.get("auto_eval", False) else "export"
 
         if not mtime_dirs:
             return JSONResponse({"detail": "mtime_dirs is required"}, status_code=400)
@@ -640,6 +726,52 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         return JSONResponse({"record_id": new_record_id, "status": "queued", "mode": "eval"})
 
+    @app.post("/api/export/retry")
+    async def export_retry(request: Request):
+        """重试失败/已取消（含用户终止）的任务：用原记录参数新建一条记录重跑。
+
+        原失败记录保留作历史（同 export_eval 的"从原记录重建"模式）。沿用原
+        mode（export/reformat/eval）、api_key、mtime_dirs；obs_prefix 从原
+        obs_dst 复原，保证与原任务一致。
+        """
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        src_record_id = body.get("record_id")
+        if not src_record_id:
+            return JSONResponse({"detail": "record_id is required"}, status_code=400)
+
+        rec = get_record(src_record_id)
+        if not rec:
+            return JSONResponse({"detail": "Record not found"}, status_code=404)
+        if rec["status"] not in ("failed", "cancelled"):
+            return JSONResponse({"detail": "只能重试失败/已取消的任务"}, status_code=400)
+
+        mode = rec.get("mode") or "export"
+        # obs_prefix 复原：obs_dst 形如 <prefix>/session/... 或 <prefix>/session_analysis/...
+        obs_dst = rec.get("obs_dst", "") or ""
+        obs_prefix = ""
+        if obs_dst:
+            for _seg in ("/session_analysis/", "/session/"):
+                if _seg in obs_dst:
+                    obs_prefix = obs_dst.split(_seg)[0]
+                    break
+            else:
+                obs_prefix = obs_dst.rstrip("/").rsplit("/", 1)[0]
+        now_tag = datetime.now().strftime("%y%m%d%H%M%S")
+
+        new_record_id = create_record(
+            api_key=rec["api_key"], key_slot=rec["key_slot"],
+            mtime_dirs=rec["mtime_dirs"],
+            obs_dst="", local_copy_dir="",
+            mode=mode,
+        )
+
+        _enqueue_task(new_record_id, lambda rid=new_record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode: _run_task(rid, ed, ek, op, nt, m))
+
+        return JSONResponse({"record_id": new_record_id, "status": "queued", "mode": mode})
+
     @app.post("/api/export/upload_retry")
     async def export_upload_retry(request: Request):
         denied = _require_key_api(request)
@@ -680,11 +812,16 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         rec = get_record(record_id)
         if not rec:
             return JSONResponse({"detail": "Record not found"}, status_code=404)
-        if rec["status"] != "queued":
-            return JSONResponse({"detail": "只能取消排队中的任务"}, status_code=400)
+        if rec["status"] not in ("queued", "pending", "running"):
+            return JSONResponse({"detail": "只能终止排队中或运行中的任务"}, status_code=400)
+        # 标记取消：加入本进程集合（供出队/抢槽/目录循环检查点识别），并把 DB 置
+        # cancelled（跨 worker 真相源）。
+        #   - queued/pending：出队时被 _is_cancelled 跳过。
+        #   - running：执行线程在目录循环顶部的检查点自行退出；即使线程已死
+        #     （如被 sqlite 撞崩的僵尸），DB 置 cancelled 后前端"运行中"立即消失。
         with _queue_lock:
             _cancelled_ids.add(record_id)
-        update_status(record_id, "cancelled", error_message="用户取消")
+        update_status(record_id, "cancelled", error_message="用户终止")
         return JSONResponse({"record_id": record_id, "status": "cancelled"})
 
     @app.get("/api/export/status/{record_id}")
@@ -709,6 +846,19 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         else:
             recs = list_records()
         return JSONResponse({"records": recs})
+
+    @app.get("/api/export/records-slim")
+    def export_records_slim(request: Request, limit_per_key: int = 10):
+        """轻量记录列表：只查 export_records（不重扫统计/不读大字段），按 key_slot 分组。
+
+        供前端高频轮询（几秒一次）只更新每张卡片的记录状态/进度，重的
+        /api/export/keys（含跨 root 统计扫盘）保持手动或低频刷新。
+        """
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        grouped = list_records_all_slim(limit_per_key=limit_per_key)
+        return JSONResponse({"records_by_slot": grouped})
 
     @app.get("/api/export/obs/ls")
     def export_obs_ls(request: Request, path: str = ""):
@@ -842,5 +992,22 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             "total_sessions": rec.get("total_sessions", 0),
             "error_message": rec.get("error_message", ""),
         })
+
+    def _cancel_interrupted():
+        """启动时把所有遗留的 running/queued/pending 任务直接取消，队列从零开始。
+
+        之前的自动重新入队方案在频繁重启时会反复重建任务、刷屏“重新入队”日志，
+        且会带着旧的半成品状态续跑。改为：重启即放弃上一轮排队，全部标 cancelled，
+        用户按需在页面手动重跑。
+        """
+        try:
+            n = cancel_interrupted()
+        except Exception:
+            logger.exception("cancel_interrupted failed at startup")
+            return
+        if n:
+            logger.info("startup: cancelled %d interrupted export record(s); queue reset", n)
+
+    _cancel_interrupted()
 
     # start_stats_warmer(str(env_dir))

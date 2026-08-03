@@ -433,6 +433,124 @@ python analyze_sessions.py --dir /tmp/sessions
 python test/test-api.py
 ```
 
+## 离线批量导出（reformat）
+
+`tools/offline_reformat_export.py` 是**网页版 reformat 导出的离线跑版本**：对当前所有 key，逐个 key 做「合并导出（reformat）」，成功后写入与网页同一个 `export_session_record.db`，刷新导出页即在对应 key 卡片下显示为**成功**。
+
+用途：不经过网页/队列，直接在服务器上一次性把所有 key 的 session 合并导出（并可上传 OBS），记录与网页版逐字段对齐（`mode=reformat`、`total_sessions`、`local_copy_dir`、`obs_dst`、`progress_log`、状态判定等）。
+
+### 做什么
+
+严格复刻 `utils/export_routes.py::_run_task_inner` 的 `mode="reformat"` 分支，逐 key 执行：
+
+1. `build_stats_multi` 取到每个 key 的完整 api_key + 全部 mtime 目录；
+2. `create_record(mode="reformat")` → `export_session_index` → `_load_session_index` 按 key 过滤 → `reformat_and_analyze(analyze=False)` 合并三元组落本地 → 写 `session_index.jsonl` → 整目录上传 OBS → `update_status("success", …)`。
+
+产物落在 `logs_session_analysis/{env}/{key-slot}/ex-{时间戳}/`，与网页版一致。
+
+### 用法
+
+在项目根目录（`/mnt/llm-proxy-main`）下运行：
+
+```shell
+# 所有 key，全部 mtime，上传 OBS（跟网页版完全一致）
+python3 tools/offline_reformat_export.py
+
+# 先看计划、不执行（强烈建议全量前先跑一次）
+python3 tools/offline_reformat_export.py --dry-run
+
+# 只本地导出，不上传 OBS
+python3 tools/offline_reformat_export.py --no-obs
+
+# 只导某个 key —— 三种写法（可多次、可混用）：
+python3 tools/offline_reformat_export.py --key sk-xxxxxxxx   # 完整 api_key
+python3 tools/offline_reformat_export.py --key key-Kjfu      # key slot（网页卡片上的分组名）
+python3 tools/offline_reformat_export.py --key Kjfu          # 后 4 位
+
+# 只导匹配的 mtime 目录（子串匹配，可多次）
+python3 tools/offline_reformat_export.py --mtime 260803
+
+# qualified 阈值（同网页，默认 5）
+python3 tools/offline_reformat_export.py --threshold 5
+```
+
+`--key` 的后三种写法按「api_key 最后 4 位相同」匹配，与网页卡片 `key-XXXX` 的分组口径一致。
+
+### 说明
+
+- **零配置/零凭据**：自动扫 `logs/port*/` 定位服务日志目录（含各 `.db`），读 `logs/app-meta-port*.json` 推出 `ENV_DIR`，与正在运行的服务指向同一套 DB / 同一 logs 根，无需任何环境变量。也可用 `--service-log-dir` / `--env-dir` 手动指定。
+- **串行执行**：逐 key 顺序跑（与网页队列 `EXPORT_CONCURRENCY=1` 一致），不会和线上导出撞 OBS / 本地拷贝。
+- **全量耗时**：默认对全部 key 上传 OBS，量大耗时长。建议先 `--dry-run` 看计划，或先 `--key` 单个试跑确认 OBS 通畅，再全量。
+
+## 离线批量回填（new-api index）
+
+`scripts/backfill_all.py` 是**数据管理页「回填」的命令行版**：对页面登记的所有源（活跃 env_dir + 历史路径）逐个执行 new-api 富 index（`index.db`）回填，等价于在页面上对每个 new-api 源依次点「同步」+「构建索引」。
+
+用途：不经过网页/后台队列，直接在服务器上把所有源的小时叶子索引一次性补齐（历史预览、导出、质检的前置）。适合 cron 定时补跑或手动排障，**无需服务在运行**。
+
+### 与网页版的关系
+
+- **状态、日志与页面完全同源**：叶子构建状态/计数写进同一个 `log_dir.db`（数据管理页、导出页读同一张表）；生命周期事件写进同一份 `{SERVICE_LOG_DIR}/backfill.log`（页面「构建日志」弹窗读同一文件）。跑完刷新数据管理页即见最新「已回填/总数」。
+- **底层同一套**：复用 `utils/newapi_backfill.py` 的 `sync_leaves`（同步清单）+ `_run`（逐叶构建），与页面「同步」「构建索引」按钮走同一代码。
+- **关键差异**：网页版由全局调度线程**异步**串行执行（点一下即入队返回）；本脚本在**当前进程内同步**串行执行，一个源跑完再跑下一个，跑完即退出（终端会一直占用直到全部完成——它不是后台进程；构建时 `workers=N` 是叶子内 enrich 的进程池子进程，属正常）。
+
+### 做什么
+
+逐源执行两步（等价页面「同步」+「构建索引」）：
+
+1. `sync_leaves(root)`：扫叶子清单写入 `log_dir.db`，让 DB 先有权威的叶子总数/已建数；
+2. `_run(root, workers, force)`：逐叶 `build_leaf`（ingest + enrich 补 meta + 聚合 sessions），状态/计数写 `log_dir.db`，事件写 `backfill.log`。
+
+只对 **new-api** 格式的源回填，非 new-api / 不存在的源自动跳过。构建时每隔几秒打印实时进度：**当前正在构建哪个叶子目录、已处理多少条、叶子级总进度**。
+
+### 用法
+
+在项目根目录（`/mnt/llm-proxy-main`）下运行：
+
+```shell
+# 增量回填所有 new-api 源（跳过已完成且无新增的叶子）
+python -m scripts.backfill_all
+
+# 先看计划、不执行（不写 DB、不构建；建议全量前先跑一次）
+python -m scripts.backfill_all --dry-run
+
+# 全量重建（清掉旧 index.db 重建，用于口径变更 / 修数据）
+python -m scripts.backfill_all --force
+
+# 按「标识」筛选源（匹配 name / root_id / 路径子串，可多次，取并集）
+python -m scripts.backfill_all --source jumper-003        # 按名称（可能命中多个同前缀源）
+python -m scripts.backfill_all --source 438181a9          # 按 root_id（唯一，精确定位单一源）
+python -m scripts.backfill_all --source 438181a9 --source proxy-004
+
+# 按目录直接指定源（可多次）
+python -m scripts.backfill_all --root /data/logs_all/xxx --root /data/hist/yyy
+
+# 只同步叶子清单到 DB、不真正构建（等价页面「同步」按钮）
+python -m scripts.backfill_all --sync-only
+
+# 覆盖叶子内 enrich 进程池并行度（默认 min(8, CPU)）
+python -m scripts.backfill_all --workers 4
+
+# 调整/关闭实时进度打印间隔（秒，默认 5，0 关闭）
+python -m scripts.backfill_all --progress-interval 2
+```
+
+构建进度打印形如：
+
+```text
+构建中 [叶子 20/66] 当前=26080100（计数中…）
+构建中 [叶子 20/66] 当前=26080100 已处理 400/72268 条
+构建中 [叶子 21/66] 当前=26080101 已处理 1200/58133 条
+```
+
+### 说明
+
+- **状态同步与服务同源**：`log_dir.db` / `backfill.log` 均在 `SERVICE_LOG_DIR` 下，由 `PROXY_PORT`、`LOG_TASK_TAG`、`UPSTREAM_API_KEY` 等环境变量决定。**务必在与服务相同的工作目录、相同环境变量下运行**，否则会解析到另一套目录、写到别的 `log_dir.db`，页面读不到。
+- **`--source` 口径**：命中 name（页面展示名）/ root_id（路径 md5 前 8 位，唯一）/ 路径子串任一即可，多个 `--source` 取并集。name 可能重复（如 `jumper-003` 与 `jumper-003-latest`），要精确定位单一源用 **root_id**；任一 `--source` 匹配不到源即报错退出。`--dry-run` 输出里每行都带 `root_id`，照抄即可。
+- **增量 vs 全量**：默认（不带 `--force`）只处理需要构建的叶子（无 `index.db` / `index.jsonl` 有新增 / 有待补 meta / sessions 脏），跑过的不重复。`--force` 清掉旧 `index.db` 全量重建，用于修数据或口径变更。
+- **叶子卡住可续跑**：单个叶子若疑似 NFS 读死（`stall_timeout` 内无进展）会跳过并标 error，不拖垮整个源；网络恢复后再跑一次（增量模式会自动重扫补跑这些叶子）。
+- **退出码**：0 全部成功；1 有源在回填中报错（root 级崩溃或有失败/卡住的叶子）。
+
 ## 统计token数
 
 1. 基于web界面

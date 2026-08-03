@@ -43,7 +43,7 @@ from utils.key_routes import register_key_routes
 from utils.export_routes import register_export_routes
 from utils.channel_routes import register_channel_routes
 from utils.user_routes import register_user_routes
-from utils.export_store import init_db as init_export_db, mark_interrupted as mark_export_interrupted
+from utils.export_store import init_db as init_export_db
 from utils.backup_store import init_db as init_backup_db
 from utils.logdir_store import init_db as init_logdir_db, reset_building_on_startup as reset_logdir_building
 from utils.backup_routes import register_backup_routes
@@ -763,10 +763,13 @@ init_export_db(SERVICE_LOG_DIR)
 init_backup_db(SERVICE_LOG_DIR)
 init_logdir_db(SERVICE_LOG_DIR)
 reset_logdir_building()
+from utils.newapi_backfill import init_backfill_logger
+init_backfill_logger(SERVICE_LOG_DIR)
 init_user_db(SERVICE_LOG_DIR)
 init_session_db(SERVICE_LOG_DIR)
 load_custom_models()
-mark_export_interrupted()
+# 被重启打断的导出/质检任务不再直接判失败，而是在 register_export_routes() 内
+# （路由闭包就绪后）由 _requeue_interrupted() 自动重新入队，见 utils/export_routes.py。
 load_index(LOGS_DIR)
 # 多 worker：仅 leader 跑 metrics 扫描线程，避免 N 个进程重复写 rpm.log/scanner_state.json
 from utils.leader_lock import try_acquire_leader, is_leader
