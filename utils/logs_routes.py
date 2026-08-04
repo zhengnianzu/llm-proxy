@@ -104,6 +104,10 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
                     )
                 except Exception:
                     pass
+                # 返回给前端的 verify 只保留可 JSON 序列化的公开字段：
+                # verify_root 原始返回带 _completed_paths(set) / _leaf_map，仅供落库，
+                # 直接塞进 JSONResponse 会 "set is not JSON serializable"。
+                verify = {k: v for k, v in verify.items() if not k.startswith("_")}
             except Exception:
                 verify = {}
     else:
