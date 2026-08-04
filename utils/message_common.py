@@ -286,6 +286,10 @@ def parse_streaming_response(chunks: List[dict]) -> dict:
         elif t == "content_block_stop":
             idx = chunk.get("index", 0)
             if idx in block_json_buf:
+                # content_block_start 可能在上游 SSE 里丢帧（脏数据），导致 blocks
+                # 没有该 idx，只剩 input_json_delta 攒出的 buf——补一个 tool_use 骨架，
+                # 避免 blocks[idx] KeyError（与 text/thinking 分支的 setdefault 兜底一致）。
+                blocks.setdefault(idx, {"type": "tool_use", "name": "", "input": {}})
                 try:
                     blocks[idx]["input"] = json.loads(block_json_buf[idx])
                 except json.JSONDecodeError:

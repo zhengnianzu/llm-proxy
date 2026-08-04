@@ -25,6 +25,8 @@ from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from utils.log_scan import iter_index_dirs
+
 # enrich 进程池用 spawn 启动，而非默认 fork。
 # 本进程是多线程（Flask + 后台调度 + asyncio 线程池），fork worker 会继承父进程
 # 在 fork 那一刻处于加锁状态的锁（stdout flush 锁 / sqlite 锁等），worker 一 flush
@@ -82,6 +84,11 @@ except ValueError:
 # 每叶子一把写锁（同进程内串行写；跨实例互斥由上层 dispatcher + leader_lock 负责）
 _leaf_locks: Dict[str, threading.Lock] = {}
 _leaf_locks_guard = threading.Lock()
+
+# verify_root 的短 TTL 缓存：root -> (ts, result)。避免「数据管理」连续刷新反复扫盘。
+_verify_cache: Dict[str, tuple] = {}
+_verify_lock = threading.Lock()
+_VERIFY_TTL = 30.0
 
 
 def db_path(leaf_dir: str) -> str:
@@ -182,7 +189,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 def _db_exists(leaf_dir: str) -> bool:
     return os.path.isfile(db_path(leaf_dir))
-
 
 def _meta_get(conn: sqlite3.Connection, k: str, default: str = "") -> str:
     row = conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
@@ -589,29 +595,128 @@ def remove_db(leaf_dir: str) -> None:
 
 
 def needs_build(leaf_dir: str) -> bool:
-    """叶子是否需要（重新）构建：无 db、index.jsonl 有新增、有待补 meta、或 sessions 脏。"""
+    """叶子是否需要构建/重建：无 index.db / index.jsonl 有新增（offset 落后）/
+    有待补 meta（pending>0）/ sessions 脏，任一为真即 True。
+
+    与 leaf_completed 严格互补：对同一个有 index.jsonl 的叶子，
+    leaf_completed 为真 ⇔ needs_build 为假。回填增量模式（_run 非 force）用它筛掉
+    已完成的叶子，ensure_fresh 用它判断是否要真正重建，避免无谓开进程池。
+
+    只读、轻量：一次 getsize + 一条 meta 读取 + 一条 COUNT，不开进程池、不写库。
+    index.jsonl 不存在的不是有效叶子，返回 False（无从构建）。
+    """
     index_file = os.path.join(leaf_dir, _INDEX_NAME)
     if not os.path.isfile(index_file):
-        return False  # 连 index.jsonl 都没有，不是有效叶子
+        return False
     if not _db_exists(leaf_dir):
-        return True
+        return True  # 从未构建过 → 需要构建
+    conn = _connect(leaf_dir)
+    try:
+        offset = int(_meta_get(conn, "ingest_offset", "0") or "0")
+        pending = conn.execute(
+            "SELECT COUNT(*) AS c FROM requests WHERE q1_hash IS NULL").fetchone()["c"]
+        dirty = _meta_get(conn, "sessions_dirty", "1") == "1"
+    except sqlite3.OperationalError:
+        return True  # db 半成品（上次构建被 kill 等）：需要重建
+    finally:
+        conn.close()
+    try:
+        cur_size = os.path.getsize(index_file)
+    except OSError:
+        return False
+    # index.jsonl 有新增（offset 落后）/ 有待补 meta / sessions 脏 → 需要构建
+    return cur_size != offset or pending > 0 or dirty
+
+
+def leaf_completed(leaf_dir: str) -> bool:
+    """叶子是否「已完成跟上」：index.db 存在，且已追上 index.jsonl 当前大小，
+    且无待补 meta（pending=0）、sessions 不脏。
+
+    与 needs_build 互补：needs_build 回答「要不要重建」（无 db / 有新增 / 有待补 /
+    sessions 脏任一即 True）；本函数回答「现在是否已是完成态」——needs_build 的
+    反向精确判据，用于「数据管理」刷新时的主动核对：实时读每个叶子，而不是只看
+    log_dir.db 里上次同步的记录。
+
+    只读、轻量：一次 getsize + 一条 meta 读取 + 两条 COUNT，不开进程池、不写库，
+    可安全放在请求热路径（配合上层 TTL 缓存使用）。index.jsonl 都不存在的不算
+    有效叶子，返回 False。
+    """
+    index_file = os.path.join(leaf_dir, _INDEX_NAME)
+    if not os.path.isfile(index_file):
+        return False
+    if not _db_exists(leaf_dir):
+        return False
     conn = _connect(leaf_dir)
     try:
         offset = int(_meta_get(conn, "ingest_offset", "0") or "0")
         pending = conn.execute("SELECT COUNT(*) AS c FROM requests WHERE q1_hash IS NULL").fetchone()["c"]
         dirty = _meta_get(conn, "sessions_dirty", "1") == "1"
     except sqlite3.OperationalError:
-        # db 文件存在但表缺失/损坏（多为上次构建中途被 kill，如 OOM，留下的半成品）：
-        # 视为「需要重建」，切勿抛异常——否则会拖垮整个 root 的 needs_build 遍历，
-        # 导致「增量构建」对该 root 一个叶子都不跑（整批被外层 except 判 error）。
-        return True
+        return False  # db 半成品（上次构建被 kill 等）：未完成
     finally:
         conn.close()
     try:
         cur_size = os.path.getsize(index_file)
     except OSError:
-        cur_size = offset
-    return cur_size != offset or pending > 0 or dirty
+        return False
+    return cur_size == offset and pending == 0 and not dirty
+
+
+def verify_root(root: str, ttl: float = _VERIFY_TTL) -> Dict[str, Any]:
+    """主动核对某 new-api 源下所有叶子：实时读每个叶子是否「已完成跟上」。
+
+    返回 {total, completed, pending, incomplete, from_disk, checked_at}。
+    与 needs_build 语义一致但更主动：不看 log_dir.db 的同步记录，逐叶
+    leaf_completed() 实测（index.db 是否存在 + 是否追上 index.jsonl offset）。
+
+    带短 TTL 缓存：同源在 ttl 秒内复用结果，避免连续刷新反复 stat 网络盘。
+    网络盘 stat 有延迟，TTL 内结果视为近似即可。
+    """
+    global _verify_cache
+    key = os.path.normpath(root)
+    now = time.time()
+    with _verify_lock:
+        hit = _verify_cache.get(key)
+        if hit and (now - hit[0]) < ttl:
+            return dict(hit[1])
+    total = completed = 0
+    try:
+        leaves = list(iter_index_dirs(Path(root)))
+    except Exception:
+        leaves = []
+    for lf in leaves:
+        total += 1
+        try:
+            if leaf_completed(str(lf)):
+                completed += 1
+        except Exception:
+            continue  # 单叶探测失败不拖垮整个源
+    # 逐叶判定是否完成（复用刚算的结果，不重复 stat）
+    leaf_map = {}
+    completed_paths = set()
+    for lf in leaves:
+        p = str(lf)
+        try:
+            done = leaf_completed(p)
+        except Exception:
+            done = False
+        leaf_map[p] = done
+        if done:
+            completed_paths.add(p)
+    res = {
+        "total": total,
+        "completed": completed,
+        "pending": total - completed,
+        "incomplete": [os.path.basename(str(l).rstrip("/")) for l in leaves
+                       if not leaf_map.get(str(l))] if total - completed <= 20 else [],
+        "from_disk": True,
+        "checked_at": time.time(),
+        "_completed_paths": completed_paths,   # 内部供落库（save_verify）用，不对外展示
+        "_leaf_map": leaf_map,                 # 内部：叶子绝对路径 -> 是否完成
+    }
+    with _verify_lock:
+        _verify_cache[key] = (time.time(), dict(res))
+    return res
 
 
 def ensure_fresh(leaf_dir: str, workers: int = 8) -> Dict[str, Any]:

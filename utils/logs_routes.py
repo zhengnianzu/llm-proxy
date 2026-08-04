@@ -77,6 +77,38 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
                 leaf_count = sum(1 for _ in iter_index_dirs(Path(path)))
             except Exception:
                 leaf_count = 0
+
+        # 主动核对：逐叶读 index.db / index.jsonl offset（带短 TTL 缓存），判定「已完成跟上」。
+        # 只对 new-api 源做。实时性高于 log_dir.db 的同步记录——离线/后台构建后即使 DB
+        # 未同步，这里也能如实反映磁盘真相。核对结果同时落库（leaf_status.verified +
+        # verify_log 留痕），供页面读 DB 展示 / 离线脚本共享。
+        verify = {}
+        if fmt == "newapi":
+            try:
+                from utils.newapi_index_db import verify_root
+                verify = verify_root(path)
+                # 落库：把 completed 逐叶写进 leaf_status.verified，根级计数写 verify_log。
+                # 需要 logdir_db 已初始化（服务启动时 init）；这里容错，失败不影响核对返回。
+                try:
+                    import utils.logdir_store as lds
+                    from utils.logs_config import get_root_id as _grid
+                    from utils.log_scan import dir_key_for
+                    lds.save_verify(
+                        _grid(path),
+                        {k: v for k, v in verify.items() if not k.startswith("_")},
+                        leaf_dir_keys={
+                            p: dir_key_for(Path(path), Path(p))
+                            for p in verify.get("_leaf_map", {})
+                        },
+                        completed_paths=verify.get("_completed_paths"),
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                verify = {}
+    else:
+        verify = {}
+
     return {
         "path": path,
         "name": name or "default",
@@ -87,6 +119,7 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
         "leaf_count": leaf_count,
         "built_count": built_count,
         "synced": synced,
+        "verify": verify,
         "status": "活跃" if active else "历史",
     }
 

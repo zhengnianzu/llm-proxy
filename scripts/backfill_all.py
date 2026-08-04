@@ -296,6 +296,22 @@ def main(argv=None) -> int:
             continue
 
         if args.sync_only:
+            # sync-only 也做一次主动核对并落库：DB 里既有清单，又能如实反映磁盘
+            # 是否追上 index.jsonl（离线也能写 verify_log，页面可直接读）。
+            try:
+                from utils.newapi_index_db import verify_root
+                v = verify_root(root, ttl=0)
+                lds.save_verify(rid, {k: x for k, x in v.items() if not k.startswith("_")},
+                                leaf_dir_keys={
+                                    p: __import__("utils.log_scan", fromlist=["dir_key_for"]).dir_key_for(
+                                        Path(root), Path(p))
+                                    for p in v.get("_leaf_map", {})
+                                },
+                                completed_paths=v.get("_completed_paths"))
+                logger.info("    核对：total=%d completed=%d pending=%d（已写入 DB）",
+                            v["total"], v["completed"], v["pending"])
+            except Exception:
+                logger.exception("    核对落库失败：%s", root)
             continue
 
         # 步骤 2：同步执行回填（等价页面「构建索引」，但不入全局队列、当前进程内跑）。
@@ -322,6 +338,24 @@ def main(argv=None) -> int:
                     st.get("status"), st.get("done_leaves"), st.get("total_leaves"),
                     db_summ.get("built"), db_summ.get("total"),
                     db_summ.get("error"), took)
+
+        # 步骤 3：回填后主动核对（逐叶实测 index.db 是否追上 index.jsonl），并落库。
+        # 这样离线回填的成果不止写在构建状态里，也写进 verify_log + leaf_status.verified，
+        # 页面刷新即可读 DB 展示，无需重新扫盘。
+        try:
+            from utils.newapi_index_db import verify_root
+            v = verify_root(root, ttl=0)
+            lds.save_verify(rid, {k: x for k, x in v.items() if not k.startswith("_")},
+                            leaf_dir_keys={
+                                p: __import__("utils.log_scan", fromlist=["dir_key_for"]).dir_key_for(
+                                    Path(root), Path(p))
+                                for p in v.get("_leaf_map", {})
+                            },
+                            completed_paths=v.get("_completed_paths"))
+            logger.info("    核对：total=%d completed=%d pending=%d（已写入 DB）",
+                        v["total"], v["completed"], v["pending"])
+        except Exception:
+            logger.exception("    核对落库失败：%s", root)
 
         # 判定该源是否有失败/卡住的叶子（DB error 计数或内存 error 状态）。
         if st.get("status") == "error" or db_summ.get("error", 0):

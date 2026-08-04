@@ -52,6 +52,26 @@ def init_db(db_dir: str):
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_leaf_status_root ON leaf_status(root_id)"
         )
+        # 主动核对结果（逐叶实测 index.db 是否追上 index.jsonl）：老库没有此列，
+        # ALTER 补列；重复执行幂等（列已存在会抛错，捕获即可）。
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(leaf_status)")}
+        if "verified" not in cols:
+            _conn.execute("ALTER TABLE leaf_status ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
+        # 核对留痕：每次 verify 写一行（根级计数 + 未跟上明细），供页面读最近一次 / 查历史。
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS verify_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_id     TEXT NOT NULL,
+                total       INTEGER NOT NULL DEFAULT 0,
+                completed   INTEGER NOT NULL DEFAULT 0,
+                pending     INTEGER NOT NULL DEFAULT 0,
+                incomplete  TEXT NOT NULL DEFAULT '',   -- JSON 数组（dir_key）
+                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_verify_log_root ON verify_log(root_id, id)"
+        )
         _conn.commit()
 
 
@@ -160,12 +180,79 @@ def has_any(root_id: str) -> bool:
     return row is not None
 
 
+def save_verify(root_id: str, result: dict, leaf_dir_keys: Optional[dict] = None,
+                completed_paths: Optional[set] = None) -> None:
+    """把一次主动核对结果落库（离线脚本 / 页面刷新核对后调用）。
+
+    - 逐叶写 leaf_status.verified：leaf_dir_keys 为 {叶子绝对路径: dir_key}，
+      completed_paths 为「已跟上」的叶子绝对路径集合；命中的标 1，否则标 0
+      （与 built 语义不同：built 只看有没有 index.db，verified 额外要求追上
+      index.jsonl 的 offset）。
+    - 根级计数 + 未跟上明细写一行 verify_log，供页面读最近一次 / 查历史。
+
+    叶子不在 DB 里（未同步过）时跳过不插入——避免核对把未同步的叶子也写进清单，
+    口径与「先同步再核对」一致。
+    """
+    if not _ready():
+        return
+    if completed_paths is None:
+        # 兼容：result 里可能带 _completed_paths（verify_root 原始返回）
+        completed_paths = result.get("_completed_paths", set())
+    with _lock:
+        if leaf_dir_keys:
+            for leaf_path, dk in leaf_dir_keys.items():
+                _conn.execute(
+                    "UPDATE leaf_status SET verified = ? WHERE root_id = ? AND dir_key = ?",
+                    (1 if leaf_path in completed_paths else 0,
+                     root_id, dk),
+                )
+        import json as _json
+        _conn.execute(
+            "INSERT INTO verify_log (root_id, total, completed, pending, incomplete) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (root_id,
+             int(result.get("total", 0)),
+             int(result.get("completed", 0)),
+             int(result.get("pending", 0)),
+             _json.dumps(result.get("incomplete", []), ensure_ascii=False)),
+        )
+        _conn.commit()
+
+
+def get_last_verify(root_id: str) -> Optional[dict]:
+    """读某源最近一次核对结果（verify_log 最新一行）。无则 None。"""
+    if not _ready():
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT total, completed, pending, incomplete, created_at "
+            "FROM verify_log WHERE root_id = ? ORDER BY id DESC LIMIT 1",
+            (root_id,),
+        ).fetchone()
+    if not row:
+        return None
+    import json as _json
+    try:
+        incomplete = _json.loads(row["incomplete"] or "[]")
+    except (ValueError, TypeError):
+        incomplete = []
+    return {
+        "total": row["total"] or 0,
+        "completed": row["completed"] or 0,
+        "pending": row["pending"] or 0,
+        "incomplete": incomplete,
+        "created_at": row["created_at"],
+        "from_db": True,
+    }
+
+
 def delete_root(root_id: str):
-    """移除某源时清掉其所有叶子记录。"""
+    """移除某源时清掉其所有叶子记录（含核对留痕）。"""
     if not _ready():
         return
     with _lock:
         _conn.execute("DELETE FROM leaf_status WHERE root_id = ?", (root_id,))
+        _conn.execute("DELETE FROM verify_log WHERE root_id = ?", (root_id,))
         _conn.commit()
 
 

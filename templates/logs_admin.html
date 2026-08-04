@@ -153,6 +153,13 @@
                                 :title="'疑似 NFS 读阻塞被跳过：' + (bf[r.path].last_stuck || '') + '。NFS 恢复后点「增量构建」补跑。'">
                                 ⚠ 卡住 {{ bf[r.path].stuck_leaves }}（待补跑）
                             </span>
+                            <span v-if="r.verify && r.verify.total" style="font-size:.72rem; display:block;"
+                                :class="r.verify.completed === r.verify.total ? 'msg-ok' : ''"
+                                :style="r.verify.completed === r.verify.total ? '' : 'color:var(--warning,#b8860b);'"
+                                :title="'逐叶实测 index.db 是否已追上 index.jsonl（核对结果，非索引库计数）。' + (r.verify.incomplete && r.verify.incomplete.length ? '未跟上: ' + r.verify.incomplete.join(', ') : '')">
+                                {{ r.verify.completed === r.verify.total ? '✓ 核对完成' : '⚠ 核对 ' + r.verify.completed + '/' + r.verify.total }}
+                                <span v-if="r.verify.completed !== r.verify.total">（未跟上 {{ r.verify.total - r.verify.completed }}）</span>
+                            </span>
                         </template>
                         <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
                     </td>
