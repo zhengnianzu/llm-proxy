@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from utils.logs_config import (
     get_active_base,
@@ -39,6 +40,34 @@ def _require_ajax(request: Request):
 def _is_admin(request: Request) -> bool:
     role = request.session.get("monitor_role", "admin")
     return role == "admin"
+
+
+def _verify_and_persist(path: str) -> dict:
+    """实测核对某 new-api 源并增量落库，返回对外 verify 结构（仅公开字段）。
+
+    仅在「核对」入口（用户主动点核对 / 首屏首次回退）调用——绝不放到 list 热路径。
+    verify_root 逐叶实测（内部 30s TTL 缓存）；save_verify 把逐叶 verified + 根级
+    计数增量写进 log_dir.db，供之后首屏 get_last_verify 秒读。
+    """
+    from utils.newapi_index_db import verify_root
+    verify = verify_root(path)
+    try:
+        import utils.logdir_store as lds
+        from utils.logs_config import get_root_id as _grid
+        from utils.log_scan import dir_key_for
+        lds.save_verify(
+            _grid(path),
+            {k: v for k, v in verify.items() if not k.startswith("_")},
+            leaf_dir_keys={
+                p: dir_key_for(Path(path), Path(p))
+                for p in verify.get("_leaf_map", {})
+            },
+            completed_paths=verify.get("_completed_paths"),
+        )
+    except Exception:
+        pass
+    # 只回公开字段：_completed_paths(set) / _leaf_map 不可 JSON 序列化
+    return {k: v for k, v in verify.items() if not k.startswith("_")}
 
 
 def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "default") -> dict:
@@ -73,41 +102,26 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
             except Exception:
                 synced = False
         else:
-            try:
-                leaf_count = sum(1 for _ in iter_index_dirs(Path(path)))
-            except Exception:
-                leaf_count = 0
+            # native 等非 newapi 源：叶子计数需在网络盘上全量递归遍历（iter_index_dirs），
+            # 慢，且会拖死 list 热路径（SFS 上单源可达 30s+）。首屏不扫盘，leaf_count 置 None
+            # 表「未统计」，前端显示占位 + 「统计」按钮，按需调 /api/logs-admin/count-leaves。
+            leaf_count = None
 
-        # 主动核对：逐叶读 index.db / index.jsonl offset（带短 TTL 缓存），判定「已完成跟上」。
-        # 只对 new-api 源做。实时性高于 log_dir.db 的同步记录——离线/后台构建后即使 DB
-        # 未同步，这里也能如实反映磁盘真相。核对结果同时落库（leaf_status.verified +
-        # verify_log 留痕），供页面读 DB 展示 / 离线脚本共享。
+        # 核对结果：只读 log_dir.db 里最近一次落库的结果（get_last_verify），首屏绝不扫盘。
+        # 只对 new-api 源。DB 有缓存 → 秒读；从未核对过但已同步 → 首屏自动核对一次并落库
+        # （之后即走缓存）；未同步 → 保持空，前端提示先「同步」。实时核对改由「核对」按钮
+        # 主动触发（/api/logs-admin/verify），把逐叶实测这类贵操作移出 list 热路径。
         verify = {}
         if fmt == "newapi":
             try:
-                from utils.newapi_index_db import verify_root
-                verify = verify_root(path)
-                # 落库：把 completed 逐叶写进 leaf_status.verified，根级计数写 verify_log。
-                # 需要 logdir_db 已初始化（服务启动时 init）；这里容错，失败不影响核对返回。
-                try:
-                    import utils.logdir_store as lds
-                    from utils.logs_config import get_root_id as _grid
-                    from utils.log_scan import dir_key_for
-                    lds.save_verify(
-                        _grid(path),
-                        {k: v for k, v in verify.items() if not k.startswith("_")},
-                        leaf_dir_keys={
-                            p: dir_key_for(Path(path), Path(p))
-                            for p in verify.get("_leaf_map", {})
-                        },
-                        completed_paths=verify.get("_completed_paths"),
-                    )
-                except Exception:
-                    pass
-                # 返回给前端的 verify 只保留可 JSON 序列化的公开字段：
-                # verify_root 原始返回带 _completed_paths(set) / _leaf_map，仅供落库，
-                # 直接塞进 JSONResponse 会 "set is not JSON serializable"。
-                verify = {k: v for k, v in verify.items() if not k.startswith("_")}
+                import utils.logdir_store as lds
+                from utils.logs_config import get_root_id as _grid
+                rid = _grid(path)
+                cached = lds.get_last_verify(rid)
+                if cached:
+                    verify = cached
+                elif synced:
+                    verify = _verify_and_persist(path)
             except Exception:
                 verify = {}
     else:
@@ -264,6 +278,49 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
                    f"已建 {res['built']}）。构建完整性以「构建索引」为准。",
             "result": res,
         })
+
+    @app.post("/api/logs-admin/verify")
+    async def logs_admin_verify(request: Request):
+        """主动核对某 new-api 源：逐叶实测「是否已完成跟上」并增量落库，返回最新 verify。
+
+        前端「核对」按钮触发。实测扫盘（可能读网络盘）丢到线程池执行，避免阻塞事件循环。
+        """
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        if not _is_admin(request):
+            return JSONResponse({"ok": False, "msg": "仅管理员可操作"}, status_code=403)
+
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        if not os.path.isdir(path):
+            return JSONResponse({"ok": False, "msg": f"目录不存在: {path}"}, status_code=400)
+        if detect_format(path) != "newapi":
+            return JSONResponse({"ok": False, "msg": "仅 new-api 源支持核对"}, status_code=400)
+        verify = await run_in_threadpool(_verify_and_persist, path)
+        return JSONResponse({"ok": True, "verify": verify})
+
+    @app.get("/api/logs-admin/count-leaves")
+    async def logs_admin_count_leaves(request: Request, path: str = ""):
+        """按需统计某源的叶子数（含 index.jsonl 的目录数）。
+
+        native 等非 newapi 源的计数需全量递归遍历（网络盘上慢），故移出 list 热路径，
+        由前端「统计」按钮触发。扫盘丢线程池，不阻塞事件循环。
+        """
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        if not path or not os.path.isdir(path):
+            return JSONResponse({"ok": False, "msg": f"目录不存在: {path}"}, status_code=400)
+
+        def _count() -> int:
+            return sum(1 for _ in iter_index_dirs(Path(path)))
+
+        try:
+            n = await run_in_threadpool(_count)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "msg": f"统计失败: {e}"}, status_code=500)
+        return JSONResponse({"ok": True, "leaf_count": n})
 
     @app.get("/api/logs-admin/leaves")
     def logs_admin_leaves(request: Request, path: str = ""):

@@ -17,6 +17,7 @@ import logging.handlers
 import threading
 import time
 from collections import deque
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -24,6 +25,16 @@ from utils.log_scan import iter_index_dirs, detect_format, dir_key_for
 import utils.newapi_index_db as nidb
 
 logger = logging.getLogger(__name__)
+
+
+def _is_broken_pool_err(e: BaseException) -> bool:
+    """是否进程池 worker 被 OS 终止（BrokenProcessPool 或其链上包裹）。"""
+    while e is not None:
+        if isinstance(e, BrokenProcessPool):
+            return True
+        e = getattr(e, "__cause__", None)
+    return False
+
 
 # 专用构建日志：new-api index 回填的生命周期事件（入队/开始/单叶成功失败/卡死/root 崩溃/完成）
 # 单独落一份 {SERVICE_LOG_DIR}/backfill.log，便于事后单独排查构建历史——
@@ -311,9 +322,19 @@ def _run(root: str, workers: int, force: bool = False):
                 failed += 1
                 _set(root, last_error=f"{leaf}: {e}")
                 lds.set_leaf_state(rid, dir_key, "error", last_error=str(e))
-                bf_logger.exception(
-                    "LEAF FAIL root=%s leaf=%s took=%.1fs err=%s",
-                    root, dir_key, time.time() - t0, e)
+                if _is_broken_pool_err(e):
+                    # worker 进程被 OS 终止（enrich 内部已自动重建池续跑，这是重试仍失败）：
+                    # 单独提示，方便与普通解析失败区分。
+                    bf_logger.exception(
+                        "LEAF FAIL root=%s leaf=%s took=%.1fs err=%s "
+                        "(worker 进程被终止，enrich 已自动重建进程池续跑，仍失败)",
+                        root, dir_key, time.time() - t0, e)
+                    logger.exception(
+                        "new-api 回填叶子 worker 崩溃: %s err=%s", leaf, e)
+                else:
+                    bf_logger.exception(
+                        "LEAF FAIL root=%s leaf=%s took=%.1fs err=%s",
+                        root, dir_key, time.time() - t0, e)
             done += 1
             _set(root, done_leaves=done, current_leaf="", leaf_total=0, leaf_done=0)
         _set(root, status="done", finished_at=time.time())

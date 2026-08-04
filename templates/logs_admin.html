@@ -125,7 +125,15 @@
                         <template v-if="r.format === 'newapi'">
                             <span :class="builtOf(r) >= r.leaf_count && r.leaf_count > 0 ? 'msg-ok' : ''">{{ builtOf(r) }}</span>/{{ r.leaf_count }}
                         </template>
-                        <template v-else>{{ r.leaf_count }}</template>
+                        <template v-else-if="r.leaf_count !== null && r.leaf_count !== undefined">{{ r.leaf_count }}</template>
+                        <template v-else-if="r.exists">
+                            <button class="btn btn-outline btn-sm" style="font-size:.72rem; padding:1px 6px;"
+                                @click="countLeaves(r.path)" :disabled="counting[r.path]"
+                                title="全量递归统计叶子数（网络盘上较慢，故按需触发，不在首屏扫盘）">
+                                {{ counting[r.path] ? '统计中…' : '统计' }}
+                            </button>
+                        </template>
+                        <template v-else>—</template>
                     </td>
                     <td class="text-center" v-if="withSize">{{ r.size || '-' }}</td>
                     <td class="text-center">
@@ -160,6 +168,8 @@
                                 {{ r.verify.completed === r.verify.total ? '✓ 核对完成' : '⚠ 核对 ' + r.verify.completed + '/' + r.verify.total }}
                                 <span v-if="r.verify.completed !== r.verify.total">（未跟上 {{ r.verify.total - r.verify.completed }}）</span>
                             </span>
+                            <span v-else style="font-size:.72rem; display:block; color:var(--muted-foreground);"
+                                title="首屏只读缓存，未核对过。点右侧「核对」按钮实测。">未核对（点「核对」）</span>
                         </template>
                         <span v-else style="color:var(--muted-foreground); font-size:.8rem;">—</span>
                     </td>
@@ -169,6 +179,12 @@
                             @click="syncNodes(r.path)" :disabled="syncing[r.path]"
                             title="扫描该源的小时目录，把新增节点写入并更新构建状态（不触发回填）">
                             {{ syncing[r.path] ? '同步中…' : '同步' }}
+                        </button>
+                        <button class="btn btn-outline btn-sm" style="margin-left:4px;"
+                            v-if="r.exists && r.format === 'newapi'"
+                            @click="verifyNode(r.path)" :disabled="verifying[r.path]"
+                            title="逐叶实测 index.db 是否已追上 index.jsonl，并把结果落库。首屏只读缓存，核对靠此按钮主动触发。">
+                            {{ verifying[r.path] ? '核对中…' : '核对' }}
                         </button>
                         <div class="dropdown" v-if="hasMore(r)" style="margin-left:4px;">
                             <button class="btn btn-outline btn-sm" @click="toggleMenu(r.path)">更多 ▾</button>
@@ -278,6 +294,8 @@ new Vue({
         activeBase: '',
         bf: {},          // path -> backfill/persisted status
         syncing: {},     // path -> 同步进行中
+        verifying: {},   // path -> 核对进行中
+        counting: {},    // path -> 叶子统计进行中
         expanded: {},    // path -> 路径是否展开
         openMenu: null,  // 当前打开「更多」菜单的行 path
         leavesOpen: {},  // path -> 叶子详情是否展开
@@ -520,6 +538,44 @@ new Vue({
                     }
                 }.bind(this))
                 .catch(function() { this.$set(this.syncing, path, false); this.showMsg('请求失败', false); }.bind(this));
+        },
+        verifyNode: function(path) {
+            // 主动核对：实测逐叶并落库，结果就地写回该行（不整表重拉，避免又触发一堆请求）。
+            this.$set(this.verifying, path, true);
+            fetch('/api/logs-admin/verify', {
+                method: 'POST',
+                headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    this.$set(this.verifying, path, false);
+                    if (data.ok) {
+                        var row = this.rows.find(function(x) { return x.path === path; });
+                        if (row) this.$set(row, 'verify', data.verify || {});
+                        this.showMsg('核对完成', true);
+                    } else {
+                        this.showMsg(data.msg || '核对失败', false);
+                    }
+                }.bind(this))
+                .catch(function() { this.$set(this.verifying, path, false); this.showMsg('请求失败', false); }.bind(this));
+        },
+        countLeaves: function(path) {
+            // 按需统计 native 源叶子数：结果就地写回该行 leaf_count（不整表重拉）。
+            this.$set(this.counting, path, true);
+            fetch('/api/logs-admin/count-leaves?path=' + encodeURIComponent(path),
+                  { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    this.$set(this.counting, path, false);
+                    if (data.ok) {
+                        var row = this.rows.find(function(x) { return x.path === path; });
+                        if (row) this.$set(row, 'leaf_count', data.leaf_count);
+                    } else {
+                        this.showMsg(data.msg || '统计失败', false);
+                    }
+                }.bind(this))
+                .catch(function() { this.$set(this.counting, path, false); this.showMsg('请求失败', false); }.bind(this));
         },
         refreshStatus: function(path) {
             // 一次性读持久化 + 运行态汇总，写入 bf[path]。无 setTimeout、无轮询。

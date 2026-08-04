@@ -16,16 +16,21 @@ q1_hash/msg_count/user_turns，导致历史/导出聚合必须逐个打开 ~1MB 
 """
 
 import json
+import logging
 import multiprocessing as mp
 import os
 import sqlite3
+import sys
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, FIRST_COMPLETED, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.log_scan import iter_index_dirs
+
+logger = logging.getLogger(__name__)
 
 # enrich 进程池用 spawn 启动，而非默认 fork。
 # 本进程是多线程（Flask + 后台调度 + asyncio 线程池），fork worker 会继承父进程
@@ -70,6 +75,14 @@ _DB_NAME = "index.db"
 # enrich 失败重试上限：合并文件「尚未落盘」是活跃叶子的常态瞬态失败，
 # 保持 q1_hash=NULL 让后续构建重扫重试；累计到此上限仍失败才标死（q1_hash=''）永久跳过。
 _MAX_ENRICH_ATTEMPTS = 3
+
+# BrokenProcessPool 重试上限：worker 进程被 OS 终止（偶发崩溃/被 kill，非解析异常）时，
+# 抛 BrokenProcessPool 且进程池不可复用。重建池续跑（enrich 逐片增量落库，重试自动断点续跑），
+# 最多重试这么多次仍崩才 raise，交上层判叶子失败。可用 NEWAPI_ENRICH_BROKEN_RETRIES 覆盖。
+try:
+    _POOL_BROKEN_RETRIES = max(1, int(os.getenv("NEWAPI_ENRICH_BROKEN_RETRIES", "2")))
+except ValueError:
+    _POOL_BROKEN_RETRIES = 2
 
 # enrich 分片粒度：每个进程池任务处理的合并文件数（固定，不随文件总数放大）。
 # 关键——单 worker 常驻内存 ≈ 一个分片的解析结果 × 并行 worker 数；分片按 worker 均分时，
@@ -410,31 +423,66 @@ def enrich(leaf_dir: str, workers: int = 8, progress_cb=None,
         # 手动持有池（不用 with：其 __exit__ 会 join 死等卡死的 D-worker）。
         # 盯「上次有分片完成」的时刻：一段 stall_timeout 内无任何分片完成，
         # 判定卡住 → 抛弃池（后台收尸）并 raise，交上层跳过该叶子。
-        pool = ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CTX)
-        clean = False
-        try:
-            futs = {pool.submit(_worker_enrich, leaf_dir, ch): ch for ch in chunks}
-            pending = set(futs)
-            last_progress = time.monotonic()
-            while pending:
-                finished, pending = wait(
-                    pending, timeout=stall_timeout, return_when=FIRST_COMPLETED)
-                if not finished:
-                    # 本轮超时窗口内一个分片都没完成 → 卡住
-                    raise LeafStalledError(
-                        leaf_dir, done, total, time.monotonic() - last_progress)
-                for fut in finished:
-                    _apply(fut.result())
+        # BrokenProcessPool（worker 进程被 OS 终止）：重建池续跑。enrich 逐片增量
+        # 落库（已完成的 q1_hash 已写回），重试重新查 q1_hash IS NULL 自然断点续跑。
+        cur_workers = workers
+        retries_left = _POOL_BROKEN_RETRIES
+        while True:
+            pool = ProcessPoolExecutor(max_workers=cur_workers, mp_context=_MP_CTX)
+            clean = False
+            try:
+                # 每次进循环重查待处理行：重试时跳过已落库的分片（断点续跑）。
+                conn = _connect(leaf_dir, write=True)
+                try:
+                    pending = [r["req_file"] for r in conn.execute(
+                        "SELECT req_file FROM requests WHERE q1_hash IS NULL ORDER BY rowid"
+                    ).fetchall()]
+                finally:
+                    conn.close()
+                if not pending:
+                    return {"enriched": done, "total": total}
+                n_chunks = max(cur_workers,
+                               (len(pending) + _ENRICH_CHUNK_SIZE - 1) // _ENRICH_CHUNK_SIZE)
+                chunks = _chunk(pending, n_chunks)
+                futs = {pool.submit(_worker_enrich, leaf_dir, ch): ch for ch in chunks}
+                pending_set = set(futs)
                 last_progress = time.monotonic()
-            clean = True
-        finally:
-            if clean:
-                # 全部分片正常完成：worker 已空闲，join 立即返回
-                pool.shutdown(wait=True)
-            else:
-                # 卡死 or 其它异常：不 join（可能被 D-worker 拖死），抛弃 + 后台收尸
+                while pending_set:
+                    finished, pending_set = wait(
+                        pending_set, timeout=stall_timeout, return_when=FIRST_COMPLETED)
+                    if not finished:
+                        # 本轮超时窗口内一个分片都没完成 → 卡住
+                        raise LeafStalledError(
+                            leaf_dir, done, total, time.monotonic() - last_progress)
+                    for fut in finished:
+                        _apply(fut.result())
+                    last_progress = time.monotonic()
+                clean = True
+            except BrokenProcessPool:
+                # 池已废，立即抛弃（后台收尸）；重试前先重查 pending，跳过已完成的片。
                 pool.shutdown(wait=False, cancel_futures=True)
                 _reap_pool_async(pool)
+                if retries_left <= 0:
+                    raise
+                retries_left -= 1
+                # 降并发重试（半 worker），缓解偶发资源峰；下一轮循环重建池、续跑剩余片。
+                cur_workers = max(1, cur_workers // 2)
+                logger.warning(
+                    "enrich worker 进程池 BrokenProcessPool（worker 被终止，多为偶发崩溃）；"
+                    "重建进程池续跑剩余 %d 条（重试 %d/%d，并发 %d→%d）",
+                    len(pending), _POOL_BROKEN_RETRIES - retries_left, _POOL_BROKEN_RETRIES,
+                    max(1, cur_workers * 2), cur_workers)
+                continue
+            finally:
+                if clean:
+                    # 全部分片正常完成：worker 已空闲，join 立即返回
+                    pool.shutdown(wait=True)
+                elif not isinstance(sys.exc_info()[1], BrokenProcessPool):
+                    # 卡死 or 其它异常：不 join（可能被 D-worker 拖死），抛弃 + 后台收尸。
+                    # BrokenProcessPool 分支已在上方 shutdown+收尸，此处不再重复。
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    _reap_pool_async(pool)
+            break
 
     return {"enriched": done, "total": total}
 
