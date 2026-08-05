@@ -31,9 +31,11 @@ def _require_ajax(request: Request):
     return None
 
 
-def register_obs_routes(app: FastAPI, templates: Jinja2Templates) -> None:
+def register_obs_routes(app: FastAPI, templates: Jinja2Templates, context_builder=None) -> None:
 
     def _ctx(request: Request) -> dict:
+        if context_builder is not None:
+            return context_builder(request, "obs")
         return {
             "active_page": "obs",
             "user_role": request.session.get("monitor_role", "user"),

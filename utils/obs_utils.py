@@ -9,17 +9,27 @@ utils/obs_utils.py — OBS 路径管理与工具函数
 """
 
 import glob
+import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from subprocess import PIPE, STDOUT, Popen
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OBSUTIL_BIN = str(PROJECT_ROOT / "tools" / "obsutil" / "obsutil")
 DEFAULT_UPLOAD_SCRIPT = str(PROJECT_ROOT / "tools" / "obs_upload.sh")
 DEFAULT_DOWNLOAD_SCRIPT = str(PROJECT_ROOT / "tools" / "obs_download.sh")
+DEFAULT_OBSUTIL_CONFIG_DIR = "/mnt/tanpeng/conf"
+DEFAULT_OBSUTIL_RUNTIME_CONFIG_DIR = PROJECT_ROOT / "runtime" / "obsutil-config"
+
+_OBS_BUCKET_RE = re.compile(
+    r"^obs://(?P<bucket>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?)(?:/|$)"
+)
 
 # sync_config 未初始化时的默认配置文件（.cli_state.yaml 里没有 sync_config 时回退）
 DEFAULT_SYNC_CONFIG = PROJECT_ROOT / "settings" / "obs_base.yaml"
@@ -162,6 +172,176 @@ def run_upload_cmd(
 # 下载
 # ---------------------------------------------------------------------------
 
+def get_obs_bucket(obs_path: str) -> str:
+    """从 ``obs://bucket/key`` 中提取并校验桶名。"""
+    match = _OBS_BUCKET_RE.match((obs_path or "").strip())
+    if not match:
+        raise ValueError("无效的 OBS 路径")
+    bucket = match.group("bucket")
+    if ".." in bucket:
+        raise ValueError("无效的 OBS 桶名")
+    return bucket
+
+
+def _obsutil_config_mapping() -> Dict[str, str]:
+    """读取可信配置中的 bucket -> obsutil config 映射。
+
+    支持 sync_config 的 ``obsutil_configs``，以及环境变量
+    ``OBSUTIL_CONFIG_MAP``（JSON 对象）。环境变量优先，便于测试部署覆盖。
+    """
+    mapping: Dict[str, str] = {}
+    cfg_mapping = load_sync_config().get("obsutil_configs", {})
+    if isinstance(cfg_mapping, dict):
+        mapping.update({str(k): str(v) for k, v in cfg_mapping.items() if k and v})
+    raw = os.getenv("OBSUTIL_CONFIG_MAP", "").strip()
+    if raw:
+        try:
+            env_mapping = json.loads(raw)
+            if isinstance(env_mapping, dict):
+                mapping.update(
+                    {str(k): str(v) for k, v in env_mapping.items() if k and v}
+                )
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return mapping
+
+
+def resolve_obsutil_config(obs_path: str, require_exists: bool = True) -> str:
+    """按 OBS 桶解析 obsutil 配置文件。
+
+    默认约定为 ``/mnt/tanpeng/conf/<bucket>``。可通过 sync_config 的
+    ``obsutil_config_dir`` / ``obsutil_configs``，或环境变量
+    ``OBSUTIL_CONFIG_DIR`` / ``OBSUTIL_CONFIG_MAP`` 覆盖。客户端不能传入
+    配置路径，避免借下载接口读取任意凭据。
+    """
+    bucket = get_obs_bucket(obs_path)
+    cfg = load_sync_config()
+    config_dir = Path(
+        os.getenv(
+            "OBSUTIL_CONFIG_DIR",
+            str(cfg.get("obsutil_config_dir") or DEFAULT_OBSUTIL_CONFIG_DIR),
+        )
+    ).expanduser()
+
+    config_dir = config_dir.resolve()
+    configured = _obsutil_config_mapping().get(bucket, bucket)
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        candidate = config_dir / candidate
+    candidate = candidate.resolve()
+
+    # 相对映射和默认“文件名即桶名”必须始终落在可信配置目录中。
+    # 仅服务端显式配置的绝对路径可以位于其它目录。
+    if not Path(configured).expanduser().is_absolute():
+        try:
+            candidate.relative_to(config_dir)
+        except ValueError as exc:
+            raise ValueError(f"OBS 桶 {bucket} 的配置路径越界") from exc
+    if require_exists and not candidate.is_file():
+        raise FileNotFoundError(f"OBS 桶 {bucket} 未配置")
+    return str(candidate)
+
+
+def _obsutil_runtime_config_dir() -> Path:
+    """返回 obsutil 私有运行时配置目录，不复用共享凭据文件。"""
+    configured = os.getenv("OBSUTIL_RUNTIME_CONFIG_DIR", "").strip()
+    requested_dir = (
+        Path(configured).expanduser()
+        if configured
+        else DEFAULT_OBSUTIL_RUNTIME_CONFIG_DIR
+    )
+    if not requested_dir.is_absolute():
+        requested_dir = PROJECT_ROOT / requested_dir
+    if requested_dir.exists() and requested_dir.is_symlink():
+        raise ValueError("obsutil 私有配置目录不能是符号链接")
+    requested_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir = requested_dir.resolve()
+    if not runtime_dir.is_dir():
+        raise ValueError("obsutil 私有配置目录无效")
+    if os.name != "nt":
+        runtime_dir.chmod(0o700)
+    return runtime_dir
+
+
+@contextmanager
+def isolated_obsutil_config(config_path: str) -> Iterator[str]:
+    """为一次 obsutil 命令创建私有配置副本，并在命令结束后删除。
+
+    obsutil 可能加密并回写 ``-config`` 指向的文件，因此绝不能把
+    ``/mnt/tanpeng/conf`` 中的共享原件直接传给子进程。
+    """
+    source = Path(config_path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"obsutil 配置不存在: {source}")
+
+    runtime_dir = _obsutil_runtime_config_dir()
+    prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", source.name)[:64] or "obsutil"
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f"{prefix}.",
+        suffix=".conf",
+        dir=str(runtime_dir),
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        if os.name != "nt":
+            temp_path.chmod(0o600)
+        shutil.copyfile(source, temp_path)
+        if os.name != "nt":
+            temp_path.chmod(0o600)
+        yield str(temp_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def download_obs_object(
+    obs_path: str,
+    local_path: str,
+    config_path: Optional[str] = None,
+    timeout: int = 300,
+) -> Tuple[bool, str]:
+    """下载单个 OBS 对象，不使用 ``-r``。
+
+    ``config_path`` 仅供服务端可信调用；缺省时按桶自动选择配置。
+    """
+    get_obs_bucket(obs_path)
+    object_key = obs_path.split("/", 3)[-1] if "/" in obs_path[6:] else ""
+    if not object_key or obs_path.endswith("/"):
+        return False, "仅支持下载单个 OBS 对象"
+    if not os.path.isfile(OBSUTIL_BIN):
+        return False, "obsutil not found"
+
+    try:
+        resolved_config = config_path or resolve_obsutil_config(obs_path)
+        config_file = Path(resolved_config).expanduser().resolve()
+        if not config_file.is_file():
+            return False, f"OBS 桶 {get_obs_bucket(obs_path)} 未配置"
+
+        target = Path(local_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with isolated_obsutil_config(str(config_file)) as runtime_config:
+            cmd = [
+                OBSUTIL_BIN,
+                "cp",
+                obs_path,
+                str(target),
+                "-f",
+                f"-config={runtime_config}",
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout
+            )
+        if result.returncode == 0:
+            return True, (result.stdout or "").strip()[-500:]
+        return False, ((result.stderr or result.stdout) or "download failed").strip()[-500:]
+    except subprocess.TimeoutExpired:
+        return False, f"下载超时（{timeout}s）"
+    except Exception as exc:
+        return False, str(exc)
+
 def run_download_cmd(
     obs_path: str,
     local: str,
@@ -190,7 +370,12 @@ def run_download_cmd(
 # 目录/文件列表
 # ---------------------------------------------------------------------------
 
-def obsutil_ls(path: str, show_dirs: bool = False, limit: int = 1000) -> List[dict]:
+def obsutil_ls(
+    path: str,
+    show_dirs: bool = False,
+    limit: int = 1000,
+    config_path: Optional[str] = None,
+) -> List[dict]:
     """执行 obsutil ls -d，只列出当前一层的子目录和文件（不递归）。
 
     obsutil ls -d 输出分两段：
@@ -209,8 +394,24 @@ def obsutil_ls(path: str, show_dirs: bool = False, limit: int = 1000) -> List[di
     if not path.endswith("/"):
         path += "/"
     args = [OBSUTIL_BIN, "ls", path, "-d", f"-limit={limit}"]
+    cfg_path = None
+    if config_path:
+        cfg_path = Path(config_path).expanduser().resolve()
+        if not cfg_path.is_file():
+            return []
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        if cfg_path:
+            with isolated_obsutil_config(str(cfg_path)) as runtime_config:
+                result = subprocess.run(
+                    [*args, f"-config={runtime_config}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+        else:
+            result = subprocess.run(
+                args, capture_output=True, text=True, timeout=30
+            )
         if result.returncode != 0:
             return []
     except Exception:
@@ -355,4 +556,3 @@ def reupload_file(local_path: str, obs_path: str, timeout: int = 120) -> Tuple[b
         return False, f"补传超时（{timeout}s）"
     except Exception as e:
         return False, str(e)
-

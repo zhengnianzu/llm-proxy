@@ -176,7 +176,7 @@ def _key_slot(api_key: str) -> str:
     return "key-" + api_key[-4:]
 
 
-def register_export_routes(app: FastAPI, logs_dir: str) -> None:
+def register_export_routes(app: FastAPI, logs_dir: str, context_builder=None) -> None:
     env_dir = Path(logs_dir).parent
     env_key_name = env_dir.name
     templates = Jinja2Templates(directory="templates")
@@ -251,11 +251,19 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/keys/export")
     def export_page(request: Request):
-        return templates.TemplateResponse(request, "export.html", context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
+        if context_builder is not None:
+            context = context_builder(request, "export")
+        else:
+            context = {"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]}
+        return templates.TemplateResponse(request, "export.html", context=context)
 
     @app.get("/keys/export/report/{record_id}")
     def export_report_page(request: Request, record_id: int):
-        return templates.TemplateResponse(request, "export_report.html", context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
+        if context_builder is not None:
+            context = context_builder(request, "export")
+        else:
+            context = {"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]}
+        return templates.TemplateResponse(request, "export_report.html", context=context)
 
     @app.get("/api/export/config")
     def export_config(request: Request):

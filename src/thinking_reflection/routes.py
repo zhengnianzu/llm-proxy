@@ -14,7 +14,11 @@ from .service import ReflectionService
 _test_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="reflection-test")
 
 
-def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> ReflectionService:
+def register_reflection_routes(
+    app: FastAPI,
+    templates: Jinja2Templates,
+    context_builder=None,
+) -> ReflectionService:
     service = ReflectionService(load_config())
 
     def _is_auth_enabled():
@@ -25,6 +29,8 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
         return bool(os.getenv("MONITOR_USERNAME", "").strip())
 
     def context(request: Request, active_page: str = "thinking") -> dict:
+        if context_builder is not None:
+            return context_builder(request, active_page)
         if _is_auth_enabled():
             role = request.session.get("monitor_role", "user")
             user_name = request.session.get("monitor_user", "")
@@ -50,7 +56,7 @@ def register_reflection_routes(app: FastAPI, templates: Jinja2Templates) -> Refl
 
     @app.get("/thinking/failed")
     def failed_page(request: Request):
-        return templates.TemplateResponse(request, "thinking_failed.html", context=context(request, "thinking_failed"))
+        return templates.TemplateResponse(request, "thinking_failed.html", context=context(request, "thinking_tasks"))
 
     @app.get("/api/reflection/datasets")
     def datasets(key_slot: str): return service.datasets(key_slot)

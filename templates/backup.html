@@ -91,6 +91,20 @@
 .obs-item.is-dir { cursor: pointer; }
 .obs-item.is-dir:hover { background: color-mix(in srgb, var(--primary) 6%, transparent); }
 .obs-breadcrumb { font-size: .82rem; color: var(--muted-foreground); margin-bottom: 8px; font-family: var(--font-mono); word-break: break-all; }
+
+/* raw data download */
+.raw-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+.raw-toolbar .form-input { flex: 1; min-width: 0; }
+.raw-table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+.raw-table th { padding: 8px 6px; border-bottom: 1px solid var(--border); color: var(--muted-foreground); font-size: .78rem; text-align: left; white-space: nowrap; }
+.raw-table td { padding: 9px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.raw-table input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; }
+.raw-question { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.raw-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 12px; flex-wrap: wrap; }
+.raw-result { padding: 14px; border: 1px solid color-mix(in srgb, var(--success) 35%, var(--border)); border-radius: var(--radius); background: color-mix(in srgb, var(--success) 7%, transparent); }
+.raw-result-path { margin-top: 8px; padding: 8px; border-radius: var(--radius); background: var(--muted); font-family: var(--font-mono); font-size: .8rem; word-break: break-all; }
+.raw-progress { height: 8px; margin: 10px 0 6px; border-radius: 99px; overflow: hidden; background: var(--muted); }
+.raw-progress > div { height: 100%; background: var(--primary); transition: width .25s ease; }
 {% endblock %}
 
 {% block content %}
@@ -287,6 +301,7 @@
                         <button class="btn-xs" @click="syncOne(d)" :disabled="d.status === 'syncing' || d.status === 'live_syncing' || queuedSet.has(d.dir_path) || queue.running === d.dir_path" v-if="d.status !== 'live_syncing'">同步</button>
                         <button class="btn-xs" v-if="(d.status === 'partial' || d.status === 'error') && d.failed_count > 0" @click="resyncFailed(d)" :disabled="d.status === 'syncing' || queuedSet.has(d.dir_path) || queue.running === d.dir_path" style="background:color-mix(in srgb, var(--warning) 12%, transparent);border-color:var(--warning);color:var(--warning);">补同步 ({{ d.failed_count }})</button>
                         <button class="btn-xs" @click="openLogs(d)">详情</button>
+                        <button class="btn-xs" v-if="d.has_obs" @click="openRawDownload(d)" title="选择会话并下载关键原始数据到服务器">下载</button>
                         <button class="btn-xs danger" @click="deleteOne(d)" :disabled="d.status !== 'done'" v-if="d.status === 'done'">删除本地文件</button>
                     </td>
                 </tr>
@@ -314,6 +329,90 @@
                 <span class="log-msg" style="white-space:pre-wrap;">{{ log.message }}</span>
             </div>
         </div>
+    </div>
+
+    <!-- Raw Data Download Drawer -->
+    <div v-if="rawDrawerDir" class="drawer-overlay" @click="closeRawDownload"></div>
+    <div v-if="rawDrawerDir" class="drawer">
+        <div class="drawer-header">
+            <div>
+                <h6>下载原始数据</h6>
+                <div class="mono" style="font-size:.76rem;color:var(--muted-foreground);margin-top:3px;">{{ rawDrawerDir.dir_path }}</div>
+            </div>
+            <button class="btn-xs" @click="closeRawDownload" :disabled="rawDownloadRunning">关闭</button>
+        </div>
+
+        <div v-if="rawJob && rawDownloadDone" class="drawer-body">
+            <div class="raw-result">
+                <div style="font-weight:600;color:var(--success);">下载完成</div>
+                <div style="font-size:.82rem;margin-top:4px;">已下载 {{ rawDownloadedFiles }} / {{ rawTotalFiles }} 个文件到服务器</div>
+                <div class="raw-result-path">{{ rawOutputPath || '服务器未返回保存路径' }}</div>
+                <div style="display:flex;gap:8px;margin-top:10px;">
+                    <button class="btn btn-primary btn-sm" @click="copyRawOutputPath" :disabled="!rawOutputPath">{{ rawPathCopied ? '已复制' : '复制路径' }}</button>
+                    <button class="btn btn-sm" style="background:transparent;border:1px solid var(--border);" @click="resetRawDownload">继续选择</button>
+                </div>
+            </div>
+        </div>
+
+        <div v-else-if="rawJob" class="drawer-body">
+            <div style="padding:14px 0;">
+                <div style="display:flex;justify-content:space-between;font-size:.84rem;">
+                    <span>{{ rawDownloadError ? '下载失败' : '正在下载到服务器' }}</span>
+                    <span v-if="!rawDownloadError">{{ rawDownloadedFiles }} / {{ rawTotalFiles }}</span>
+                </div>
+                <div v-if="!rawDownloadError" class="raw-progress"><div :style="{width: rawProgressPercent + '%'}"></div></div>
+                <div v-if="rawDownloadError" style="margin-top:10px;color:var(--danger);word-break:break-all;">{{ rawDownloadError }}</div>
+                <button v-if="rawDownloadError" class="btn btn-sm" style="margin-top:12px;background:transparent;border:1px solid var(--border);" @click="resetRawDownload">返回会话列表</button>
+            </div>
+        </div>
+
+        <template v-else>
+            <div class="raw-toolbar">
+                <input class="form-input" v-model.trim="rawQuery" @keyup.enter="searchRawSessions" placeholder="搜索首问">
+                <button class="btn-xs" @click="searchRawSessions" :disabled="rawLoading">搜索</button>
+            </div>
+            <div v-if="rawCatalogWarning"
+                 style="margin:10px 16px 0;padding:10px 12px;border:1px solid var(--warning);border-radius:6px;color:var(--warning);font-size:.8rem;line-height:1.5;">
+                {{ rawCatalogWarning }}
+            </div>
+            <div class="drawer-body">
+                <div v-if="rawLoading" class="no-data">加载中...</div>
+                <div v-else-if="rawSessions.length === 0" class="no-data">{{ rawLoadError || '没有可下载的会话' }}</div>
+                <table v-else class="raw-table">
+                    <thead>
+                        <tr>
+                            <th><input type="checkbox" :checked="rawAllChecked" @change="toggleRawPage" :disabled="!!rawCatalogWarning"></th>
+                            <th>时间</th>
+                            <th>首问</th>
+                            <th>模型</th>
+                            <th>消息</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="s in rawSessions" :key="rawSessionId(s)">
+                            <td><input type="checkbox" v-model="rawSelectedIds" :value="rawSessionId(s)" :disabled="!!rawCatalogWarning"></td>
+                            <td style="white-space:nowrap;color:var(--muted-foreground);">{{ formatRawTime(s.last_ts) }}</td>
+                            <td class="raw-question" :title="s.q1 || ''">{{ s.q1 || '（无首问）' }}</td>
+                            <td>{{ formatRawModels(s.models) }}</td>
+                            <td>{{ s.msg_count > 0 ? s.msg_count : '—' }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="raw-footer">
+                <div style="font-size:.8rem;color:var(--muted-foreground);">
+                    已选 {{ rawSelectedIds.length }} 个 · 共 {{ rawTotal }} 个
+                </div>
+                <div style="display:flex;gap:6px;align-items:center;">
+                    <button class="btn-xs" @click="loadRawPage(-1)" :disabled="rawLoading || rawOffset === 0">上一页</button>
+                    <button class="btn-xs" @click="loadRawPage(1)" :disabled="rawLoading || rawOffset + rawLimit >= rawTotal">下一页</button>
+                    <button class="btn btn-primary btn-sm" @click="startRawDownload"
+                            :disabled="rawSelectedIds.length === 0 || rawStarting || !!rawCatalogWarning">
+                        {{ rawStarting ? '提交中...' : '开始下载' }}
+                    </button>
+                </div>
+            </div>
+        </template>
     </div>
 
     <!-- OBS Browser Drawer -->
@@ -379,6 +478,20 @@ new Vue({
         pendingDelete: [],
         autoTimer: null,
         queue: { running: '', queued: [], queue_len: 0 },
+        rawDrawerDir: null,
+        rawSessions: [],
+        rawQuery: '',
+        rawOffset: 0,
+        rawLimit: 50,
+        rawTotal: 0,
+        rawLoading: false,
+        rawLoadError: '',
+        rawCatalogWarning: '',
+        rawSelectedIds: [],
+        rawStarting: false,
+        rawJob: null,
+        rawDownloadTimer: null,
+        rawPathCopied: false,
     },
     computed: {
         allChecked() {
@@ -405,6 +518,37 @@ new Vue({
             var idx = p.lastIndexOf('/');
             if (idx <= 5) return null;
             return p.substring(0, idx + 1);
+        },
+        rawAllChecked() {
+            return this.rawSessions.length > 0 && this.rawSessions.every(s => this.rawSelectedIds.indexOf(this.rawSessionId(s)) >= 0);
+        },
+        rawDownloadRunning() {
+            if (!this.rawJob) return false;
+            return ['done', 'completed', 'success', 'error', 'failed', 'cancelled'].indexOf(String(this.rawJob.status || '').toLowerCase()) < 0;
+        },
+        rawDownloadDone() {
+            if (!this.rawJob) return false;
+            return ['done', 'completed', 'success'].indexOf(String(this.rawJob.status || '').toLowerCase()) >= 0;
+        },
+        rawTotalFiles() {
+            return Number((this.rawJob && (this.rawJob.total_files || this.rawJob.total)) || 0);
+        },
+        rawDownloadedFiles() {
+            return Number((this.rawJob && (this.rawJob.downloaded_files || this.rawJob.downloaded || this.rawJob.completed)) || 0);
+        },
+        rawOutputPath() {
+            if (!this.rawJob) return '';
+            return this.rawJob.output_path || this.rawJob.download_path || this.rawJob.target_path || '';
+        },
+        rawDownloadError() {
+            if (!this.rawJob) return '';
+            var status = String(this.rawJob.status || '').toLowerCase();
+            if (['error', 'failed', 'cancelled'].indexOf(status) < 0) return '';
+            return this.rawJob.error_msg || this.rawJob.detail || '下载失败';
+        },
+        rawProgressPercent() {
+            if (this.rawTotalFiles <= 0) return 0;
+            return Math.min(100, Math.round(this.rawDownloadedFiles * 100 / this.rawTotalFiles));
         },
     },
     methods: {
@@ -598,6 +742,181 @@ new Vue({
         _stopLogPoll() {
             if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
         },
+        openRawDownload(d) {
+            this.closeLogs();
+            this.closeObsBrowser();
+            this._stopRawDownloadPoll();
+            this.rawDrawerDir = d;
+            this.rawSessions = [];
+            this.rawQuery = '';
+            this.rawOffset = 0;
+            this.rawTotal = 0;
+            this.rawLoadError = '';
+            this.rawCatalogWarning = '';
+            this.rawSelectedIds = [];
+            this.rawStarting = false;
+            this.rawJob = null;
+            this.rawPathCopied = false;
+            this.loadRawSessions();
+        },
+        closeRawDownload() {
+            if (this.rawDownloadRunning) return;
+            this._stopRawDownloadPoll();
+            this.rawDrawerDir = null;
+            this.rawSessions = [];
+            this.rawSelectedIds = [];
+            this.rawJob = null;
+            this.rawLoadError = '';
+            this.rawCatalogWarning = '';
+        },
+        loadRawSessions() {
+            if (!this.rawDrawerDir) return;
+            this.rawLoading = true;
+            this.rawLoadError = '';
+            this.rawCatalogWarning = '';
+            var url = '/api/backup/raw-sessions?dir_path=' + encodeURIComponent(this.rawDrawerDir.dir_path)
+                + '&q=' + encodeURIComponent(this.rawQuery)
+                + '&offset=' + this.rawOffset
+                + '&limit=' + this.rawLimit;
+            fetch(url, { headers: { 'x-requested-with': 'XMLHttpRequest' } })
+                .then(r => r.json().then(data => {
+                    if (!r.ok) throw new Error(data.detail || '会话列表加载失败');
+                    return data;
+                }))
+                .then(data => {
+                    this.rawSessions = data.items || data.sessions || [];
+                    this.rawTotal = Number(data.total || 0);
+                    this.rawOffset = Number(data.offset != null ? data.offset : this.rawOffset);
+                    this.rawLimit = Number(data.limit || this.rawLimit);
+                    this.rawCatalogWarning = data.warning || '';
+                })
+                .catch(e => {
+                    this.rawSessions = [];
+                    this.rawTotal = 0;
+                    this.rawLoadError = e.message || '会话列表加载失败';
+                    this.rawCatalogWarning = '';
+                })
+                .finally(() => { this.rawLoading = false; });
+        },
+        searchRawSessions() {
+            this.rawOffset = 0;
+            this.rawSelectedIds = [];
+            this.loadRawSessions();
+        },
+        loadRawPage(direction) {
+            var next = this.rawOffset + direction * this.rawLimit;
+            if (next < 0 || next >= this.rawTotal) return;
+            this.rawOffset = next;
+            this.loadRawSessions();
+        },
+        toggleRawPage(e) {
+            var pageIds = this.rawSessions.map(s => this.rawSessionId(s));
+            if (e.target.checked) {
+                pageIds.forEach(id => {
+                    if (this.rawSelectedIds.indexOf(id) < 0) this.rawSelectedIds.push(id);
+                });
+            } else {
+                this.rawSelectedIds = this.rawSelectedIds.filter(id => pageIds.indexOf(id) < 0);
+            }
+        },
+        rawSessionId(s) {
+            return s.session_id || s._key || s.id || '';
+        },
+        formatRawTime(value) {
+            if (!value) return '-';
+            var v = value;
+            if (typeof v === 'number' || /^\d+$/.test(String(v))) {
+                v = Number(v);
+                if (v < 1000000000000) v *= 1000;
+            }
+            var date = new Date(v);
+            if (isNaN(date.getTime())) return String(value);
+            return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+        },
+        formatRawModels(models) {
+            if (Array.isArray(models)) return models.join(', ') || '-';
+            return models || '-';
+        },
+        startRawDownload() {
+            if (!this.rawDrawerDir || this.rawSelectedIds.length === 0 || this.rawCatalogWarning) return;
+            this.rawStarting = true;
+            fetch('/api/backup/raw-download', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                body: JSON.stringify({
+                    dir_path: this.rawDrawerDir.dir_path,
+                    session_ids: this.rawSelectedIds,
+                }),
+            })
+                .then(r => r.json().then(data => {
+                    if (!r.ok) throw new Error(data.detail || '创建下载任务失败');
+                    return data;
+                }))
+                .then(data => {
+                    if (!data.job_id) throw new Error('服务器未返回任务编号');
+                    this.rawJob = {
+                        job_id: data.job_id,
+                        status: data.status || 'queued',
+                        total_files: data.total_files || 0,
+                        downloaded_files: 0,
+                    };
+                    this._fetchRawDownloadStatus();
+                    this._stopRawDownloadPoll();
+                    this.rawDownloadTimer = setInterval(() => this._fetchRawDownloadStatus(), 2000);
+                })
+                .catch(e => alert(e.message || '创建下载任务失败'))
+                .finally(() => { this.rawStarting = false; });
+        },
+        _fetchRawDownloadStatus() {
+            if (!this.rawJob || !this.rawJob.job_id) return;
+            fetch('/api/backup/raw-download/status/' + encodeURIComponent(this.rawJob.job_id), {
+                headers: { 'x-requested-with': 'XMLHttpRequest' },
+            })
+                .then(r => r.json().then(data => {
+                    if (!r.ok) throw new Error(data.detail || '获取下载状态失败');
+                    return data;
+                }))
+                .then(data => {
+                    this.rawJob = Object.assign({}, this.rawJob, data);
+                    if (!this.rawDownloadRunning) this._stopRawDownloadPoll();
+                })
+                .catch(e => console.error(e));
+        },
+        _stopRawDownloadPoll() {
+            if (this.rawDownloadTimer) {
+                clearInterval(this.rawDownloadTimer);
+                this.rawDownloadTimer = null;
+            }
+        },
+        resetRawDownload() {
+            this._stopRawDownloadPoll();
+            this.rawJob = null;
+            this.rawSelectedIds = [];
+            this.rawPathCopied = false;
+        },
+        copyRawOutputPath() {
+            if (!this.rawOutputPath) return;
+            var done = () => {
+                this.rawPathCopied = true;
+                setTimeout(() => { this.rawPathCopied = false; }, 1500);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(this.rawOutputPath).then(done).catch(() => this._fallbackCopyRawPath(done));
+            } else {
+                this._fallbackCopyRawPath(done);
+            }
+        },
+        _fallbackCopyRawPath(done) {
+            var input = document.createElement('textarea');
+            input.value = this.rawOutputPath;
+            input.style.position = 'fixed';
+            input.style.opacity = '0';
+            document.body.appendChild(input);
+            input.select();
+            try { document.execCommand('copy'); done(); }
+            catch (e) { alert('复制失败，请手动复制路径'); }
+            document.body.removeChild(input);
+        },
         _startAutoRefresh() {
             if (this.refreshTimer) return;
             this.refreshTimer = setInterval(() => {
@@ -763,6 +1082,7 @@ new Vue({
     },
     beforeDestroy() {
         this._stopLogPoll();
+        this._stopRawDownloadPoll();
         if (this.refreshTimer) clearInterval(this.refreshTimer);
         if (this.autoTimer) clearInterval(this.autoTimer);
     },
