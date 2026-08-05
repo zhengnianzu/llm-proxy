@@ -302,6 +302,7 @@ def sync_session_index(
     key: Optional[str] = None,
     local_copy_dir: Optional[str] = None,
     force: bool = False,
+    upload: bool = True,
 ) -> dict:
     """
     读取 session_index.jsonl，将 session 三元组文件复制到 local_copy_dir，
@@ -310,6 +311,9 @@ def sync_session_index(
     key: 按 api_key 精确过滤 session
     local_copy_dir: 本地复制目标路径，上传后保留
     force: 忽略已上传缓存，全部重新上传
+    upload: False 时只复制到 local_copy_dir、不上传，也不更新 .sync_state
+        （多目录并行导出时用：各目录只复制到共享 local_base，收尾由上层统一上传一次，
+        避免每目录都整目录上传导致重复上传 + 写入中上传的竞态）。
     """
     sessions = _load_session_index(logs_dir)
     if not sessions:
@@ -381,13 +385,21 @@ def sync_session_index(
 
     logger.info("已复制 %d 个文件到 %s", copied, copy_dir)
 
-    # 未指定 OBS 目标：仅本地复制，跳过上传（前端「留空仅本地复制」）
-    if not obs_dst:
+    # 仅本地复制的两种情形：
+    #  1) 未指定 OBS 目标（前端「留空仅本地复制」）；
+    #  2) upload=False（多目录并行导出：各目录只复制到共享 local_base，
+    #     收尾由上层统一上传一次）。
+    # 两者都：标记 new_keys 已处理（写 .sync_state，保证跨任务增量不重复复制），
+    # 但不在此上传。
+    if not obs_dst or not upload:
         uploaded_keys.update(new_keys)
         slots = state.setdefault("slots", {})
         slots[slot_key] = {"uploaded_keys": sorted(uploaded_keys)}
         _save_sync_state(logs_dir, state)
-        logger.info("仅本地复制完成: %d 个文件, %d 个新 session", copied, len(new_keys))
+        if not obs_dst:
+            logger.info("仅本地复制完成: %d 个文件, %d 个新 session", copied, len(new_keys))
+        else:
+            logger.info("已复制（上传延后到收尾）: %d 个文件, %d 个新 session", copied, len(new_keys))
         return {"uploaded": copied, "skipped": len(uploaded_keys) - len(new_keys), "failed": 0, "total_files": copied, "matched_sessions": matched_sessions, "new_sessions": len(new_keys)}
 
     obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"

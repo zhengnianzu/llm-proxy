@@ -20,4 +20,7 @@ LOCAL="$1"
 OBS="$2"
 JOBS="${3:-8}"
 
-exec "$OBSUTIL_BIN" cp "$LOCAL" "$OBS" -f -r -j "$JOBS"
+# -u: 增量上传，只传 OBS 上不存在或大小/时间不同的文件。
+#     首次上传目标为空 → 全量；重传时已成功的文件被跳过，只补失败的那些
+#     （即「重试上传」只传失败文件的机制）。
+exec "$OBSUTIL_BIN" cp "$LOCAL" "$OBS" -f -r -u -j "$JOBS"

@@ -558,19 +558,19 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                      + (" (已是最新，跳过)" if exp_result.get("skipped") else ""))
 
                 if mode == "export":
-                    _log(f"[{mt}] 开始同步文件" + (f" (按 key 过滤: ...{api_key[-8:]})" if api_key else " (全量)"))
+                    _log(f"[{mt}] 开始复制文件" + (f" (按 key 过滤: ...{api_key[-8:]})" if api_key else " (全量)"))
+                    # 只复制到共享 local_base，不在此上传；收尾统一上传一次（见下方 finalize）。
+                    # 避免多目录并行时每目录都整目录上传 → 重复上传 + 写入中上传的竞态。
                     sync_result = sync_session_index(
                         mt_src, obs_dst=obs_dst, key=api_key or None,
                         local_copy_dir=str(local_base), force=force, workers=workers,
+                        upload=False,
                     )
                     matched = sync_result.get("matched_sessions", 0)
                     res["new_sessions"] = sync_result.get("new_sessions", 0)
                     res["uploaded"] = sync_result.get("uploaded", 0)
                     res["skipped"] = sync_result.get("skipped", 0)
-                    _log(f"[{mt}] 匹配 {matched} sessions, 新导出 {res['new_sessions']}, 跳过 {res['skipped']}, 文件数 {res['uploaded']}")
-                    if sync_result.get("failed", 0) > 0:
-                        _log(f"[{mt}] 上传失败!")
-                        res["errors"].append(f"{mt}: upload failed")
+                    _log(f"[{mt}] 匹配 {matched} sessions, 新导出 {res['new_sessions']}, 跳过 {res['skipped']}, 复制文件 {res['uploaded']}")
                 else:
                     session_entries = _load_session_index(mt_src)
                     total_before = len(session_entries)
@@ -655,7 +655,25 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         eval_report_path = ""
         analysis_json_stored = ""
-        if mode == "reformat":
+        if mode == "export":
+            # 收尾统一上传：所有 mtime 目录已把三元组文件复制到共享 local_base，
+            # 这里对整个 local_base 上传一次。obsutil 用 -u 增量，已存在的对象自动跳过，
+            # 所以「重试上传」再跑一遍时只补上次失败的文件。
+            if total_sessions > 0:
+                if obs_dst:
+                    _log(f"复制完成，开始统一上传到 OBS: {obs_dst}")
+                    obs_parent = obs_dst.rstrip("/").rsplit("/", 1)[0] + "/"
+                    ok, msg = _run_upload_cmd(str(local_base), obs_parent, upload_script, log_cb=_log)
+                    if ok:
+                        _log("上传成功")
+                    else:
+                        _log(f"上传失败: {msg}")
+                        errors.append(f"OBS upload: {msg}")
+                else:
+                    _log("未配置 OBS 目标，仅本地复制完成")
+            else:
+                _log("无新 session 需要导出")
+        elif mode == "reformat":
             # reformat-only：合并后的 session JSON 已由 worker 落在 local_base/<session>/，
             # 这里补一份 session_index.jsonl 清单后整目录上传，不跑 evaluate/质检。
             if all_results:
