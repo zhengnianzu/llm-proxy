@@ -9,9 +9,10 @@ index（index.db）回填，等价于在页面上对每个 new-api 源点「同�
   - 叶子构建状态 / 计数写进 log_dir.db（数据管理页、导出页读同一张表）
   - 生命周期事件写进 {SERVICE_LOG_DIR}/backfill.log（页面「构建日志」读同一文件）
 
-与 Web 版的关键差异：Web 版由一个全局调度线程异步串行执行（start_backfill 只
-入队即返回）；本脚本在当前进程内**同步**串行执行 utils.newapi_backfill._run，
-一个源跑完再跑下一个，跑完即退出——适合 cron / 手动补跑，无需服务在跑。
+与 Web 版的关键差异：Web 版点击即为该源起一个后台线程异步回填（start_backfill
+立即返回，多个源可并发）；本脚本在当前进程内**同步**串行执行
+utils.newapi_backfill._run，一个源跑完再跑下一个，跑完即退出——适合 cron / 手动补跑，
+无需服务在跑。
 
 用法:
     # 增量回填所有 new-api 源（跳过已完成且无新增的叶子）
@@ -50,7 +51,6 @@ import os
 import sys
 import threading
 import time
-from pathlib import Path
 
 # 允许 `python scripts/backfill_all.py` 直接运行（把项目根加入 import 路径）
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -296,22 +296,7 @@ def main(argv=None) -> int:
             continue
 
         if args.sync_only:
-            # sync-only 也做一次主动核对并落库：DB 里既有清单，又能如实反映磁盘
-            # 是否追上 index.jsonl（离线也能写 verify_log，页面可直接读）。
-            try:
-                from utils.newapi_index_db import verify_root
-                v = verify_root(root, ttl=0)
-                lds.save_verify(rid, {k: x for k, x in v.items() if not k.startswith("_")},
-                                leaf_dir_keys={
-                                    p: __import__("utils.log_scan", fromlist=["dir_key_for"]).dir_key_for(
-                                        Path(root), Path(p))
-                                    for p in v.get("_leaf_map", {})
-                                },
-                                completed_paths=v.get("_completed_paths"))
-                logger.info("    核对：total=%d completed=%d pending=%d（已写入 DB）",
-                            v["total"], v["completed"], v["pending"])
-            except Exception:
-                logger.exception("    核对落库失败：%s", root)
+            # 只同步清单，不构建。DB 里已有权威的叶子总数/已建数，页面直接读。
             continue
 
         # 步骤 2：同步执行回填（等价页面「构建索引」，但不入全局队列、当前进程内跑）。
@@ -338,24 +323,6 @@ def main(argv=None) -> int:
                     st.get("status"), st.get("done_leaves"), st.get("total_leaves"),
                     db_summ.get("built"), db_summ.get("total"),
                     db_summ.get("error"), took)
-
-        # 步骤 3：回填后主动核对（逐叶实测 index.db 是否追上 index.jsonl），并落库。
-        # 这样离线回填的成果不止写在构建状态里，也写进 verify_log + leaf_status.verified，
-        # 页面刷新即可读 DB 展示，无需重新扫盘。
-        try:
-            from utils.newapi_index_db import verify_root
-            v = verify_root(root, ttl=0)
-            lds.save_verify(rid, {k: x for k, x in v.items() if not k.startswith("_")},
-                            leaf_dir_keys={
-                                p: __import__("utils.log_scan", fromlist=["dir_key_for"]).dir_key_for(
-                                    Path(root), Path(p))
-                                for p in v.get("_leaf_map", {})
-                            },
-                            completed_paths=v.get("_completed_paths"))
-            logger.info("    核对：total=%d completed=%d pending=%d（已写入 DB）",
-                        v["total"], v["completed"], v["pending"])
-        except Exception:
-            logger.exception("    核对落库失败：%s", root)
 
         # 判定该源是否有失败/卡住的叶子（DB error 计数或内存 error 状态）。
         if st.get("status") == "error" or db_summ.get("error", 0):

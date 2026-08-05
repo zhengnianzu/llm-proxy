@@ -13,11 +13,29 @@ utils/log_scan.py — 可变深度日志目录发现 + 索引字段归一化
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Iterator, Optional
 
 _INDEX_NAME = "index.jsonl"
 _MAX_DEPTH = 3  # root 自身算 depth 0；new-api 需要 depth 2
+
+# 层级模板占位符（compile_leaf_template 用）：目录名的定长数字段。
+# 用户注册数据源时按占位符写法填层级模板（如 details/{日6}/{时8}），
+# {日6}=6 位数字（YYMMDD）、{时8}=8 位数字（YYMMDDHH）、{数N}=N 位数字（通用）；
+# 其余字面段（如 details）按目录名精确匹配。
+_PLACEHOLDERS = {
+    "{日6}": re.compile(r"^\d{6}$"),
+    "{时8}": re.compile(r"^\d{8}$"),
+}
+_RE_NUM_N = re.compile(r"^\{数(\d+)\}$")   # {数N} → ^\d{N}$
+
+# 按 fmt 的默认层级模板：用户未填模板时回退（保证老源不填也能同步）。
+# 与旧 iter_leaf_dirs_explicit 的硬规则等价（含 details/ 中间层变体）。
+_DEFAULT_TEMPLATES = {
+    "newapi": ["{日6}/{时8}", "details/{日6}/{时8}"],
+    "native": ["{时8}"],
+}
 
 
 def iter_index_dirs(root: Path, max_depth: int = _MAX_DEPTH) -> Iterator[Path]:
@@ -43,6 +61,109 @@ def iter_index_dirs(root: Path, max_depth: int = _MAX_DEPTH) -> Iterator[Path]:
                 yield from _walk(sub, depth + 1)
 
     yield from _walk(root, 0)
+
+
+def default_templates(fmt: str) -> list:
+    """某格式的默认层级模板列表（用户未填模板时回退）。未知格式返回空。"""
+    return list(_DEFAULT_TEMPLATES.get(fmt, []))
+
+
+def compile_leaf_template(tpl: str):
+    """把一行占位符层级模板编译成逐段匹配器列表。
+
+    段以 `/` 分隔；每段编译为一个 (kind, matcher)：
+      - 占位符 {日6}/{时8}/{数N} → ("re", 已编译正则)，按目录名匹配
+      - 字面段（如 details）      → ("lit", 段名)，按目录名精确相等匹配
+    空模板 / 段全空 → 抛 ValueError；未知占位符（{...} 但非上述）→ 抛 ValueError。
+    返回段匹配器列表，供 iter_leaf_dirs_by_templates 逐层下降。
+    """
+    if not tpl or not tpl.strip():
+        raise ValueError("模板不能为空")
+    segs = [s for s in tpl.strip().strip("/").split("/") if s]
+    if not segs:
+        raise ValueError(f"模板无有效层级: {tpl!r}")
+    compiled = []
+    for seg in segs:
+        if seg in _PLACEHOLDERS:
+            compiled.append(("re", _PLACEHOLDERS[seg]))
+        elif _RE_NUM_N.match(seg):
+            n = int(_RE_NUM_N.match(seg).group(1))
+            compiled.append(("re", re.compile(rf"^\d{{{n}}}$")))
+        elif seg.startswith("{") and seg.endswith("}"):
+            raise ValueError(f"未知占位符 {seg!r}（支持 {{日6}} {{时8}} {{数N}}）")
+        else:
+            compiled.append(("lit", seg))
+    return compiled
+
+
+def iter_leaf_dirs_by_templates(root: Path, templates: list) -> Iterator[Path]:
+    """按用户注册的占位符层级模板列表枚举叶子目录（逐段 iterdir，不递归 walk 全树）。
+
+    「数据管理」的「同步」专用，替代 iter_index_dirs 在网络盘上的递归 walk。
+    每个模板（见 compile_leaf_template）逐层下降：占位符段按正则筛数字目录名、
+    字面段按目录名精确匹配。最内层校验含 index.jsonl 才 yield（含「同名折叠层」
+    兜底：叶/叶/index.jsonl，dir_key_for 会折回标准层）。多模板取并集、按 resolved
+    path 去重。非法模板（compile 抛错）跳过该模板、继续其余。
+
+    templates 为空或全非法 → 不产出（调用方应传默认模板 default_templates(fmt)）。
+    """
+    if not root.is_dir() or not templates:
+        return
+
+    def _leaf_or_folded(d: Path) -> Optional[Path]:
+        """d 或其同名折叠子目录 d/<d.name> 含 index.jsonl 则返回该叶子，否则 None。"""
+        if (d / _INDEX_NAME).is_file():
+            return d
+        nested = d / d.name
+        if (nested / _INDEX_NAME).is_file():
+            return nested
+        return None
+
+    def _descend(base: Path, segs: list, i: int) -> Iterator[Path]:
+        """按段匹配器 segs 从 base 逐层下降；到最后一段时校验叶子。"""
+        kind, m = segs[i]
+        last = (i == len(segs) - 1)
+        if kind == "lit":
+            # 字面段：直接取同名子目录，不必列全目录
+            sub = base / m
+            if not sub.is_dir():
+                return
+            candidates = [sub]
+        else:
+            try:
+                children = sorted(base.iterdir())
+            except OSError:
+                return
+            candidates = [c for c in children
+                          if not c.name.startswith(".") and c.is_dir() and m.match(c.name)]
+        for c in candidates:
+            if last:
+                leaf = _leaf_or_folded(c)
+                if leaf is not None:
+                    yield leaf
+            else:
+                yield from _descend(c, segs, i + 1)
+
+    seen = set()
+    for tpl in templates:
+        try:
+            segs = compile_leaf_template(tpl)
+        except ValueError:
+            continue
+        for leaf in _descend(root, segs, 0):
+            key = str(leaf)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield leaf
+
+
+def iter_leaf_dirs_explicit(root: Path, fmt: str) -> Iterator[Path]:
+    """按 fmt 默认模板枚举叶子（compat 包装：= iter_leaf_dirs_by_templates + 默认模板）。
+
+    保留此签名供未显式传模板的调用方（默认模板等价旧硬规则）。
+    """
+    yield from iter_leaf_dirs_by_templates(root, default_templates(fmt))
 
 
 def dir_key_for(root: Path, leaf: Path) -> str:

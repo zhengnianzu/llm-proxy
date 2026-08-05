@@ -25,6 +25,9 @@ from utils.logs_config import (
     get_history_entries,
     add_history_path,
     remove_history_path,
+    get_path_templates,
+    set_history_name,
+    set_history_templates,
     dir_size,
     human_size,
 )
@@ -42,53 +45,40 @@ def _is_admin(request: Request) -> bool:
     return role == "admin"
 
 
-def _verify_and_persist(path: str) -> dict:
-    """实测核对某 new-api 源并增量落库，返回对外 verify 结构（仅公开字段）。
-
-    仅在「核对」入口（用户主动点核对 / 首屏首次回退）调用——绝不放到 list 热路径。
-    verify_root 逐叶实测（内部 30s TTL 缓存）；save_verify 把逐叶 verified + 根级
-    计数增量写进 log_dir.db，供之后首屏 get_last_verify 秒读。
-    """
-    from utils.newapi_index_db import verify_root
-    verify = verify_root(path)
-    try:
-        import utils.logdir_store as lds
-        from utils.logs_config import get_root_id as _grid
-        from utils.log_scan import dir_key_for
-        lds.save_verify(
-            _grid(path),
-            {k: v for k, v in verify.items() if not k.startswith("_")},
-            leaf_dir_keys={
-                p: dir_key_for(Path(path), Path(p))
-                for p in verify.get("_leaf_map", {})
-            },
-            completed_paths=verify.get("_completed_paths"),
-        )
-    except Exception:
-        pass
-    # 只回公开字段：_completed_paths(set) / _leaf_map 不可 JSON 序列化
-    return {k: v for k, v in verify.items() if not k.startswith("_")}
-
-
 def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "default") -> dict:
     exists = os.path.isdir(path)
     fmt = detect_format(path) if exists else "missing"
     leaf_count = 0
     built_count = 0
     synced = False
+    templates: list = []
     # root_id：活跃 env_dir 固定为 default，其余按稳定哈希，供用户核对来源标识
     try:
         from utils.logs_config import get_root_id
         root_id = "default" if active else get_root_id(path, active_env_dir)
     except Exception:
         root_id = "default"
+    # 表 1 数据源行：命中则用其 format/templates/name（叶子/已建数仍以 leaf_status 为准，
+    # 见下方 newapi 分支），供页面展示格式列/模板列/名字。DB 主键统一用纯路径哈希。
+    try:
+        import utils.logdir_store as lds
+        from utils.logs_config import get_root_id as _grid
+        src = lds.get_source(_grid(path)) if not active else None
+        if src:
+            templates = src.get("templates") or []
+            if src.get("format"):
+                fmt = src["format"]
+            if src.get("name") and (not name or name == "default"):
+                name = src["name"]
+    except Exception:
+        pass
     if exists:
-        # 已回填/总数（仅 new-api 源有 index.db 概念）：优先读持久化的 log_dir.db，
-        # 不再每次全盘 stat；DB 空（从未同步）时回退磁盘探测，保证首次可用。
-        if fmt == "newapi":
-            # 计数口径统一为 log_dir.db（与叶子详情、backfill-status 同源）。
-            # 未同步（从未 sync）时不回退磁盘探测——保持 leaf_count=0 且 synced=False，
-            # 前端提示先「同步」，避免磁盘探测数与 DB 数并存导致口径不一致。
+        # 节点数/已 index 数：统一以 log_dir.db 为准（count_summary），首屏不扫盘。
+        #   · newapi：built = 有 index.db 的叶子数。
+        #   · native：index.jsonl 即索引，同步时叶子一律标 built，故 built == total。
+        # 未同步（从未 sync）时：newapi 保持 0 且 synced=False（前端提示先同步）；
+        # native 置 leaf_count=None 表「未统计」，前端显示「同步」入口（点了才扫盘写 DB）。
+        if fmt in ("newapi", "native"):
             try:
                 import utils.logdir_store as lds
                 from utils.logs_config import get_root_id as _grid
@@ -99,33 +89,15 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
                     summ = lds.count_summary(rid)
                     leaf_count = summ.get("total", 0)
                     built_count = summ.get("built", 0)
+                elif fmt == "native":
+                    # native 从未同步：不首屏扫盘，标未统计，前端提示先「同步」。
+                    leaf_count = None
             except Exception:
                 synced = False
         else:
-            # native 等非 newapi 源：叶子计数需在网络盘上全量递归遍历（iter_index_dirs），
-            # 慢，且会拖死 list 热路径（SFS 上单源可达 30s+）。首屏不扫盘，leaf_count 置 None
-            # 表「未统计」，前端显示占位 + 「统计」按钮，按需调 /api/logs-admin/count-leaves。
+            # 其它非 newapi/native 源：叶子计数需网络盘全量递归遍历（iter_index_dirs），慢，
+            # 移出 list 热路径；leaf_count 置 None，前端显示占位 + 「统计」按钮按需触发。
             leaf_count = None
-
-        # 核对结果：只读 log_dir.db 里最近一次落库的结果（get_last_verify），首屏绝不扫盘。
-        # 只对 new-api 源。DB 有缓存 → 秒读；从未核对过但已同步 → 首屏自动核对一次并落库
-        # （之后即走缓存）；未同步 → 保持空，前端提示先「同步」。实时核对改由「核对」按钮
-        # 主动触发（/api/logs-admin/verify），把逐叶实测这类贵操作移出 list 热路径。
-        verify = {}
-        if fmt == "newapi":
-            try:
-                import utils.logdir_store as lds
-                from utils.logs_config import get_root_id as _grid
-                rid = _grid(path)
-                cached = lds.get_last_verify(rid)
-                if cached:
-                    verify = cached
-                elif synced:
-                    verify = _verify_and_persist(path)
-            except Exception:
-                verify = {}
-    else:
-        verify = {}
 
     return {
         "path": path,
@@ -137,7 +109,7 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
         "leaf_count": leaf_count,
         "built_count": built_count,
         "synced": synced,
-        "verify": verify,
+        "templates": templates,
         "status": "活跃" if active else "历史",
     }
 
@@ -209,7 +181,8 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         body = await request.json()
         path = (body.get("path") or "").strip()
         name = (body.get("name") or "").strip()
-        ok, msg = add_history_path(path, name)
+        templates = body.get("templates")
+        ok, msg = add_history_path(path, name, templates)
         return JSONResponse({"ok": ok, "msg": msg})
 
     @app.post("/api/logs-admin/remove")
@@ -268,23 +241,27 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         path = (body.get("path") or "").strip()
         if not os.path.isdir(path):
             return JSONResponse({"ok": False, "msg": f"目录不存在: {path}"}, status_code=400)
-        if detect_format(path) != "newapi":
-            return JSONResponse({"ok": False, "msg": "仅 new-api 源支持同步"}, status_code=400)
+        fmt = detect_format(path)
+        if fmt not in ("newapi", "native"):
+            return JSONResponse({"ok": False, "msg": "仅 new-api / 本项目(native) 源支持同步"}, status_code=400)
+        # 模板优先取请求体（用户即时改），否则取该源在 history 里登记的；空则 sync_leaves 内按 fmt 默认回退。
+        templates = body.get("templates")
+        if templates is None:
+            templates = get_path_templates(path)
         from utils.newapi_backfill import sync_leaves
-        res = sync_leaves(path)
-        return JSONResponse({
-            "ok": True,
-            "msg": f"已同步 {res['total']} 个节点（新增 {res['added']}，更新 {res['updated']}，"
-                   f"已建 {res['built']}）。构建完整性以「构建索引」为准。",
-            "result": res,
-        })
+        res = await run_in_threadpool(sync_leaves, path, templates)
+        # native：index.jsonl 即索引，同步即「已 index」，无「构建」步骤；提示语区分口径。
+        if fmt == "native":
+            msg = (f"已同步 {res['total']} 个节点（新增 {res['added']}，更新 {res['updated']}）。"
+                   f"本项目源的 index.jsonl 即索引，无需再构建。")
+        else:
+            msg = (f"已同步 {res['total']} 个节点（新增 {res['added']}，更新 {res['updated']}，"
+                   f"已建 {res['built']}）。构建完整性以「构建索引」为准。")
+        return JSONResponse({"ok": True, "msg": msg, "result": res})
 
-    @app.post("/api/logs-admin/verify")
-    async def logs_admin_verify(request: Request):
-        """主动核对某 new-api 源：逐叶实测「是否已完成跟上」并增量落库，返回最新 verify。
-
-        前端「核对」按钮触发。实测扫盘（可能读网络盘）丢到线程池执行，避免阻塞事件循环。
-        """
+    @app.post("/api/logs-admin/rename")
+    async def logs_admin_rename(request: Request):
+        """改数据源名字：同时写 YAML history 与 sources 表（两处口径一致）。"""
         denied = _require_ajax(request)
         if denied:
             return denied
@@ -293,12 +270,46 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
 
         body = await request.json()
         path = (body.get("path") or "").strip()
-        if not os.path.isdir(path):
-            return JSONResponse({"ok": False, "msg": f"目录不存在: {path}"}, status_code=400)
-        if detect_format(path) != "newapi":
-            return JSONResponse({"ok": False, "msg": "仅 new-api 源支持核对"}, status_code=400)
-        verify = await run_in_threadpool(_verify_and_persist, path)
-        return JSONResponse({"ok": True, "verify": verify})
+        name = (body.get("name") or "").strip()
+        ok, msg = set_history_name(path, name)
+        if ok:
+            try:
+                import utils.logdir_store as lds
+                from utils.logs_config import get_root_id
+                lds.set_source_name(get_root_id(path), name or "default")
+            except Exception:
+                pass
+        return JSONResponse({"ok": ok, "msg": msg})
+
+    @app.post("/api/logs-admin/set-templates")
+    async def logs_admin_set_templates(request: Request):
+        """改数据源层级模板：写 YAML history 与 sources 表。可选即时 re-sync（resync=true）。"""
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        if not _is_admin(request):
+            return JSONResponse({"ok": False, "msg": "仅管理员可操作"}, status_code=403)
+
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        templates = body.get("templates")
+        resync = bool(body.get("resync", False))
+        ok, msg = set_history_templates(path, templates)
+        if not ok:
+            return JSONResponse({"ok": ok, "msg": msg})
+        try:
+            import utils.logdir_store as lds
+            from utils.logs_config import get_root_id
+            lds.set_source_templates(get_root_id(path), templates)
+        except Exception:
+            pass
+        result = None
+        if resync and os.path.isdir(path) and detect_format(path) in ("newapi", "native"):
+            from utils.newapi_backfill import sync_leaves
+            result = await run_in_threadpool(sync_leaves, path, templates)
+            msg = (f"{msg}；已按新模板同步 {result['total']} 个节点"
+                   f"（新增 {result['added']}，更新 {result['updated']}）。")
+        return JSONResponse({"ok": True, "msg": msg, "result": result})
 
     @app.get("/api/logs-admin/count-leaves")
     async def logs_admin_count_leaves(request: Request, path: str = ""):
@@ -350,6 +361,7 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
                     "full_path": full_path,
                     "state": r.get("state", "pending"),
                     "built": bool(r.get("built")),
+                    "sessions": r.get("sessions", 0) or 0,
                     "last_error": r.get("last_error", ""),
                 })
         except Exception as e:  # noqa: BLE001
@@ -375,7 +387,7 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
             import utils.logdir_store as lds
             from utils.logs_config import get_root_id
             rid = get_root_id(path)
-            running = st.get("status") in ("running", "queued")
+            running = st.get("status") == "running"
             if lds.has_any(rid):
                 summ = lds.count_summary(rid)
                 st["db_summary"] = summ
@@ -400,9 +412,10 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
 
     @app.get("/api/logs-admin/queue")
     def logs_admin_queue(request: Request):
-        """全局回填队列快照：当前正在跑的源(含实时进度) + 排队中的源列表。
+        """当前正在回填的源快照（含实时进度）。
 
-        前端 load 时读一次即可把"正在构建/排队第几位"直接更新到对应行，无需轮询。
+        已去掉全局串行队列——多个源可并发回填，queued 恒为空。
+        保留此端点仅为兼容旧调用方（如导出页），前端列表页不再调用。
         """
         denied = _require_ajax(request)
         if denied:

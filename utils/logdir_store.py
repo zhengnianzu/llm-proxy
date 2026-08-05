@@ -52,26 +52,21 @@ def init_db(db_dir: str):
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_leaf_status_root ON leaf_status(root_id)"
         )
-        # 主动核对结果（逐叶实测 index.db 是否追上 index.jsonl）：老库没有此列，
-        # ALTER 补列；重复执行幂等（列已存在会抛错，捕获即可）。
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(leaf_status)")}
-        if "verified" not in cols:
-            _conn.execute("ALTER TABLE leaf_status ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
-        # 核对留痕：每次 verify 写一行（根级计数 + 未跟上明细），供页面读最近一次 / 查历史。
+        # 数据源表（「数据管理」表 1）：一源一行。root_id 主键，与 leaf_status 同口径。
+        # templates 存 JSON 数组（多行层级模板）；leaf_count/built_count 同步时刷新。
         _conn.execute("""
-            CREATE TABLE IF NOT EXISTS verify_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                root_id     TEXT NOT NULL,
-                total       INTEGER NOT NULL DEFAULT 0,
-                completed   INTEGER NOT NULL DEFAULT 0,
-                pending     INTEGER NOT NULL DEFAULT 0,
-                incomplete  TEXT NOT NULL DEFAULT '',   -- JSON 数组（dir_key）
+            CREATE TABLE IF NOT EXISTS sources (
+                root_id     TEXT PRIMARY KEY,
+                root_path   TEXT NOT NULL DEFAULT '',
+                name        TEXT NOT NULL DEFAULT 'default',
+                format      TEXT NOT NULL DEFAULT '',
+                templates   TEXT NOT NULL DEFAULT '',
+                leaf_count  INTEGER NOT NULL DEFAULT 0,
+                built_count INTEGER NOT NULL DEFAULT 0,
+                synced_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
                 created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
             )
         """)
-        _conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_verify_log_root ON verify_log(root_id, id)"
-        )
         _conn.commit()
 
 
@@ -180,79 +175,126 @@ def has_any(root_id: str) -> bool:
     return row is not None
 
 
-def save_verify(root_id: str, result: dict, leaf_dir_keys: Optional[dict] = None,
-                completed_paths: Optional[set] = None) -> None:
-    """把一次主动核对结果落库（离线脚本 / 页面刷新核对后调用）。
+# ── 数据源表（「数据管理」表 1）───────────────────────────────────────────
 
-    - 逐叶写 leaf_status.verified：leaf_dir_keys 为 {叶子绝对路径: dir_key}，
-      completed_paths 为「已跟上」的叶子绝对路径集合；命中的标 1，否则标 0
-      （与 built 语义不同：built 只看有没有 index.db，verified 额外要求追上
-      index.jsonl 的 offset）。
-    - 根级计数 + 未跟上明细写一行 verify_log，供页面读最近一次 / 查历史。
 
-    叶子不在 DB 里（未同步过）时跳过不插入——避免核对把未同步的叶子也写进清单，
-    口径与「先同步再核对」一致。
-    """
-    if not _ready():
-        return
-    if completed_paths is None:
-        # 兼容：result 里可能带 _completed_paths（verify_root 原始返回）
-        completed_paths = result.get("_completed_paths", set())
+def _templates_to_json(templates) -> str:
+    """把模板（list 或多行字符串）规整为 JSON 数组字符串存库。"""
+    import json as _json
+    if templates is None:
+        return ""
+    if isinstance(templates, str):
+        items = [ln.strip() for ln in templates.splitlines() if ln.strip()]
+    else:
+        items = [str(t).strip() for t in templates if str(t).strip()]
+    return _json.dumps(items, ensure_ascii=False)
+
+
+def _templates_from_json(raw: str) -> list:
+    """把库里的 templates 字段（JSON 数组字符串）反序列化为 list。"""
+    import json as _json
+    if not raw:
+        return []
+    try:
+        v = _json.loads(raw)
+        return [str(x) for x in v] if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def upsert_source(root_id: str, *, root_path: Optional[str] = None,
+                  name: Optional[str] = None, format: Optional[str] = None,
+                  templates=None, leaf_count: Optional[int] = None,
+                  built_count: Optional[int] = None) -> str:
+    """新增或更新一条数据源。返回 'added' | 'updated'。仅传入的字段被更新。"""
+    if not _ready() or not root_id:
+        return "skipped"
     with _lock:
-        if leaf_dir_keys:
-            for leaf_path, dk in leaf_dir_keys.items():
-                _conn.execute(
-                    "UPDATE leaf_status SET verified = ? WHERE root_id = ? AND dir_key = ?",
-                    (1 if leaf_path in completed_paths else 0,
-                     root_id, dk),
-                )
-        import json as _json
-        _conn.execute(
-            "INSERT INTO verify_log (root_id, total, completed, pending, incomplete) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (root_id,
-             int(result.get("total", 0)),
-             int(result.get("completed", 0)),
-             int(result.get("pending", 0)),
-             _json.dumps(result.get("incomplete", []), ensure_ascii=False)),
-        )
-        _conn.commit()
+        existing = _conn.execute(
+            "SELECT root_id FROM sources WHERE root_id = ?", (root_id,)
+        ).fetchone()
+        if existing:
+            fields = ["synced_at = ?"]
+            params: list = [_now()]
+            if root_path is not None:
+                fields.append("root_path = ?"); params.append(root_path)
+            if name is not None:
+                fields.append("name = ?"); params.append(name)
+            if format is not None:
+                fields.append("format = ?"); params.append(format)
+            if templates is not None:
+                fields.append("templates = ?"); params.append(_templates_to_json(templates))
+            if leaf_count is not None:
+                fields.append("leaf_count = ?"); params.append(int(leaf_count))
+            if built_count is not None:
+                fields.append("built_count = ?"); params.append(int(built_count))
+            params.append(root_id)
+            _conn.execute(
+                f"UPDATE sources SET {', '.join(fields)} WHERE root_id = ?", params
+            )
+            _conn.commit()
+            return "updated"
+        else:
+            _conn.execute("""
+                INSERT INTO sources
+                    (root_id, root_path, name, format, templates,
+                     leaf_count, built_count, synced_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (root_id, root_path or "", name or "default", format or "",
+                  _templates_to_json(templates),
+                  int(leaf_count or 0), int(built_count or 0), _now(), _now()))
+            _conn.commit()
+            return "added"
 
 
-def get_last_verify(root_id: str) -> Optional[dict]:
-    """读某源最近一次核对结果（verify_log 最新一行）。无则 None。"""
-    if not _ready():
+def get_source(root_id: str) -> Optional[dict]:
+    """读一条数据源；templates 反序列化为 list。无则 None。"""
+    if not _ready() or not root_id:
         return None
     with _lock:
         row = _conn.execute(
-            "SELECT total, completed, pending, incomplete, created_at "
-            "FROM verify_log WHERE root_id = ? ORDER BY id DESC LIMIT 1",
-            (root_id,),
+            "SELECT * FROM sources WHERE root_id = ?", (root_id,)
         ).fetchone()
     if not row:
         return None
-    import json as _json
-    try:
-        incomplete = _json.loads(row["incomplete"] or "[]")
-    except (ValueError, TypeError):
-        incomplete = []
-    return {
-        "total": row["total"] or 0,
-        "completed": row["completed"] or 0,
-        "pending": row["pending"] or 0,
-        "incomplete": incomplete,
-        "created_at": row["created_at"],
-        "from_db": True,
-    }
+    d = dict(row)
+    d["templates"] = _templates_from_json(d.get("templates", ""))
+    return d
+
+
+def set_source_name(root_id: str, name: str) -> bool:
+    """改数据源名字。行不存在返回 False。"""
+    if not _ready() or not root_id:
+        return False
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE sources SET name = ?, synced_at = ? WHERE root_id = ?",
+            (name or "default", _now(), root_id),
+        )
+        _conn.commit()
+        return cur.rowcount > 0
+
+
+def set_source_templates(root_id: str, templates) -> bool:
+    """改数据源层级模板。行不存在返回 False。"""
+    if not _ready() or not root_id:
+        return False
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE sources SET templates = ?, synced_at = ? WHERE root_id = ?",
+            (_templates_to_json(templates), _now(), root_id),
+        )
+        _conn.commit()
+        return cur.rowcount > 0
 
 
 def delete_root(root_id: str):
-    """移除某源时清掉其所有叶子记录（含核对留痕）。"""
+    """移除某源时清掉其所有叶子记录（含数据源行）。"""
     if not _ready():
         return
     with _lock:
         _conn.execute("DELETE FROM leaf_status WHERE root_id = ?", (root_id,))
-        _conn.execute("DELETE FROM verify_log WHERE root_id = ?", (root_id,))
+        _conn.execute("DELETE FROM sources WHERE root_id = ?", (root_id,))
         _conn.commit()
 
 

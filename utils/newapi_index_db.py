@@ -98,11 +98,6 @@ except ValueError:
 _leaf_locks: Dict[str, threading.Lock] = {}
 _leaf_locks_guard = threading.Lock()
 
-# verify_root 的短 TTL 缓存：root -> (ts, result)。避免「数据管理」连续刷新反复扫盘。
-_verify_cache: Dict[str, tuple] = {}
-_verify_lock = threading.Lock()
-_VERIFY_TTL = 30.0
-
 
 def db_path(leaf_dir: str) -> str:
     return os.path.join(leaf_dir, _DB_NAME)
@@ -708,63 +703,6 @@ def leaf_completed(leaf_dir: str) -> bool:
     except OSError:
         return False
     return cur_size == offset and pending == 0 and not dirty
-
-
-def verify_root(root: str, ttl: float = _VERIFY_TTL) -> Dict[str, Any]:
-    """主动核对某 new-api 源下所有叶子：实时读每个叶子是否「已完成跟上」。
-
-    返回 {total, completed, pending, incomplete, from_disk, checked_at}。
-    与 needs_build 语义一致但更主动：不看 log_dir.db 的同步记录，逐叶
-    leaf_completed() 实测（index.db 是否存在 + 是否追上 index.jsonl offset）。
-
-    带短 TTL 缓存：同源在 ttl 秒内复用结果，避免连续刷新反复 stat 网络盘。
-    网络盘 stat 有延迟，TTL 内结果视为近似即可。
-    """
-    global _verify_cache
-    key = os.path.normpath(root)
-    now = time.time()
-    with _verify_lock:
-        hit = _verify_cache.get(key)
-        if hit and (now - hit[0]) < ttl:
-            return dict(hit[1])
-    total = completed = 0
-    try:
-        leaves = list(iter_index_dirs(Path(root)))
-    except Exception:
-        leaves = []
-    for lf in leaves:
-        total += 1
-        try:
-            if leaf_completed(str(lf)):
-                completed += 1
-        except Exception:
-            continue  # 单叶探测失败不拖垮整个源
-    # 逐叶判定是否完成（复用刚算的结果，不重复 stat）
-    leaf_map = {}
-    completed_paths = set()
-    for lf in leaves:
-        p = str(lf)
-        try:
-            done = leaf_completed(p)
-        except Exception:
-            done = False
-        leaf_map[p] = done
-        if done:
-            completed_paths.add(p)
-    res = {
-        "total": total,
-        "completed": completed,
-        "pending": total - completed,
-        "incomplete": [os.path.basename(str(l).rstrip("/")) for l in leaves
-                       if not leaf_map.get(str(l))] if total - completed <= 20 else [],
-        "from_disk": True,
-        "checked_at": time.time(),
-        "_completed_paths": completed_paths,   # 内部供落库（save_verify）用，不对外展示
-        "_leaf_map": leaf_map,                 # 内部：叶子绝对路径 -> 是否完成
-    }
-    with _verify_lock:
-        _verify_cache[key] = (time.time(), dict(res))
-    return res
 
 
 def ensure_fresh(leaf_dir: str, workers: int = 8) -> Dict[str, Any]:

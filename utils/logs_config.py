@@ -102,8 +102,22 @@ def _entry_path_name(item) -> tuple[str, str]:
     return str(item or "").strip(), _DEFAULT_NAME
 
 
+def _entry_templates(item) -> list:
+    """把一条 history 记录的 templates 字段规整为 list（多行字符串或 list）。老条目无此字段 → []。"""
+    if not isinstance(item, dict):
+        return []
+    v = item.get("templates")
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [ln.strip() for ln in v.splitlines() if ln.strip()]
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return []
+
+
 def get_history_entries() -> List[dict]:
-    """历史根目录列表，含名称：[{"path","name"}]，去空/去重（按路径）。"""
+    """历史根目录列表，含名称与层级模板：[{"path","name","templates"}]，去空/去重（按路径）。"""
     data = _load_raw()
     raw = data.get("history") or []
     out: List[dict] = []
@@ -116,7 +130,7 @@ def get_history_entries() -> List[dict]:
         if key in seen:
             continue
         seen.add(key)
-        out.append({"path": p, "name": n})
+        out.append({"path": p, "name": n, "templates": _entry_templates(item)})
     return out
 
 
@@ -187,10 +201,26 @@ def _is_ancestor(anc: str, desc: str) -> bool:
     return desc.startswith(anc + os.sep)
 
 
-def add_history_path(path: str, name: str = "") -> tuple[bool, str]:
-    """新增历史路径（可带名称）。返回 (成功, 消息)。"""
+def _normalize_templates(templates) -> list:
+    """把 templates（None / 多行字符串 / list）规整为去空 list，存 YAML。"""
+    if templates is None:
+        return []
+    if isinstance(templates, str):
+        return [ln.strip() for ln in templates.splitlines() if ln.strip()]
+    if isinstance(templates, list):
+        return [str(x).strip() for x in templates if str(x).strip()]
+    return []
+
+
+def add_history_path(path: str, name: str = "", templates=None) -> tuple[bool, str]:
+    """新增历史路径（可带名称与层级模板）。返回 (成功, 消息)。
+
+    templates：占位符层级模板，多行字符串或 list（如 ["details/{日6}/{时8}"]）；
+    存进 YAML history 条目，供「同步」按其枚举叶子。空则由格式默认模板兜底。
+    """
     p = (path or "").strip()
     n = (name or "").strip() or _DEFAULT_NAME
+    tpls = _normalize_templates(templates)
     if not p:
         return False, "路径不能为空"
     if not os.path.isdir(p):
@@ -216,7 +246,7 @@ def add_history_path(path: str, name: str = "") -> tuple[bool, str]:
                 return False, (f"新路径是已有历史「{en}」（{ep}）的上层，会把它递归收录导致重复。"
                                f"请改登记不与它嵌套的路径，或先移除该历史再登记外层。")
         # 不允许与活跃 base 的 env_dir 重复（活跃目录本就在统计中）
-        data["history"].append({"path": p, "name": n})
+        data["history"].append({"path": p, "name": n, "templates": tpls})
         _save_raw(data)
     return True, "已添加"
 
@@ -234,6 +264,66 @@ def remove_history_path(path: str) -> tuple[bool, str]:
         data["history"] = new_list
         _save_raw(data)
     return True, "已移除（未删除磁盘文件）"
+
+
+def get_path_templates(path: str) -> list:
+    """某历史根目录登记的层级模板 list；未配置/活跃目录返回 []（调用方回退默认模板）。"""
+    if not path:
+        return []
+    norm = os.path.normpath(path)
+    for e in get_history_entries():
+        if os.path.normpath(e["path"]) == norm:
+            return e.get("templates") or []
+    return []
+
+
+def set_history_name(path: str, name: str) -> tuple[bool, str]:
+    """改某历史条目的名字（写 YAML）。路径不存在返回 (False, ...)。"""
+    p = (path or "").strip()
+    n = (name or "").strip() or _DEFAULT_NAME
+    if not p:
+        return False, "路径不能为空"
+    with _lock:
+        data = _ensure_config()
+        norm = os.path.normpath(p)
+        hit = False
+        for x in data["history"]:
+            if isinstance(x, dict) and os.path.normpath(str(x.get("path") or "")) == norm:
+                x["name"] = n
+                hit = True
+            elif not isinstance(x, dict) and os.path.normpath(str(x or "")) == norm:
+                # 旧格式 str 条目：就地升级为 dict
+                idx = data["history"].index(x)
+                data["history"][idx] = {"path": p, "name": n, "templates": []}
+                hit = True
+        if not hit:
+            return False, "路径不存在"
+        _save_raw(data)
+    return True, "已改名"
+
+
+def set_history_templates(path: str, templates) -> tuple[bool, str]:
+    """改某历史条目的层级模板（写 YAML）。路径不存在返回 (False, ...)。"""
+    p = (path or "").strip()
+    tpls = _normalize_templates(templates)
+    if not p:
+        return False, "路径不能为空"
+    with _lock:
+        data = _ensure_config()
+        norm = os.path.normpath(p)
+        hit = False
+        for x in data["history"]:
+            if isinstance(x, dict) and os.path.normpath(str(x.get("path") or "")) == norm:
+                x["templates"] = tpls
+                hit = True
+            elif not isinstance(x, dict) and os.path.normpath(str(x or "")) == norm:
+                idx = data["history"].index(x)
+                data["history"][idx] = {"path": p, "name": _DEFAULT_NAME, "templates": tpls}
+                hit = True
+        if not hit:
+            return False, "路径不存在"
+        _save_raw(data)
+    return True, "已更新模板"
 
 
 def set_active_base(base: str) -> tuple[bool, str]:

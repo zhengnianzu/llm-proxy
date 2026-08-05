@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-scripts/sync_all.py — 离线同步叶子清单 + 主动核对（数据管理「同步」的命令行版）
+scripts/sync_all.py — 离线同步叶子清单（数据管理「同步」的命令行版）
 
 只扫盘、写 DB，不构建 index.db。等价于在「数据管理」页对每个 new-api 源点
-「同步」按钮，外加一次主动核对（逐叶实测 index.db 是否追上 index.jsonl），把
-结果一并落进 log_dir.db：
+「同步」按钮，把叶子清单落进 log_dir.db：
 
-  - sync_leaves(root)：把源下的叶子清单写进 leaf_status（新增 pending / 更新构建态）
-  - verify_root(root)：逐叶读 index.db offset 与 index.jsonl 大小，判定「已跟上」
-  - save_verify(...)：把 completed 逐叶写 leaf_status.verified，根级计数写 verify_log
+  - sync_leaves(root)：把源下的叶子清单写进 leaf_status（新增 pending / 更新构建态），
+    并 upsert 一行 sources（格式/模板/叶子数/已建数）
 
 与 scripts/backfill_all.py 的区别：本脚本**只同步、不回填**（不跑 _run、不构建
 index.db），因此很快、只读磁盘不重算。适合离线/后台构建后，让平台快速读到最新的
-叶子清单与「跟上」情况，无需页面逐个点「同步」。
+叶子清单，无需页面逐个点「同步」。
 
     # 同步所有 new-api 源
     python -m scripts.sync_all
@@ -22,9 +20,6 @@ index.db），因此很快、只读磁盘不重算。适合离线/后台构建�
 
     # 按「标识」筛选（匹配 name / root_id / 路径子串，可多次，取并集）
     python -m scripts.sync_all --source jumper-003
-
-    # 只同步叶子清单，跳过主动核对（更快，但不更新 verified）
-    python -m scripts.sync_all --no-verify
 
     # 预演：只打印将同步哪些源，不写 DB
     python -m scripts.sync_all --dry-run
@@ -45,7 +40,6 @@ import argparse
 import logging
 import os
 import sys
-from pathlib import Path
 
 # 允许 `python scripts/sync_all.py` 直接运行（把项目根加入 import 路径）
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,7 +48,6 @@ if _PROJECT_ROOT not in sys.path:
 
 from utils.log_paths import get_service_log_dir, get_log_dir
 from utils.logs_config import get_stats_roots, get_path_name, get_root_id
-from utils.log_scan import detect_format, dir_key_for
 import utils.logdir_store as lds
 import utils.newapi_backfill as bf
 
@@ -65,9 +58,8 @@ from scripts.backfill_all import _resolve_roots, _classify, _filter_by_sources
 logger = logging.getLogger("sync_all")
 
 
-def _sync_one(root: str, do_verify: bool) -> bool:
-    """同步单个源：sync_leaves + （可选）verify_root/save_verify。成功返回 True。"""
-    rid = get_root_id(root)
+def _sync_one(root: str) -> bool:
+    """同步单个源：sync_leaves 写清单 + upsert sources。成功返回 True。"""
     try:
         res = bf.sync_leaves(root)
         logger.info("    同步：total=%d added=%d updated=%d built=%d",
@@ -75,40 +67,16 @@ def _sync_one(root: str, do_verify: bool) -> bool:
     except Exception:
         logger.exception("    同步叶子清单失败：%s", root)
         return False
-
-    if not do_verify:
-        return True
-
-    # 主动核对并落库：DB 里既有权威清单，又能如实反映磁盘是否追上 index.jsonl。
-    try:
-        from utils.newapi_index_db import verify_root
-        v = verify_root(root, ttl=0)
-        lds.save_verify(
-            rid,
-            {k: x for k, x in v.items() if not k.startswith("_")},
-            leaf_dir_keys={
-                p: dir_key_for(Path(root), Path(p))
-                for p in v.get("_leaf_map", {})
-            },
-            completed_paths=v.get("_completed_paths"),
-        )
-        logger.info("    核对：total=%d completed=%d pending=%d（已写入 DB）",
-                    v["total"], v["completed"], v["pending"])
-    except Exception:
-        logger.exception("    核对落库失败：%s", root)
-        # 清单已同步成功，核对只是附加信息——不因核对失败判整源失败。
     return True
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="离线同步所有 new-api 源的叶子清单 + 主动核对（数据管理「同步」命令行版）")
+        description="离线同步所有 new-api 源的叶子清单（数据管理「同步」命令行版）")
     parser.add_argument("--root", action="append", default=[],
                         help="只同步指定源目录（可多次）。未给则同步所有登记源。")
     parser.add_argument("--source", action="append", default=[],
                         help="按「标识」筛选源（可多次，取并集）：匹配 name / root_id / 路径子串。")
-    parser.add_argument("--no-verify", action="store_true",
-                        help="只同步叶子清单，跳过主动核对（不更新 leaf_status.verified）。")
     parser.add_argument("--db-dir", default="",
                         help="显式指定写 log_dir.db 的目录（含该 DB 的目录）。默认由环境变量推导"
                              "（logs/port{PROXY_PORT}/{LOG_TASK_TAG}-{UPSTREAM_API_KEY 后4位}），"
@@ -142,40 +110,40 @@ def main(argv=None) -> int:
         logger.error("按 --source 筛选后无源可同步。")
         return 1
 
-    logger.info("共发现 %d 个源，逐个检查是否为 new-api：", len(all_roots))
+    logger.info("共发现 %d 个源，逐个检查是否可同步（new-api / 本项目 native）：", len(all_roots))
     targets = []
     for r in all_roots:
-        exists, fmt, is_newapi = _classify(r)
-        tag = "同步" if is_newapi else ("跳过-非newapi" if exists else "跳过-不存在")
+        exists, fmt, _ = _classify(r)
+        # 同步只扫盘写 DB（sync_leaves 按 fmt 默认模板枚举叶子），newapi 与 native 都支持——
+        # 与「数据管理」页「同步」按钮口径一致（route 允许 newapi/native）。
+        syncable = fmt in ("newapi", "native")
+        tag = "同步" if syncable else ("跳过-不支持" if exists else "跳过-不存在")
         logger.info("  [%s] %s  name=%s root_id=%s  fmt=%s",
                     tag, r, get_path_name(r), get_root_id(r), fmt)
-        if is_newapi:
+        if syncable:
             targets.append(r)
 
     if not targets:
-        logger.warning("没有可同步的 new-api 源，结束。")
+        logger.warning("没有可同步的 new-api / native 源，结束。")
         return 0
 
     if args.dry_run:
-        verb = "同步清单" if args.no_verify else "同步清单 + 主动核对"
-        logger.info("[dry-run] 将对以下 %d 个 new-api 源执行「%s」（实际未执行）：",
-                    len(targets), verb)
+        logger.info("[dry-run] 将对以下 %d 个源执行「同步清单」（实际未执行）：",
+                    len(targets))
         for i, r in enumerate(targets, 1):
             logger.info("  [dry-run] [%d/%d] %s (name=%s root_id=%s)",
                         i, len(targets), r, get_path_name(r), get_root_id(r))
         return 0
 
-    do_verify = not args.no_verify
     logger.info("=" * 70)
-    logger.info("开始逐个同步 %d 个 new-api 源%s", len(targets),
-                "" if do_verify else "（跳过核对）")
+    logger.info("开始逐个同步 %d 个源（new-api / native）", len(targets))
     logger.info("=" * 70)
 
     failures = []
     for idx, root in enumerate(targets, 1):
         logger.info("")
         logger.info(">>> [%d/%d] 源 %s (name=%s)", idx, len(targets), root, get_path_name(root))
-        if not _sync_one(root, do_verify):
+        if not _sync_one(root):
             failures.append(root)
 
     logger.info("")
