@@ -39,7 +39,7 @@ utils.newapi_backfill._run，一个源跑完再跑下一个，跑完即退出—
     python -m scripts.backfill_all --sync-only
 
 环境变量与服务进程保持一致（决定 SERVICE_LOG_DIR / 活跃 base 的解析）：
-    PROXY_PORT, LOG_TASK_TAG, UPSTREAM_API_KEY, LOGS_DIR, LOGS_DIRS_CONFIG
+    PROXY_PORT, LOG_TASK_TAG, UPSTREAM_API_KEY, LOGS_DIR
 建议在与服务相同的工作目录、相同环境变量下运行，以命中同一 log_dir.db 与源列表。
 
 退出码: 0 全部成功；1 有源在回填中报错（root 级崩溃或叶子失败）。
@@ -58,7 +58,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from utils.log_paths import get_service_log_dir, get_log_dir
-from utils.logs_config import get_stats_roots, get_path_name, get_root_id
+from utils.logs_config import get_path_name, get_root_id
 from utils.log_scan import detect_format
 import utils.logdir_store as lds
 import utils.newapi_backfill as bf
@@ -85,7 +85,8 @@ def _setup_console_logging(verbose: bool) -> None:
 def _resolve_roots(explicit_roots):
     """确定要回填的源列表。
 
-    未显式指定 --root 时，取「数据管理」页同一份源集合：活跃 env_dir + 历史路径。
+    未显式指定 --root 时，取「数据管理」页同一份源集合：log_dir.db 的 sources
+    为准（DB 有数据时），否则回退 活跃 env_dir + YAML history（首次导入前/新机器）。
     活跃 env_dir 用与 app.py 相同的方式解析（get_log_dir("logs_all") 的父目录）。
     """
     if explicit_roots:
@@ -93,7 +94,8 @@ def _resolve_roots(explicit_roots):
     else:
         logs_dir = get_log_dir("logs_all")
         env_dir = os.path.dirname(logs_dir)
-        roots = [os.path.normpath(r) for r in get_stats_roots(env_dir)]
+        from utils.logs_config import get_registered_roots
+        roots = [os.path.normpath(r) for r in get_registered_roots(env_dir)]
     # 去重保序
     seen = set()
     uniq = []

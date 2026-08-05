@@ -424,7 +424,6 @@ def reformat_and_analyze(
     if cached_results:
         _log(f"缓存命中 {len(cached_results)} sessions, 需处理 {len(tasks)}")
     errors = []
-    done = 0
     n_tasks = len(tasks)
 
     if n_tasks == 0:
@@ -436,14 +435,11 @@ def reformat_and_analyze(
     #      load_index…），刷屏 "leader_lock: another worker is leader" 且浪费初始化；
     #   2) worker 挂死变孤儿（PPID=1）堆积吃内存，需要 pid 快照 + SIGKILL 兜底回收。
     # 线程共享本进程解释器，无以上问题，收尾直接 shutdown 即可，无需看门狗/强杀。
-    # 进度日志节流：每条 append_log 都会全量重写外部日志文件（O(n²) 写放大），
-    # 且几万条会淹没抽屉、跟不上进度。按约 5% 一档打点（下限每 200 个一条），
-    # 无论 1k 还是 6 万 session，进度日志都控制在 ~20 条以内。
-    log_every = max(200, n_tasks // 20)
+    # 逐 session 进度不再打点（曾按 5% 一档，仍会在多 mtime 时刷屏日志抽屉）；
+    # 每个 mtime 的起止由上层 export_routes 记录，本函数只在全部完成时汇总一条。
     executor = ThreadPoolExecutor(max_workers=workers)
     try:
         for future in as_completed([executor.submit(_process_one, t) for t in tasks]):
-            done += 1
             try:
                 result = future.result()
                 if result:
@@ -454,9 +450,8 @@ def reformat_and_analyze(
                     errors.append("处理失败")
             except Exception as e:
                 errors.append(str(e))
-
-            if done % log_every == 0 or done == n_tasks:
-                _log(f"进度 {done}/{n_tasks}，成功 {len(results)}")
+            # 逐 session 不打点：进度/完成汇总统一由上层 export_routes 每 mtime 输出一条，
+            # 避免这里再刷屏或与上层日志重复。
     finally:
         executor.shutdown(wait=True)
 

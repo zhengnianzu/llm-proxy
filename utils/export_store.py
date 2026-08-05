@@ -8,6 +8,7 @@ SQLite 后端，记录每次导出操作的状态和结果。
 import os
 import sqlite3
 import threading
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -94,6 +95,10 @@ def init_db(db_dir: str):
             "source_export_id INTEGER",
             "in_manage INTEGER NOT NULL DEFAULT 0",
             "manage_name TEXT NOT NULL DEFAULT ''",
+            "key_name TEXT NOT NULL DEFAULT ''",
+            "workers INTEGER NOT NULL DEFAULT 0",
+            "dir_workers INTEGER NOT NULL DEFAULT 0",
+            "leaves_cache TEXT NOT NULL DEFAULT ''",
         ]:
             try:
                 _conn.execute(f"ALTER TABLE export_records ADD COLUMN {col_def}")
@@ -116,14 +121,17 @@ def create_record(
     local_copy_dir: str = "",
     mode: str = "export",
     source_export_id: int | None = None,
+    key_name: str = "",
+    workers: int = 0,
+    dir_workers: int = 0,
 ) -> int:
     conn = _get_conn()
     with _lock:
         cur = conn.execute(
             """INSERT INTO export_records
-               (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode, source_export_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode, source_export_id),
+               (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode, source_export_id, key_name, workers, dir_workers)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (api_key, key_slot, mtime_dirs, obs_dst, local_copy_dir, mode, source_export_id, key_name, workers, dir_workers),
         )
         conn.commit()
     return cur.lastrowid
@@ -139,13 +147,39 @@ def update_status(record_id: int, status: str, **kwargs):
         fields.append("finished_at = datetime('now','localtime')")
     for k, v in kwargs.items():
         if k in ("error_message", "total_sessions", "files_uploaded", "files_skipped",
-                 "obs_dst", "local_copy_dir", "eval_status", "eval_report_path", "analysis_json"):
+                 "obs_dst", "local_copy_dir", "eval_status", "eval_report_path",
+                 "analysis_json", "key_name", "leaves_cache"):
             fields.append(f"{k} = ?")
             values.append(v)
     values.append(record_id)
     with _lock:
         conn.execute(f"UPDATE export_records SET {', '.join(fields)} WHERE id = ?", values)
         conn.commit()
+
+
+def save_leaves_cache(record_id: int, leaves: list, warnings: list | None = None) -> None:
+    """把某记录的节点分布结果落库（JSON），供之后展开直接读、免重复扫盘。"""
+    payload = json.dumps({"leaves": leaves, "warnings": warnings or []}, ensure_ascii=False)
+    conn = _get_conn()
+    with _lock:
+        conn.execute("UPDATE export_records SET leaves_cache = ? WHERE id = ?", (payload, record_id))
+        conn.commit()
+
+
+def get_leaves_cache(record_id: int) -> Optional[dict]:
+    """读回缓存的节点分布；无缓存或解析失败返回 None。"""
+    conn = _get_conn()
+    with _lock:
+        row = conn.execute("SELECT leaves_cache FROM export_records WHERE id = ?", (record_id,)).fetchone()
+    if not row:
+        return None
+    raw = row["leaves_cache"] if "leaves_cache" in row.keys() else ""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
 
 
 def get_record(record_id: int) -> Optional[dict]:
@@ -209,9 +243,9 @@ def latest_quality_record(source_export_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-_SLIM_COLS = "id, key_slot, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message"
+_SLIM_COLS = "id, key_slot, api_key, key_name, mtime_dirs, status, mode, created_at, total_sessions, files_uploaded, obs_dst, error_message"
 
-_DS_COLS = "id, key_slot, api_key, status, mode, created_at, total_sessions, obs_dst, error_message, local_copy_dir, in_manage, manage_name"
+_DS_COLS = "id, key_slot, api_key, key_name, status, mode, created_at, total_sessions, obs_dst, error_message, local_copy_dir, in_manage, manage_name"
 
 
 def list_records_for_datasets(limit: int = 1000, in_manage: Optional[bool] = None) -> list:
@@ -294,7 +328,6 @@ def list_records_all_slim(limit_per_key: int = 10) -> dict:
             grouped[slot].append(d)
     return grouped
 
-
 def mark_interrupted():
     """启动时将遗留的 running/queued 记录标记为 failed/cancelled。
 
@@ -320,6 +353,9 @@ def cancel_interrupted() -> int:
     不再重新入队（此前的 take_interrupted + _requeue_interrupted 会在频繁重启时
     反复重建任务并刷屏日志）。重启即视为放弃上一轮排队：全部标 cancelled，
     用户可在页面上按需手动重跑。返回受影响行数。
+
+    注意：draft（草稿）状态不在此列——它是用户显式保存待启动的任务，
+    重启后保留，等待手动「启动」。
     """
     conn = _get_conn()
     with _lock:

@@ -28,7 +28,7 @@ index.db），因此很快、只读磁盘不重算。适合离线/后台构建�
     python -m scripts.sync_all --db-dir logs/port8084/env-99oR
 
 环境变量与服务进程保持一致（决定 SERVICE_LOG_DIR / 活跃 base 的解析）：
-    PROXY_PORT, LOG_TASK_TAG, UPSTREAM_API_KEY, LOGS_DIR, LOGS_DIRS_CONFIG
+    PROXY_PORT, LOG_TASK_TAG, UPSTREAM_API_KEY, LOGS_DIR
 务必在与服务相同的环境变量下运行，否则会写进另一个 log_dir.db（如 PROXY_PORT
 未设 → logs/port0/... ），平台读不到。建议：`set -a; source .env; set +a`。
 不想依赖环境变量时，直接用 `--db-dir <含 log_dir.db 的目录>` 指定目标 DB。
@@ -47,7 +47,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from utils.log_paths import get_service_log_dir, get_log_dir
-from utils.logs_config import get_stats_roots, get_path_name, get_root_id
+from utils.logs_config import get_path_name, get_root_id
 import utils.logdir_store as lds
 import utils.newapi_backfill as bf
 

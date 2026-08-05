@@ -52,7 +52,7 @@ def get_service_log_dir() -> str:
 
 
 def _resolve_base(base_name: str) -> str:
-    """logs_all 的 base 可由配置覆盖（env LOGS_DIR 或 settings/logs_dirs.yaml）。
+    """logs_all 的 base 可由 env LOGS_DIR 覆盖。
     其它 base（logs_anthropic/logs_openai 等）保持原样。"""
     if base_name != "logs_all":
         return base_name

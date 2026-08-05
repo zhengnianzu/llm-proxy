@@ -19,7 +19,7 @@ from utils.stats_index import (
     start_stats_warmer,
     QUALIFIED_THRESHOLD_DEFAULT,
 )
-from utils.logs_config import get_stats_roots
+from utils.logs_config import get_registered_roots
 
 
 def _build_stats_json(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT) -> dict:
@@ -45,7 +45,7 @@ def register_session_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/sessions/stats")
     def sessions_stats(threshold: int = QUALIFIED_THRESHOLD_DEFAULT, refresh: bool = False):
-        roots = get_stats_roots(str(env_dir))
+        roots = get_registered_roots(str(env_dir))
         existing = [r for r in roots if Path(r).is_dir()]
         if not existing:
             return JSONResponse({"error": f"directory not found: {env_dir}"}, status_code=404)

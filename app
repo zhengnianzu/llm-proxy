@@ -264,10 +264,11 @@ def cmd_start(args: argparse.Namespace) -> int:
     child_env.update(env_values)
     child_env["ENV_FILE"] = str(env_path)
     child_env["LOG_TASK_TAG"] = service_slug
-    # 数据目录配置文件指针（app data config 设置）传给 app.py
-    _data_cfg = _resolve_data_config_path(state)
-    if _data_cfg:
-        child_env["LOGS_DIRS_CONFIG"] = str(_data_cfg)
+    # 清理历史遗留的 data_config 残留字段（旧版 `app data config` 写入，机制已移除）
+    if state.get("data_config"):
+        state.pop("data_config", None)
+        state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_state(state)
 
     with log_file.open("ab") as log_fp:
         proc = subprocess.Popen(
@@ -605,94 +606,6 @@ def _read_app_meta(port: int, service_slug: str = "", key_prefix: str = "") -> d
 
 def _get_sync_service(state: dict, service_key: str) -> dict:
     return state.setdefault("sync_services", {}).setdefault(service_key, {})
-
-
-# ---------------------------------------------------------------------------
-# cmd_data — data-dir config file pointer (settings/logs_dirs.yaml or custom)
-# ---------------------------------------------------------------------------
-
-def _resolve_data_config_path(state: dict) -> Optional[Path]:
-    rel = state.get("data_config")
-    if not rel:
-        return None
-    p = Path(rel)
-    if not p.is_absolute():
-        p = BASE_DIR / p
-    return p.resolve()
-
-
-def _print_data_config(path: Path) -> None:
-    try:
-        import yaml as _yaml
-        with path.open("r", encoding="utf-8") as f:
-            data = _yaml.safe_load(f) or {}
-    except (OSError, Exception):  # noqa: BLE001
-        data = {}
-    print(f"[data]   active_base: {data.get('active_base', 'logs_all')}")
-    hist = data.get("history") or []
-    if hist:
-        print(f"[data]   history ({len(hist)}):")
-        for h in hist:
-            print(f"[data]     - {h}")
-    else:
-        print("[data]   history: (none)")
-
-
-def cmd_data(args: argparse.Namespace) -> int:
-    """数据目录配置：指定/查看 logs_dirs 配置 yaml 文件。"""
-    action = getattr(args, "data_action", None)
-    state = load_state()
-
-    if action == "list":
-        cfg_path = _resolve_data_config_path(state)
-        default = BASE_DIR / "settings" / "logs_dirs.yaml"
-        effective = cfg_path or default
-        print(f"[data] config file: {effective}"
-              + ("" if cfg_path else "  (default)"))
-        if effective.is_file():
-            _print_data_config(effective)
-        else:
-            print("[data]   (file not found)")
-        return 0
-
-    # action == "config"
-    config_path = getattr(args, "config_file", None)
-    if config_path:
-        p = Path(config_path)
-        if not p.is_absolute():
-            p = BASE_DIR / p
-        p = p.resolve()
-        if not p.exists():
-            eprint(f"[data] config file not found: {p}")
-            return 1
-        rel = os.path.relpath(p, BASE_DIR)
-        # 项目外的绝对路径保留绝对形式（relpath 会产生 ../.. 也可用，但绝对更清晰）
-        stored = rel if not rel.startswith("..") else str(p)
-        state["data_config"] = stored
-        state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        save_state(state)
-        print(f"[data] data_config -> {stored}")
-        print("[data] (restart app for the running service to pick it up)")
-        _print_data_config(p)
-        return 0
-
-    # show current
-    cfg_path = _resolve_data_config_path(state)
-    if not cfg_path:
-        default = BASE_DIR / "settings" / "logs_dirs.yaml"
-        print("[data] not explicitly configured, using default:")
-        print(f"[data] config file: {default}")
-        if default.is_file():
-            _print_data_config(default)
-        print("[data] run: data config <yaml_path>  to point at another file")
-        return 0
-    print(f"[data] config: {state.get('data_config')}")
-    print(f"[data] resolved: {cfg_path}")
-    if cfg_path.is_file():
-        _print_data_config(cfg_path)
-    else:
-        print("[data]   (file not found)")
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1527,18 +1440,6 @@ def build_parser() -> argparse.ArgumentParser:
     ps_config = sync_sub.add_parser("config", help="Set or show sync config file")
     ps_config.add_argument("config_file", nargs="?", help="YAML config file path, e.g. settings/obs_base.yaml")
     ps_config.set_defaults(func=cmd_sync_config)
-
-    # --- data subcommands: 数据目录配置文件 ---
-    p_data = subparsers.add_parser("data", help="Data-dir config (which logs_dirs yaml to use)")
-    data_sub = p_data.add_subparsers(dest="data_action", required=True)
-
-    pd_config = data_sub.add_parser("config", help="Set or show the data-dir config yaml file")
-    pd_config.add_argument("config_file", nargs="?",
-                           help="YAML config file path, e.g. settings/logs_dirs.yaml")
-    pd_config.set_defaults(func=cmd_data)
-
-    pd_list = data_sub.add_parser("list", help="Show current data-dir config file and its contents")
-    pd_list.set_defaults(func=cmd_data)
 
     # --- key subcommands ---
     p_key = subparsers.add_parser("key", help="API key management (list/add/del/stop/start/config)")

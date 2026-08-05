@@ -22,12 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from utils.logs_config import (
     get_active_base,
-    get_history_entries,
-    add_history_path,
-    remove_history_path,
-    get_path_templates,
-    set_history_name,
-    set_history_templates,
+    get_root_id,
     dir_size,
     human_size,
 )
@@ -45,33 +40,22 @@ def _is_admin(request: Request) -> bool:
     return role == "admin"
 
 
-def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "default") -> dict:
+def _describe(src: dict, active: bool, active_env_dir: str = "") -> dict:
+    """把 sources 表一行渲染成列表页行。
+
+    src: logdir_store.list_sources 返回的 dict（含 root_id/root_path/name/
+    format/templates）。DB 是「日志路径列表」的唯一数据源——
+    这里不再读 YAML history。
+    """
+    path = (src.get("root_path") or "").strip()
+    root_id = src.get("root_id") or "default"
+    name = (src.get("name") or "").strip() or "default"
+    templates = src.get("templates") or []
     exists = os.path.isdir(path)
-    fmt = detect_format(path) if exists else "missing"
+    fmt = src.get("format") or (detect_format(path) if exists else "missing")
     leaf_count = 0
     built_count = 0
     synced = False
-    templates: list = []
-    # root_id：活跃 env_dir 固定为 default，其余按稳定哈希，供用户核对来源标识
-    try:
-        from utils.logs_config import get_root_id
-        root_id = "default" if active else get_root_id(path, active_env_dir)
-    except Exception:
-        root_id = "default"
-    # 表 1 数据源行：命中则用其 format/templates/name（叶子/已建数仍以 leaf_status 为准，
-    # 见下方 newapi 分支），供页面展示格式列/模板列/名字。DB 主键统一用纯路径哈希。
-    try:
-        import utils.logdir_store as lds
-        from utils.logs_config import get_root_id as _grid
-        src = lds.get_source(_grid(path)) if not active else None
-        if src:
-            templates = src.get("templates") or []
-            if src.get("format"):
-                fmt = src["format"]
-            if src.get("name") and (not name or name == "default"):
-                name = src["name"]
-    except Exception:
-        pass
     if exists:
         # 节点数/已 index 数：统一以 log_dir.db 为准（count_summary），首屏不扫盘。
         #   · newapi：built = 有 index.db 的叶子数。
@@ -81,9 +65,8 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
         if fmt in ("newapi", "native"):
             try:
                 import utils.logdir_store as lds
-                from utils.logs_config import get_root_id as _grid
                 # DB 主键统一用纯路径哈希（不传 active_env_dir），与 sync_leaves/_run 一致
-                rid = _grid(path)
+                rid = get_root_id(path)
                 synced = lds.has_any(rid)
                 if synced:
                     summ = lds.count_summary(rid)
@@ -101,7 +84,7 @@ def _describe(path: str, active: bool, active_env_dir: str = "", name: str = "de
 
     return {
         "path": path,
-        "name": name or "default",
+        "name": name,
         "root_id": root_id,
         "active": active,
         "exists": exists,
@@ -139,20 +122,16 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
             return denied
 
         active_base = get_active_base()
+        import utils.logdir_store as lds
+        # 行来源 = sources 表（活跃行 root_id='default' 排第一），DB 为准。
+        srcs = lds.list_sources(active_env_dir)
         rows = []
-
-        # 活跃：进程实际写入的 env_dir（名称固定 default）
-        active_row = _describe(active_env_dir, active=True, name="default")
-        active_row["base"] = active_base
-        rows.append(active_row)
-
-        # 历史（带名称）
-        for e in get_history_entries():
-            p = e["path"]
-            # 跳过与活跃 env_dir 相同的路径
-            if os.path.normpath(p) == os.path.normpath(active_env_dir):
-                continue
-            rows.append(_describe(p, active=False, active_env_dir=active_env_dir, name=e.get("name") or "default"))
+        for src in srcs:
+            active = (src.get("root_id") == "default")
+            row = _describe(src, active=active, active_env_dir=active_env_dir)
+            if active:
+                row["base"] = active_base
+            rows.append(row)
 
         if with_size:
             for r in rows:
@@ -182,8 +161,43 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         path = (body.get("path") or "").strip()
         name = (body.get("name") or "").strip()
         templates = body.get("templates")
-        ok, msg = add_history_path(path, name, templates)
-        return JSONResponse({"ok": ok, "msg": msg})
+        # 以 DB 为准新增源：
+        import utils.logdir_store as lds
+        # 校验目录存在
+        if not path:
+            return JSONResponse({"ok": False, "msg": "路径不能为空"}, status_code=400)
+        if not os.path.isdir(path):
+            return JSONResponse({"ok": False, "msg": f"目录不存在: {path}"}, status_code=400)
+        rid = get_root_id(path)
+        # 重复 / 嵌套校验：对 DB sources 做（列表以 DB 为权威）
+        if lds.get_source(rid):
+            return JSONResponse({"ok": False, "msg": "路径已存在"})
+        from utils.logs_config import _is_ancestor
+        norm = os.path.normpath(path)
+        for src in lds.list_sources(active_env_dir):
+            sp = (src.get("root_path") or "").strip()
+            if not sp:
+                continue
+            snorm = os.path.normpath(sp)
+            if snorm == norm:
+                continue
+            if _is_ancestor(snorm, norm):
+                return JSONResponse(
+                    {"ok": False, "msg": (f"新路径在已有源「{src.get('name') or 'default'}」"
+                                          f"（{sp}）之下，会被其递归扫描重复收录。"
+                                          f"请改登记不与它嵌套的路径，或先移除该源再登记外层。")},
+                    status_code=400)
+            if _is_ancestor(norm, snorm):
+                return JSONResponse(
+                    {"ok": False, "msg": (f"新路径是已有源「{src.get('name') or 'default'}」"
+                                          f"（{sp}）的上层，会把它递归收录导致重复。"
+                                          f"请改登记不与它嵌套的路径，或先移除该源再登记外层。")},
+                    status_code=400)
+        # DB 先行
+        lds.upsert_source(rid, root_path=os.path.normpath(path),
+                          name=name or "default", format=detect_format(path),
+                          templates=templates or [])
+        return JSONResponse({"ok": True, "msg": "已添加"})
 
     @app.post("/api/logs-admin/remove")
     async def logs_admin_remove(request: Request):
@@ -195,16 +209,17 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
 
         body = await request.json()
         path = (body.get("path") or "").strip()
-        ok, msg = remove_history_path(path)
-        if ok:
-            # 顺带清掉该源在 log_dir.db 里的叶子记录（不删磁盘文件）
-            try:
-                import utils.logdir_store as lds
-                from utils.logs_config import get_root_id
-                lds.delete_root(get_root_id(path))
-            except Exception:
-                pass
-        return JSONResponse({"ok": ok, "msg": msg})
+        # 活跃目录（root_id='default'）由进程 env 决定，不可移除
+        if get_root_id(path) == "default":
+            return JSONResponse({"ok": False, "msg": "活跃目录不可移除"})
+        # DB 为准：删 sources 行 + 叶子记录（不删磁盘文件）
+        import utils.logdir_store as lds
+        rid = get_root_id(path)
+        src = lds.get_source(rid)
+        if not src:
+            return JSONResponse({"ok": False, "msg": "路径不存在"})
+        lds.delete_root(rid)
+        return JSONResponse({"ok": True, "msg": "已移除（未删除磁盘文件）"})
 
     @app.post("/api/logs-admin/backfill")
     async def logs_admin_backfill(request: Request):
@@ -244,10 +259,12 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         fmt = detect_format(path)
         if fmt not in ("newapi", "native"):
             return JSONResponse({"ok": False, "msg": "仅 new-api / 本项目(native) 源支持同步"}, status_code=400)
-        # 模板优先取请求体（用户即时改），否则取该源在 history 里登记的；空则 sync_leaves 内按 fmt 默认回退。
+        # 模板优先取请求体（用户即时改），否则取该源在 sources 表里登记的；空则 sync_leaves 内按 fmt 默认回退。
         templates = body.get("templates")
         if templates is None:
-            templates = get_path_templates(path)
+            import utils.logdir_store as lds
+            src = lds.get_source(get_root_id(path))
+            templates = (src.get("templates") or []) if src else []
         from utils.newapi_backfill import sync_leaves
         res = await run_in_threadpool(sync_leaves, path, templates)
         # native：index.jsonl 即索引，同步即「已 index」，无「构建」步骤；提示语区分口径。
@@ -261,7 +278,7 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
 
     @app.post("/api/logs-admin/rename")
     async def logs_admin_rename(request: Request):
-        """改数据源名字：同时写 YAML history 与 sources 表（两处口径一致）。"""
+        """改数据源名字（DB 为准）。"""
         denied = _require_ajax(request)
         if denied:
             return denied
@@ -270,20 +287,17 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
 
         body = await request.json()
         path = (body.get("path") or "").strip()
-        name = (body.get("name") or "").strip()
-        ok, msg = set_history_name(path, name)
-        if ok:
-            try:
-                import utils.logdir_store as lds
-                from utils.logs_config import get_root_id
-                lds.set_source_name(get_root_id(path), name or "default")
-            except Exception:
-                pass
-        return JSONResponse({"ok": ok, "msg": msg})
+        name = (body.get("name") or "").strip() or "default"
+        import utils.logdir_store as lds
+        rid = get_root_id(path)
+        ok = lds.set_source_name(rid, name)
+        if not ok:
+            return JSONResponse({"ok": False, "msg": "路径不存在"})
+        return JSONResponse({"ok": True, "msg": "已改名"})
 
     @app.post("/api/logs-admin/set-templates")
     async def logs_admin_set_templates(request: Request):
-        """改数据源层级模板：写 YAML history 与 sources 表。可选即时 re-sync（resync=true）。"""
+        """改数据源层级模板（DB 为准）。可选即时 re-sync（resync=true）。"""
         denied = _require_ajax(request)
         if denied:
             return denied
@@ -294,19 +308,17 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         path = (body.get("path") or "").strip()
         templates = body.get("templates")
         resync = bool(body.get("resync", False))
-        ok, msg = set_history_templates(path, templates)
+        import utils.logdir_store as lds
+        rid = get_root_id(path)
+        ok = lds.set_source_templates(rid, templates)
         if not ok:
-            return JSONResponse({"ok": ok, "msg": msg})
-        try:
-            import utils.logdir_store as lds
-            from utils.logs_config import get_root_id
-            lds.set_source_templates(get_root_id(path), templates)
-        except Exception:
-            pass
+            return JSONResponse({"ok": False, "msg": "路径不存在"})
         result = None
+        msg = "已更新模板"
         if resync and os.path.isdir(path) and detect_format(path) in ("newapi", "native"):
             from utils.newapi_backfill import sync_leaves
-            result = await run_in_threadpool(sync_leaves, path, templates)
+            tpls = templates if templates else []
+            result = await run_in_threadpool(sync_leaves, path, tpls)
             msg = (f"{msg}；已按新模板同步 {result['total']} 个节点"
                    f"（新增 {result['added']}，更新 {result['updated']}）。")
         return JSONResponse({"ok": True, "msg": msg, "result": result})

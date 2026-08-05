@@ -23,9 +23,11 @@ from utils.export_store import (
     cancel_interrupted,
     create_record,
     get_record,
+    get_leaves_cache,
     list_records,
     list_records_all_slim,
     list_records_by_key,
+    save_leaves_cache,
     update_status,
 )
 from utils.export_sync import export_session_index, sync_session_index, _load_session_index
@@ -176,10 +178,31 @@ def _key_slot(api_key: str) -> str:
     return "key-" + api_key[-4:]
 
 
+def _key_name_snapshot(api_key: str) -> str:
+    """建任务时快照 key 名称（按后 4 位匹配 DB keys 列表），供历史记录展示。
+
+    key 后续改名不会影响已建记录；无匹配时返回 ''，前端回退显示 api_key 尾部。
+    """
+    if not api_key or api_key == "(empty)":
+        return ""
+    try:
+        from utils.key_store import list_keys
+        for k in list_keys():
+            if k.get("key", "").endswith(api_key[-4:]):
+                return k.get("name", "") or ""
+    except Exception:
+        return ""
+    return ""
+
+
 def register_export_routes(app: FastAPI, logs_dir: str) -> None:
     env_dir = Path(logs_dir).parent
     env_key_name = env_dir.name
     templates = Jinja2Templates(directory="templates")
+
+    # keys 统计（跨 root 扫盘）的内存缓存，10 分钟 TTL。前端「刷新统计」传 force=1 强刷。
+    _keys_cache = {"ts": 0.0, "data": None}
+    _KEYS_TTL = 600
 
     def _all_roots() -> list:
         """活跃 env_dir + 配置的历史路径（去重）。"""
@@ -251,7 +274,13 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/keys/export")
     def export_page(request: Request):
-        return templates.TemplateResponse(request, "export.html", context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
+        # no-store：导出页模板已重构为任务列表，避免浏览器用旧的缓存页面
+        # （页面路由默认无 Cache-Control，浏览器会启发式缓存 HTML）。
+        return templates.TemplateResponse(
+            request, "export.html",
+            context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/keys/export/report/{record_id}")
     def export_report_page(request: Request, record_id: int):
@@ -323,13 +352,33 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         })
 
     @app.get("/api/export/keys")
-    def export_keys(request: Request, threshold: int = 5):
+    def export_keys(request: Request, threshold: int = 5, force: int = 0):
         denied = _require_key_api(request)
         if denied:
             return denied
+        import time as _time
+        now = _time.time()
+        # 10 分钟内存缓存：keys 统计是跨 root 扫盘的重接口，避免每次进页面/开新建任务都重扫。
+        # force=1（点「刷新统计」）时强制重算并刷新缓存。
+        if not force and _keys_cache["data"] is not None and (now - _keys_cache["ts"] < _KEYS_TTL):
+            payload = dict(_keys_cache["data"])
+            payload["cached"] = True
+            payload["cache_age"] = int(now - _keys_cache["ts"])
+            return JSONResponse(payload)
+
+        payload = _compute_keys_payload(threshold)
+        _keys_cache["ts"] = now
+        _keys_cache["data"] = payload
+        out = dict(payload)
+        out["cached"] = False
+        out["cache_age"] = 0
+        return JSONResponse(out)
+
+    def _compute_keys_payload(threshold: int = 5) -> dict:
+        """组装 /api/export/keys 的完整响应体（跨 root 扫盘统计 + 模型分布 + 每 key 记录）。"""
         roots = [r for r in _all_roots() if Path(r).is_dir()]
         if not roots:
-            return JSONResponse({"keys": [], "mtimes": []})
+            return {"keys": [], "mtimes": [], "models": [], "last_refresh_ts": get_last_refresh_ts()}
 
         # 跨 root 合并 session 统计（rows 的 mtime_cells key 已带 <root_id>/ 前缀）
         stats = build_stats_multi(roots, threshold, active_env_dir=str(env_dir))
@@ -378,8 +427,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         keys_result.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
-        return JSONResponse({"keys": keys_result, "mtimes": _list_all_mtimes(),
-                             "models": all_models, "last_refresh_ts": get_last_refresh_ts()})
+        return {"keys": keys_result, "mtimes": _list_all_mtimes(),
+                "models": all_models, "last_refresh_ts": get_last_refresh_ts()}
 
     # -----------------------------------------------------------------
     # 统一任务执行（导出 / 质检）
@@ -432,7 +481,13 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         update_status(record_id, "running")
 
         sync_cfg = _load_sync_config()
-        workers = sync_cfg.get("workers", 4)
+        # workers：优先用任务记录里显式配置的并发数（新建任务时可选）；
+        # 记录未设（0/缺失，含旧任务）时回退全局 sync 配置默认。
+        _rec_workers = rec.get("workers") or 0
+        workers = _rec_workers if _rec_workers > 0 else sync_cfg.get("workers", 4)
+        # dir_workers：多个 mtime 目录并行处理的并发数（每目录内部仍各用 workers 线程）。
+        # 0/缺失（含旧任务）= 串行（1）；总线程 ≈ dir_workers × workers。
+        dir_workers = int(rec.get("dir_workers") or 0) or 1
         upload_script = sync_cfg.get("upload_script") or None
 
         mtime_dirs = json.loads(rec.get("mtime_dirs", "[]"))
@@ -466,13 +521,16 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         all_results = []
         all_entries = []
 
-        for mt in mtime_dirs:
-            # 协作式取消检查点：用户「终止」运行中任务时，在处理下一个目录前退出。
-            # 已处理完的目录成果保留在 local_base，不再上传/收尾。
+        def _process_mtime(mt):
+            """处理单个 mtime 目录，返回一份独立结果 dict（供外层串行合并，避免并发写共享量）。
+            每目录各自读/写自己的 session_index.jsonl 与 .sync_state，互不干扰。"""
+            res = {"mt": mt, "errors": [], "warnings": [], "skip": False,
+                   "new_sessions": 0, "uploaded": 0, "skipped": 0,
+                   "results": [], "entries": []}
+            # 协作式取消：用户「终止」后，尚未开始的目录直接跳过（并行/串行同理）。
             if _is_cancelled(record_id):
-                _log("任务已终止（用户取消）")
-                update_status(record_id, "cancelled", error_message="用户终止")
-                return
+                res["skip"] = True
+                return res
             mt_src = _resolve_mt(mt) or str(_env_dir / mt)
             try:
                 # new-api：导出不触发回填。若 index.db 未构建/不完整，不静默导出不完整数据，
@@ -483,15 +541,17 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         import utils.newapi_index_db as _nidb
                         if _nidb.needs_build(mt_src):
                             _log(f"[{mt}] 索引未构建/不完整，跳过；请先在数据管理界面手动构建索引后再导出")
-                            warnings.append(f"{mt}: 索引未构建/不完整，已跳过（请先在数据管理界面手动构建索引）")
-                            continue
+                            res["warnings"].append(f"{mt}: 索引未构建/不完整，已跳过（请先在数据管理界面手动构建索引）")
+                            res["skip"] = True
+                            return res
                 except Exception as _pe:
                     # 索引状态检查本身异常（如 index.db 存在但 meta 表未建好、
                     # 半成品库 no such table: meta 等）与 needs_build=True 是同一语义：
                     # 叶子索引尚未就绪。跳过并提示，不判整个任务失败（warning 非致命）。
                     _log(f"[{mt}] 索引未就绪（检查异常: {_pe}），跳过；请先在数据管理界面手动构建索引")
-                    warnings.append(f"{mt}: 索引未构建/不完整，已跳过（检查异常: {_pe}）")
-                    continue
+                    res["warnings"].append(f"{mt}: 索引未构建/不完整，已跳过（检查异常: {_pe}）")
+                    res["skip"] = True
+                    return res
                 _log(f"[{mt}] 生成 session_index...")
                 exp_result = export_session_index(mt_src, force=force)
                 _log(f"[{mt}] session_index: {exp_result.get('total_sessions', 0)} sessions"
@@ -501,19 +561,16 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                     _log(f"[{mt}] 开始同步文件" + (f" (按 key 过滤: ...{api_key[-8:]})" if api_key else " (全量)"))
                     sync_result = sync_session_index(
                         mt_src, obs_dst=obs_dst, key=api_key or None,
-                        local_copy_dir=str(local_base), force=force,
+                        local_copy_dir=str(local_base), force=force, workers=workers,
                     )
                     matched = sync_result.get("matched_sessions", 0)
-                    new_sessions = sync_result.get("new_sessions", 0)
-                    uploaded = sync_result.get("uploaded", 0)
-                    skipped = sync_result.get("skipped", 0)
-                    total_sessions += new_sessions
-                    total_uploaded += uploaded
-                    total_skipped += skipped
-                    _log(f"[{mt}] 匹配 {matched} sessions, 新导出 {new_sessions}, 跳过 {skipped}, 文件数 {uploaded}")
+                    res["new_sessions"] = sync_result.get("new_sessions", 0)
+                    res["uploaded"] = sync_result.get("uploaded", 0)
+                    res["skipped"] = sync_result.get("skipped", 0)
+                    _log(f"[{mt}] 匹配 {matched} sessions, 新导出 {res['new_sessions']}, 跳过 {res['skipped']}, 文件数 {res['uploaded']}")
                     if sync_result.get("failed", 0) > 0:
                         _log(f"[{mt}] 上传失败!")
-                        errors.append(f"{mt}: upload failed")
+                        res["errors"].append(f"{mt}: upload failed")
                 else:
                     session_entries = _load_session_index(mt_src)
                     total_before = len(session_entries)
@@ -521,7 +578,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         session_entries = [s for s in session_entries if s.get("api_key") == api_key]
                     if not session_entries:
                         _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 0, 跳过")
-                        continue
+                        res["skip"] = True
+                        return res
                     if api_key:
                         _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 {len(session_entries)}")
                     _do_analyze = (mode == "eval")
@@ -534,14 +592,58 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                         log_dir=_log_dir_key(mt_src),
                         analyze=_do_analyze,
                     )
-                    all_results.extend(ra_result["results"])
-                    all_entries.extend(session_entries)
-                    total_sessions += len(ra_result["results"])
-                    _log(f"[{mt}] {_step} 返回: results={ra_result['total_files']}, errors={len(ra_result.get('errors', []))}")
+                    res["results"] = ra_result["results"]
+                    res["entries"] = session_entries
+                    _n_err = len(ra_result.get('errors', []))
+                    _done_word = "质检" if _do_analyze else "导出"
+                    _log(f"[{mt}] {_done_word}完成：成功 {ra_result['total_files']} 个 session"
+                         + (f"，失败 {_n_err}" if _n_err else ""))
             except Exception as e:
                 _log(f"[{mt}] 错误: {e}")
-                errors.append(f"{mt}: {e}")
+                res["errors"].append(f"{mt}: {e}")
                 logger.exception("task failed for %s (mode=%s)", mt, mode)
+            return res
+
+        # 多目录调度：dir_workers=1 顺序执行；>1 用线程池并行（每目录内部仍各用 workers 线程）。
+        # 结果按提交顺序收集后【串行合并】到共享累加量，避免并发写竞态。
+        if _is_cancelled(record_id):
+            _log("任务已终止（用户取消）")
+            update_status(record_id, "cancelled", error_message="用户终止")
+            return
+
+        if dir_workers <= 1 or len(mtime_dirs) <= 1:
+            mt_results = [_process_mtime(mt) for mt in mtime_dirs]
+        else:
+            n_par = min(dir_workers, len(mtime_dirs))
+            _log(f"多目录并行处理：{len(mtime_dirs)} 个目录，目录并发 {n_par}，每目录 workers={workers}")
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            mt_results = [None] * len(mtime_dirs)
+            with _TPE(max_workers=n_par) as _ex:
+                _fut = {_ex.submit(_process_mtime, mt): i for i, mt in enumerate(mtime_dirs)}
+                for f in _fut:
+                    idx = _fut[f]
+                    try:
+                        mt_results[idx] = f.result()
+                    except Exception as e:  # noqa: BLE001
+                        logger.exception("mtime worker crashed: %s", mtime_dirs[idx])
+                        mt_results[idx] = {"mt": mtime_dirs[idx], "errors": [f"{mtime_dirs[idx]}: {e}"],
+                                           "warnings": [], "skip": False, "new_sessions": 0,
+                                           "uploaded": 0, "skipped": 0, "results": [], "entries": []}
+
+        # 串行合并各目录结果（保持 mtime_dirs 原顺序，结果稳定）
+        for res in mt_results:
+            if not res:
+                continue
+            errors.extend(res["errors"])
+            warnings.extend(res["warnings"])
+            total_uploaded += res["uploaded"]
+            total_skipped += res["skipped"]
+            if mode == "export":
+                total_sessions += res["new_sessions"]
+            else:
+                all_results.extend(res["results"])
+                all_entries.extend(res["entries"])
+                total_sessions += len(res["results"])
 
         # 目录循环结束后、进入收尾（evaluate/上传/判定）前再查一次取消：
         # 若用户在处理最后一个目录期间点了「终止」，这里退出，避免跑完整个 evaluate
@@ -671,6 +773,22 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         mtime_dirs = body.get("mtime_dirs", [])
         obs_prefix = body.get("obs_prefix", "").strip().rstrip("/")
         force = body.get("force", False)
+        # 并发 worker 数：>0 时按任务记录执行；0/缺失回退全局配置默认。
+        try:
+            workers = int(body.get("workers", 0) or 0)
+        except (TypeError, ValueError):
+            workers = 0
+        if workers < 0:
+            workers = 0
+        # 目录并发数：多个 mtime 目录并行处理的数量。0/缺失=串行；总线程≈dir_workers×workers。
+        try:
+            dir_workers = int(body.get("dir_workers", 0) or 0)
+        except (TypeError, ValueError):
+            dir_workers = 0
+        if dir_workers < 0:
+            dir_workers = 0
+        # 默认立即入队执行；start=False 时只建草稿（draft）记录，由前端手动「启动」。
+        start = body.get("start", True)
         # mode 优先显式取值（export / eval / reformat）；兼容旧的 auto_eval 布尔
         mode = body.get("mode")
         if mode not in ("export", "eval", "reformat"):
@@ -688,9 +806,51 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         record_id = create_record(
             api_key=api_key, key_slot=slot,
             mtime_dirs=json.dumps(mtime_dirs),
-            obs_dst="", local_copy_dir="",
+            # 草稿阶段 obs_dst 存裸前缀，供「启动」时复原 obs_prefix；
+            # 真正执行时 _run_task_inner 会用 now_tag 重拼完整 obs_dst 覆盖。
+            obs_dst=obs_prefix if not start else "",
+            local_copy_dir="",
             mode=mode,
+            key_name=_key_name_snapshot(api_key),
+            workers=workers,
+            dir_workers=dir_workers,
         )
+
+        if not start:
+            # 草稿：只登记不入队，等待用户手动「启动」。
+            update_status(record_id, "draft")
+            return JSONResponse({"record_id": record_id, "status": "draft", "mode": mode})
+
+        _enqueue_task(record_id, lambda rid=record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode, f=force: _run_task(rid, ed, ek, op, nt, m, force=f))
+
+        return JSONResponse({"record_id": record_id, "status": "queued", "mode": mode})
+
+    @app.post("/api/export/start")
+    async def export_start(request: Request):
+        """启动一条草稿（draft）记录：复原参数后入队执行。
+
+        草稿在创建时不执行，obs_dst 存的是裸 obs_prefix（见 export_run）；
+        这里从记录复原 prefix / mode / api_key / mtime_dirs 后入队，_run_task 内部
+        会用新 now_tag 重拼完整 obs_dst。
+        """
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        body = await request.json()
+        record_id = body.get("record_id")
+        if not record_id:
+            return JSONResponse({"detail": "record_id is required"}, status_code=400)
+
+        rec = get_record(record_id)
+        if not rec:
+            return JSONResponse({"detail": "Record not found"}, status_code=404)
+        if rec["status"] != "draft":
+            return JSONResponse({"detail": "只能启动草稿任务"}, status_code=400)
+
+        mode = rec.get("mode") or "export"
+        obs_prefix = (rec.get("obs_dst", "") or "").strip().rstrip("/")
+        force = False
+        now_tag = datetime.now().strftime("%y%m%d%H%M%S")
 
         _enqueue_task(record_id, lambda rid=record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode, f=force: _run_task(rid, ed, ek, op, nt, m, force=f))
 
@@ -720,6 +880,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             mtime_dirs=rec["mtime_dirs"],
             mode="eval",
             source_export_id=src_record_id,
+            key_name=rec.get("key_name", ""),
         )
 
         _enqueue_task(new_record_id, lambda rid=new_record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag: _run_task(rid, ed, ek, op, nt, "eval"))
@@ -766,6 +927,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             mtime_dirs=rec["mtime_dirs"],
             obs_dst="", local_copy_dir="",
             mode=mode,
+            key_name=rec.get("key_name", ""),
         )
 
         _enqueue_task(new_record_id, lambda rid=new_record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode: _run_task(rid, ed, ek, op, nt, m))
@@ -858,7 +1020,107 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if denied:
             return denied
         grouped = list_records_all_slim(limit_per_key=limit_per_key)
+        # 任务化后记录就是页面主列表，不再按 slot 截断（limit_per_key 仅作兜底）。
+        # 记录按 key_slot 分组返回，前端把各组拍平即为完整任务表。
         return JSONResponse({"records_by_slot": grouped})
+
+    def _compute_leaves(rec: dict) -> tuple:
+        """把记录的 mtime_dirs 逐叶解析为 [{dir_key, sessions, state, error}], warnings。
+        session 数读各叶 session_index.jsonl 的 meta；构建状态来自 log_dir.db。"""
+        from utils.export_sync import _read_session_index_meta
+        from utils.log_scan import dir_key_for
+
+        mtime_dirs = json.loads(rec.get("mtime_dirs", "[]") or "[]")
+        leaves = []
+        warnings = []
+        for mt in mtime_dirs:
+            mt_src = _resolve_mt(mt) or (str(env_dir / mt) if Path(env_dir / mt).is_dir() else "")
+            if not mt_src:
+                warnings.append(f"{mt}: 目录不存在")
+                leaves.append({"dir_key": mt, "sessions": 0, "state": "missing",
+                               "built": False, "error": "目录不存在"})
+                continue
+            leaf = {"dir_key": mt, "sessions": 0, "state": "unknown",
+                    "built": False, "error": ""}
+            try:
+                meta = _read_session_index_meta(mt_src)
+                if meta:
+                    leaf["sessions"] = int(meta.get("total_sessions", 0) or 0)
+                try:
+                    import utils.logdir_store as lds
+                    from utils.logs_config import get_root_id
+                    # dir_key 是相对叶子所属 root 的标识（与 log_dir.db / 叶子详情同口径）。
+                    # 遍历已配置 roots，找到包含该叶子的 root 再算 dir_key。
+                    dk = ""
+                    rid = ""
+                    for _r in _existing_roots():
+                        _rp = Path(_r)
+                        try:
+                            if Path(mt_src) == _rp or _rp in Path(mt_src).parents:
+                                rid = get_root_id(_r, str(env_dir))
+                                dk = dir_key_for(_rp, Path(mt_src))
+                                break
+                        except (OSError, ValueError):
+                            continue
+                    info = None
+                    try:
+                        # bulk_get 返回 list，转成 dir_key -> row 的查找表
+                        _by_key = {r.get("dir_key", ""): r for r in lds.bulk_get(rid)} if (rid and lds.has_any(rid)) else {}
+                        info = _by_key.get(dk) if dk else None
+                    except Exception:
+                        info = None
+                    if info:
+                        leaf["state"] = info.get("state", "unknown")
+                        leaf["built"] = bool(info.get("built"))
+                        leaf["error"] = info.get("last_error", "") or ""
+                except Exception:
+                    pass  # log_dir.db 未同步/缺失：状态留 unknown
+            except Exception as e:  # noqa: BLE001
+                leaf["state"] = "error"
+                leaf["error"] = str(e)
+            leaves.append(leaf)
+        return leaves, warnings
+
+    @app.get("/api/export/leaves")
+    def export_leaves(request: Request, record_id: int = 0, refresh: int = 0):
+        """某导出记录的节点分布：把 mtime_dirs 逐叶解析为 {dir_key, sessions, state, error}。
+
+        供任务行内「节点分布」展开（叶子详情样式）。终态任务（success/failed/cancelled）
+        首次计算后把结果缓存进 DB（leaves_cache 列），之后展开直接读缓存、不再扫盘；
+        非终态（running 等）或 refresh=1 时实时重算。
+        """
+        denied = _require_key_api(request)
+        if denied:
+            return denied
+        if not record_id:
+            return JSONResponse({"detail": "record_id is required"}, status_code=400)
+        rec = get_record(record_id)
+        if not rec:
+            return JSONResponse({"detail": "Record not found"}, status_code=404)
+
+        status = rec.get("status", "")
+        is_terminal = status in ("success", "failed", "cancelled")
+
+        # 终态任务优先读 DB 缓存（除非显式 refresh）：节点分布对已结束的任务是固定的。
+        if is_terminal and not refresh:
+            cached = get_leaves_cache(record_id)
+            if cached is not None:
+                out = dict(cached)
+                out["record_id"] = record_id
+                out["cached"] = True
+                return JSONResponse(out)
+
+        leaves, warnings = _compute_leaves(rec)
+
+        # 终态任务算完落库，供后续直接读；非终态不缓存（数据还会变）。
+        if is_terminal:
+            try:
+                save_leaves_cache(record_id, leaves, warnings)
+            except Exception:
+                logger.debug("save_leaves_cache failed for record=%s", record_id, exc_info=True)
+
+        return JSONResponse({"record_id": record_id, "leaves": leaves,
+                             "warnings": warnings, "cached": False})
 
     @app.get("/api/export/obs/ls")
     def export_obs_ls(request: Request, path: str = ""):
@@ -959,6 +1221,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             api_key=api_key, key_slot=slot,
             mtime_dirs=json.dumps(mtime_dirs),
             mode=mode,
+            key_name=_key_name_snapshot(api_key),
         )
 
         obs_dst = f"{obs_prefix}/session_analysis/{env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""

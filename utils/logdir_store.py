@@ -9,17 +9,22 @@ SQLite 后端，记录每个 new-api 源下每个叶子目录（小时节点）�
 - 回填过程逐叶写入 building/done/error。
 - 列表页读汇总（count_summary），不再实时全盘 stat。
 
+sources 表（「数据管理」表 1）是日志路径列表的唯一数据源，无任何 YAML 导入/镜像：
+增删改全部以本表为准；活跃目录行（root_id='default'）由启动时的
+_refresh_active_row 刷新/补插。
+
 主键 (root_id, dir_key)：root_id 来自 logs_config.get_root_id（消除同 basename 冲突），
 dir_key 来自 log_scan.dir_key_for（稳定、已折叠冗余层、可逆）。
 """
 
+import json as _json
 import os
 import sqlite3
 import threading
 from datetime import datetime
 from typing import List, Optional
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _conn: Optional[sqlite3.Connection] = None
 _db_path: str = ""
 
@@ -180,7 +185,6 @@ def has_any(root_id: str) -> bool:
 
 def _templates_to_json(templates) -> str:
     """把模板（list 或多行字符串）规整为 JSON 数组字符串存库。"""
-    import json as _json
     if templates is None:
         return ""
     if isinstance(templates, str):
@@ -192,7 +196,6 @@ def _templates_to_json(templates) -> str:
 
 def _templates_from_json(raw: str) -> list:
     """把库里的 templates 字段（JSON 数组字符串）反序列化为 list。"""
-    import json as _json
     if not raw:
         return []
     try:
@@ -260,6 +263,78 @@ def get_source(root_id: str) -> Optional[dict]:
     d = dict(row)
     d["templates"] = _templates_from_json(d.get("templates", ""))
     return d
+
+
+def list_sources(active_env_dir: str = "") -> List[dict]:
+    """数据源全量列表（「数据管理」列表页的唯一行来源）。
+
+    活跃目录（root_id='default'）排第一，其余按 root_path 排序。
+    templates 反序列化为 list；无活跃行时（空库 / 被删）返回全部。
+    DB 未就绪或查询异常时返回空列表（调用方回退，不 500）。
+    """
+    if not _ready():
+        return []
+    try:
+        with _lock:
+            rows = _conn.execute(
+                "SELECT * FROM sources ORDER BY root_id = 'default' DESC, root_path"
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    out = [dict(r) for r in rows]
+    for d in out:
+        d["templates"] = _templates_from_json(d.get("templates", ""))
+    return out
+
+
+def get_source_by_path(path: str) -> Optional[dict]:
+    """按路径取数据源行（root_id 由 get_root_id 计算）。无则 None。"""
+    if not path:
+        return None
+    try:
+        from utils.logs_config import get_root_id
+    except Exception:  # noqa: BLE001
+        return None
+    return get_source(get_root_id(path))
+
+
+def _refresh_active_row(active_env_dir: str) -> None:
+    """把活跃目录行（root_id='default'）的 root_path 指向当前 env_dir。
+
+    每次启动调用（app.py 启动流程）：env/base 变化时重指向；行不存在（新机器
+    空库 / 被删）则补插 default 行——这是空库下唯一保证有活跃行的路径。
+    顺带把该 root 下 leaf_status 的 root_path 批量更新，避免 /leaves 详情
+    用旧路径拼接（leaf_status.root_path 存的是每叶快照）。
+    """
+    if not _ready() or not active_env_dir:
+        return
+    # import 必须在 _lock 之前（避免与另一线程的 `import utils.logdir_store`
+    # 形成 importlib 可重入死锁，见旧 seed_sources_from_yaml 注释）
+    from utils.log_scan import detect_format
+    norm = os.path.normpath(active_env_dir)
+    with _lock:
+        existing = _conn.execute(
+            "SELECT root_id FROM sources WHERE root_id = ?", ("default",)
+        ).fetchone()
+        if existing:
+            _conn.execute(
+                "UPDATE sources SET root_path = ?, synced_at = ? WHERE root_id = ?",
+                (norm, _now(), "default"),
+            )
+        else:
+            fmt = detect_format(norm)
+            _conn.execute("""
+                INSERT INTO sources
+                    (root_id, root_path, name, format, templates,
+                     leaf_count, built_count, synced_at, created_at)
+                VALUES ('default', ?, 'default', ?, '', 0, 0, ?, ?)
+            """, (norm, fmt, _now(), _now()))
+        # 活跃行 root_path 变化时同步该 root 下已登记叶子的路径快照
+        _conn.execute(
+            "UPDATE leaf_status SET root_path = ? WHERE root_id = 'default'",
+            (norm,),
+        )
+        _conn.commit()
 
 
 def set_source_name(root_id: str, name: str) -> bool:

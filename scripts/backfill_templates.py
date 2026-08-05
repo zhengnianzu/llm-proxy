@@ -27,7 +27,7 @@ scripts/backfill_templates.py — 给 sources 表回填默认层级模板（一�
     python -m scripts.backfill_templates --db-dir logs/port8084/env-99oR
 
 环境变量与服务进程保持一致（决定 SERVICE_LOG_DIR / 活跃 base 的解析）：
-    PROXY_PORT, LOG_TASK_TAG, UPSTREAM_API_KEY, LOGS_DIR, LOGS_DIRS_CONFIG
+    PROXY_PORT, LOG_TASK_TAG, UPSTREAM_API_KEY, LOGS_DIR
 务必在与服务相同的环境变量下运行，否则会写进另一个 log_dir.db。
 建议：`set -a; source .env; set +a`，或直接 `--db-dir <含 log_dir.db 的目录>`。
 

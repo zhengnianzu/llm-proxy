@@ -1,0 +1,948 @@
+{% extends "_layout.html" %}
+
+{% block title %}Session 导出{% endblock %}
+{% block mobile_title %}Session 导出{% endblock %}
+
+{% block head_extra %}
+<script src="/static/js/vue.min.js"></script>
+{% endblock %}
+
+{% block page_styles %}
+/* summary grid */
+.summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+@media (max-width: 768px) { .summary-grid { grid-template-columns: 1fr; } }
+.stat-card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow); }
+.stat-card h6 { font-weight: 700; margin-bottom: 14px; color: var(--foreground); font-size: .95rem; }
+.stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: .88rem; }
+.stat-row:last-child { border-bottom: none; }
+.stat-row .label { color: var(--muted-foreground); }
+.stat-row .value { font-weight: 600; color: var(--foreground); font-family: var(--font-mono); }
+.stat-nums { display: flex; gap: 24px; margin-top: 8px; }
+.stat-num { text-align: center; }
+.stat-num .big { font-size: 1.8rem; font-weight: 700; color: var(--primary); line-height: 1; }
+.stat-num .sub { font-size: .78rem; color: var(--muted-foreground); margin-top: 4px; }
+
+/* key filter */
+.filter-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.filter-bar input { max-width: 300px; }
+
+/* key cards */
+.key-card { border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; margin-bottom: 12px; transition: border-color var(--transition), box-shadow var(--transition); }
+.key-card:hover { border-color: var(--primary); box-shadow: var(--shadow-md); }
+.key-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.key-slot-badge { font-size: .75rem; padding: 2px 10px; border-radius: 999px; font-weight: 600; }
+.key-slot-badge.all { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.key-slot-badge.key { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.mtime-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pills-line { display: flex; align-items: flex-start; gap: 10px; margin-top: 6px; }
+.pills-clamp { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; overflow: hidden; max-height: 24px; transition: max-height .2s; }
+.pills-clamp.open { max-height: 2000px; }
+.pills-clamp > .mtime-pills { flex: 1 1 100%; }
+.pills-toggle { flex: 0 0 auto; font-size: .75rem; color: var(--primary); cursor: pointer; user-select: none; white-space: nowrap; line-height: 18px; }
+.pills-toggle:hover { text-decoration: underline; }
+.mtime-pill { font-size: .78rem; background: var(--muted); padding: 3px 10px; border-radius: 999px; color: var(--muted-foreground); }
+.model-pill { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); cursor: pointer; }
+.model-pill:hover { background: color-mix(in srgb, var(--primary) 20%, transparent); }
+.model-pill-active { background: var(--primary); color: #fff; font-weight: 600; }
+.record-row { font-size: .82rem; padding: 4px 0; display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.record-row:first-child { border-top: none; }
+
+/* drawer */
+.drawer-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(0,0,0,.3); z-index: 1000; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 560px; background: var(--card); z-index: 1001; box-shadow: var(--shadow-lg); overflow-y: auto; padding: 20px; display: flex; flex-direction: column; }
+@media (max-width: 640px) { .drawer { width: 100%; } }
+.drawer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-shrink: 0; }
+.drawer-body { flex: 1; overflow-y: auto; min-height: 0; }
+.file-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: .84rem; }
+.file-item .name { font-family: var(--font-mono); color: var(--primary); }
+.file-item .size { color: var(--muted-foreground); }
+
+/* modal */
+.modal-backdrop-custom { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.4); z-index: 900; display: flex; align-items: center; justify-content: center; }
+.modal-box { background: var(--card); border-radius: var(--radius-lg); padding: 24px; width: 520px; max-height: 80vh; overflow-y: auto; box-shadow: var(--shadow-lg); }
+.mtime-check { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: .88rem; }
+.mtime-check input[type=checkbox] { width: 16px; height: 16px; }
+.obs-preview { font-size: .8rem; color: var(--muted-foreground); background: var(--muted); padding: 8px 12px; border-radius: var(--radius); margin-top: 8px; word-break: break-all; font-family: var(--font-mono); }
+
+.no-data { text-align: center; color: var(--muted-foreground); padding: 40px 0; }
+{% endblock %}
+
+{% block content %}
+<div id="app">
+{% raw %}
+    <!-- summary: config left, stats right -->
+    <div class="summary-grid">
+        <div class="stat-card">
+            <h6>会话同步</h6>
+            <div style="display:flex;align-items:center;gap:16px;">
+                <div style="position:relative;width:96px;height:96px;flex:0 0 auto;">
+                    <svg width="96" height="96" viewBox="0 0 96 96" style="transform:rotate(-90deg);">
+                        <circle cx="48" cy="48" r="42" fill="none" stroke="var(--muted,#eee)" stroke-width="10"></circle>
+                        <circle cx="48" cy="48" r="42" fill="none" stroke="#4f46e5" stroke-width="10"
+                                stroke-linecap="round"
+                                :stroke-dasharray="backfillRing.circumference"
+                                :stroke-dashoffset="backfillRing.dashOffset"
+                                style="transition:stroke-dashoffset .4s;"></circle>
+                    </svg>
+                    <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+                        <div style="font-size:20px;font-weight:700;line-height:1;">{{ backfillRing.pct }}%</div>
+                        <div style="font-size:11px;color:var(--muted-foreground,#888);margin-top:2px;">已回填</div>
+                    </div>
+                </div>
+                <div style="flex:1 1 auto;min-width:0;">
+                    <div class="stat-row">
+                        <span class="label">状态</span>
+                        <span class="value">
+                            <template v-if="backfillRing.running">聚合中</template>
+                            <template v-else-if="backfill.queue_len > 0">排队中</template>
+                            <template v-else>空闲</template>
+                        </span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="label">已回填</span>
+                        <span class="value">{{ backfillRing.done }} / {{ backfillRing.total || '-' }}</span>
+                    </div>
+                    <div class="stat-row" v-if="backfillRing.running && backfill.current_name">
+                        <span class="label">当前</span>
+                        <span class="value" style="word-break:break-all;text-align:right;max-width:60%">{{ backfill.current_name }}</span>
+                    </div>
+                    <div class="stat-row" v-if="backfill.queue_len > 0">
+                        <span class="label">排队</span>
+                        <span class="value">{{ backfill.queue_len }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <h6>导出概览</h6>
+            <div class="stat-nums">
+                <div class="stat-num">
+                    <div class="big">{{ keys.length }}</div>
+                    <div class="sub">Key 数量</div>
+                </div>
+                <div class="stat-num">
+                    <div class="big">{{ totalSessions }}</div>
+                    <div class="sub">
+                        Session 总数
+                        <span v-if="backfill.running" title="部分 new-api 目录尚在后台聚合，当前为近似值，完成后自动收敛"
+                              style="color:#d97706;font-weight:600;">· 聚合中</span>
+                    </div>
+                </div>
+                <div class="stat-num">
+                    <div class="big">{{ qualifiedSessions }}</div>
+                    <div class="sub">达标</div>
+                </div>
+                <div class="stat-num">
+                    <div class="big">{{ config.mtimes ? config.mtimes.length : 0 }}</div>
+                    <div class="sub">mtime 目录</div>
+                </div>
+            </div>
+            <div style="margin-top: 16px; text-align: right;">
+                <button class="btn btn-primary btn-sm" @click="fetchKeys" :disabled="loading">
+                    {{ loading ? '加载中…' : '刷新统计' }}
+                </button>
+                <span v-if="lastRefreshTs" style="font-size:12px;color:var(--muted-foreground);margin-left:8px;">{{ lastRefreshTime }}</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Key filter + list -->
+    <div class="card" v-if="keys.length">
+        <div class="filter-bar">
+            <h5 class="mb-0" style="font-weight:700;">Key 列表</h5>
+            <input type="text" class="input input-sm" v-model="keyFilter"
+                   placeholder="搜索 Key（名称 / slot / api_key）" style="max-width:300px">
+            <select class="input input-sm" v-model="modelFilter" v-if="models.length" style="max-width:240px">
+                <option value="">全部模型</option>
+                <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+            </select>
+            <input type="text" class="input input-sm" v-model="modelKw"
+                   placeholder="模型关键词（模糊）" style="max-width:180px">
+            <select class="input input-sm" v-model="logDirFilter" v-if="config.mtimes && config.mtimes.length" style="max-width:220px">
+                <option value="">全部 log_dir</option>
+                <option v-for="mt in config.mtimes" :key="mt" :value="mt">{{ mt }}</option>
+            </select>
+            <select class="input input-sm" v-model="statusFilter" style="max-width:150px">
+                <option value="">全部状态</option>
+                <option value="success">已完成</option>
+                <option value="failed">失败</option>
+                <option value="running">运行中</option>
+                <option value="queued">排队中</option>
+                <option value="cancelled">已取消</option>
+                <option value="none">无导出记录</option>
+            </select>
+            <small class="text-muted" v-if="keyFilter || modelFilter || modelKw || logDirFilter || statusFilter">匹配 {{ filteredKeys.length }} / {{ keys.length }}</small>
+            <small class="text-muted" v-if="modelFilter || modelKw">· <strong>{{ modelFilter || modelKw }}</strong> 共 {{ modelFilterCount }} 条</small>
+        </div>
+
+        <div v-for="k in filteredKeys" :key="k.key_slot" class="key-card">
+            <div class="key-card-header">
+                <div>
+                    <span class="key-slot-badge" :class="k.key_slot === 'all' ? 'all' : 'key'">{{ k.key_slot }}</span>
+                    <strong style="margin-left:8px">{{ k.key_name || k.api_key }}</strong>
+                    <small class="text-muted ms-2">{{ k.total_sessions }} sessions ({{ k.qualified_sessions }} 达标)</small>
+                    <small v-if="k.created_at" class="text-muted ms-2" style="font-size:.75rem">创建: {{ k.created_at }}</small>
+                </div>
+                <button class="btn btn-primary btn-sm" style="background:var(--success);border-color:var(--success);" @click="openExportModal(k)">导出</button>
+            </div>
+
+            <!-- mtime + 模型标签：合并进单个 clamp 容器，按真实溢出决定是否折叠 -->
+            <div class="pills-line">
+                <div class="pills-clamp" :class="{open: isPillsOpen(k)}"
+                     v-pill-clamp="k.key_slot">
+                    <!-- mtime：仅 >1 个目录时才有筛选价值 -->
+                    <div class="mtime-pills" v-if="k.mtime_distribution && Object.keys(k.mtime_distribution).length > 1">
+                        <span v-for="(info, mt) in k.mtime_distribution" :key="mt" class="mtime-pill model-pill"
+                              :class="{'model-pill-active': logDirFilter && mt === logDirFilter}"
+                              @click="logDirFilter = (logDirFilter === mt ? '' : mt)"
+                              title="点击按此 log_dir 筛选 Key 列表">
+                            {{ mt }}: {{ info.total }}条
+                        </span>
+                    </div>
+                    <div class="mtime-pills" v-if="k.model_distribution && Object.keys(k.model_distribution).length">
+                        <span v-for="m in topModels(k.model_distribution)" :key="m.name" class="mtime-pill model-pill"
+                              :class="{'model-pill-active': modelFilter && m.name === modelFilter}"
+                              @click="modelFilter = (modelFilter === m.name ? '' : m.name)"
+                              title="点击按此模型筛选 Key 列表">
+                            {{ m.name }}: {{ m.count }}条
+                        </span>
+                    </div>
+                </div>
+                <span class="pills-toggle" @click="togglePills(k)"
+                      v-if="pillsOverflow[k.key_slot]">
+                    {{ isPillsOpen(k) ? '收起 ▲' : '详情 ▼' }}
+                </span>
+            </div>
+
+            <!-- export history -->
+            <div v-if="k.records && k.records.length" style="margin-top:10px;">
+                <small class="text-muted" style="font-weight:600">导出历史:</small>
+                <div v-for="r in k.records" :key="r.id" class="record-row">
+                    <span class="badge" :class="{'badge-success': r.status === 'success', 'badge-danger': r.status === 'failed', 'badge-warning': r.status === 'running' || r.status === 'queued' || r.status === 'pending', 'badge-muted': r.status === 'cancelled'}">{{ statusText(r.status, r.mode) }}</span>
+                    <span v-if="r.mode === 'eval'" class="badge badge-info" style="font-size:.68rem">质检</span>
+                    <span v-else-if="r.mode === 'reformat'" class="badge badge-info" style="font-size:.68rem">合并</span>
+                    <span>{{ r.created_at }}</span>
+                    <span class="text-muted">
+                        {{ r.total_sessions }} sessions<span v-if="r.mode === 'export'"> / {{ r.files_uploaded }} files</span>
+                    </span>
+                    <span v-if="r.obs_dst && r.status === 'success'"
+                          style="cursor:pointer;font-size:.8rem;color:var(--primary)" @click="openDrawer(r.obs_dst)">
+                        [OBS]
+                    </span>
+                    <span style="cursor:pointer;font-size:.8rem;color:var(--primary)" @click="openLogDrawer(r.id)">
+                        [详情]
+                    </span>
+                    <span v-if="r.status === 'running' || r.status === 'queued' || r.status === 'pending'"
+                          style="cursor:pointer;font-size:.8rem;color:var(--destructive);font-weight:600"
+                          @click="cancelTask(r)">
+                        [终止]
+                    </span>
+                    <span v-if="r.status === 'failed' || r.status === 'cancelled'"
+                          style="cursor:pointer;font-size:.8rem;color:var(--primary);font-weight:600"
+                          @click="retryTask(r)">
+                        [重试]
+                    </span>
+                    <span v-if="r.status === 'failed' && r.obs_dst && r.local_copy_dir"
+                          style="cursor:pointer;font-size:.8rem;color:var(--warning);font-weight:600"
+                          @click="retryUpload(r)">
+                        [重试上传]
+                    </span>
+                    <span v-if="r.mode === 'eval' && r.status === 'success'"
+                          style="cursor:pointer;font-size:.8rem;font-weight:600;color:var(--success)" @click="openReport(r.id)">
+                        [报告]
+                    </span>
+                    <span v-if="r.mode === 'eval' && r.status === 'success' && r.in_manage"
+                          style="font-size:.8rem;font-weight:600;color:var(--muted-foreground)"
+                          title="该导出已在 Session 管理列表中">
+                        [已在管理]
+                    </span>
+                    <span v-else-if="r.mode === 'eval' && r.status === 'success'"
+                          style="cursor:pointer;font-size:.8rem;font-weight:600;color:var(--primary)"
+                          :style="r._importing ? 'opacity:.5;cursor:not-allowed' : ''"
+                          @click="openNameModal(r)">
+                        {{ r._importing ? '[导入中…]' : '[导入数据集管理]' }}
+                    </span>
+                    <span v-if="r.error_message && r.status === 'failed'" style="font-size:.78rem;color:var(--destructive)">{{ r.error_message }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div v-else-if="keysLoaded && !loading" class="card no-data">
+        暂无 Key 统计数据，请点击「刷新统计」
+    </div>
+
+    <div v-if="loading" class="card text-center text-muted py-3">
+        统计加载中…（首次或导出高峰时需扫盘，稍候；此期间其他操作不受影响）
+    </div>
+    <div v-if="error" class="alert alert-danger py-2 small mt-2">{{ error }}</div>
+
+    <!-- Log Drawer -->
+    <div v-if="logVisible" class="drawer-overlay" @click.self="closeLogDrawer">
+        <div class="drawer">
+            <div class="drawer-header">
+                <h5 class="mb-0">
+                    详情 #{{ logRecordId }}
+                    <span v-if="logPollTimer" style="font-size:.72rem;color:var(--warning);font-weight:400;margin-left:6px;">● 实时</span>
+                </h5>
+                <button class="btn btn-outline btn-sm" @click="closeLogDrawer">关闭</button>
+            </div>
+            <div class="drawer-body">
+                <div v-if="logLoading" class="text-muted small py-3 text-center">加载中…</div>
+                <div v-else-if="logEntries.length" style="font-family:var(--font-mono);font-size:.8rem;line-height:1.6;background:var(--panel-dark-bg);color:var(--panel-dark-text);padding:10px;border-radius:var(--radius);">
+                    <div v-if="logEntries.length > logTailLimit" style="color:var(--panel-dark-muted);padding-bottom:4px;">…省略前 {{ logEntries.length - logTailLimit }} 条，仅显示最后 {{ logTailLimit }} 条</div>
+                    <div v-for="(entry, i) in visibleLogEntries" :key="i">
+                        <span style="color:var(--panel-dark-muted);">{{ entry.ts }}</span> {{ entry.msg }}
+                    </div>
+                </div>
+                <div v-else class="text-muted small text-center py-3">暂无日志</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export Modal -->
+    <div v-if="showModal" class="modal-backdrop-custom" @click.self="showModal = false">
+        <div class="modal-box">
+            <h5>导出 Session</h5>
+            <div class="mb-3">
+                <label class="form-label small">Key</label>
+                <input type="text" class="input input-sm" :value="modalKey.api_key" disabled>
+            </div>
+            <div class="mb-3">
+                <label class="form-label small">选择 mtime 目录</label>
+                <div v-for="mt in modalMtimes" :key="mt" class="mtime-check">
+                    <input type="checkbox" :value="mt" v-model="selectedMtimes" :id="'mt-'+mt">
+                    <label :for="'mt-'+mt">{{ mt }}
+                        <small class="text-muted" v-if="modalKey.mtime_distribution[mt]">
+                            ({{ modalKey.mtime_distribution[mt].total }} sessions)
+                        </small>
+                    </label>
+                </div>
+                <div class="text-muted" style="font-size:.76rem; margin-top:6px;" v-if="hasMultiRoot">
+                    带 <code>目录名/</code> 前缀的为其它日志路径（如 new-api）。导出时会自动补齐会话数据；
+                    大目录首次较慢，建议先在「日志管理」页完成回填。
+                </div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label small">OBS 路径前缀</label>
+                <input type="text" class="input input-sm" v-model="obsPrefix" placeholder="obs://bucket/path（可选，留空仅本地复制）">
+            </div>
+            <div v-if="obsPrefix" class="obs-preview">
+                目标: {{ obsPrefix.replace(/\/+$/, '') }}/{{ exportMode === 'export' ? 'session' : 'session_analysis' }}/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
+            </div>
+            <div class="mb-3 mt-2">
+                <div class="mb-2">
+                    <label class="form-label small mb-1">导出模式</label>
+                    <select class="input input-sm" v-model="exportMode">
+                        <option value="export">导出原始文件（三元组，不分析）</option>
+                        <option value="reformat">合并导出（三元组合并成单 JSON，不质检）</option>
+                        <option value="eval">质检模式（reformat+分析，出报告）</option>
+                    </select>
+                </div>
+                <div class="form-check mt-1">
+                    <input type="checkbox" class="form-check-input" v-model="forceExport" id="force-check">
+                    <label class="form-check-label small" for="force-check">强制重新导出（忽略缓存）</label>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="btn btn-outline btn-sm" @click="showModal = false">取消</button>
+                <button class="btn btn-primary btn-sm" style="background:var(--success);border-color:var(--success);" @click="runExport" :disabled="exporting || !selectedMtimes.length">
+                    {{ exporting ? '执行中…' : ({export:'开始导出', reformat:'开始合并导出', eval:'开始质检'}[exportMode]) }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 导入数据集管理：命名 -->
+    <div v-if="nameModal" class="modal-backdrop-custom" @click.self="closeNameModal">
+        <div class="modal-box" style="width:420px;">
+            <h5>导入数据集管理</h5>
+            <div class="mb-3">
+                <label class="form-label small">数据集名称（可选）</label>
+                <input type="text" class="input input-sm" v-model="nameInput"
+                       :placeholder="nameTarget ? nameTarget.key_slot : ''"
+                       @keyup.enter="confirmName">
+                <div class="text-muted" style="font-size:.76rem;margin-top:6px;">
+                    留空则使用原始名称 {{ nameTarget ? nameTarget.key_slot : '' }}
+                </div>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="btn btn-outline btn-sm" @click="closeNameModal">取消</button>
+                <button class="btn btn-primary btn-sm"
+                        style="background:var(--success);border-color:var(--success);"
+                        @click="confirmName"
+                        :disabled="nameTarget && nameTarget._importing">
+                    {{ (nameTarget && nameTarget._importing) ? '导入中…' : '确定导入' }}
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- OBS Drawer -->
+    <div v-if="drawerVisible" class="drawer-overlay" @click.self="drawerVisible = false">
+        <div class="drawer">
+            <div class="drawer-header">
+                <h5 class="mb-0">OBS 文件浏览</h5>
+                <button class="btn btn-outline btn-sm" @click="drawerVisible = false">关闭</button>
+            </div>
+            <div class="mb-2" style="font-size:.82rem;color:var(--muted-foreground);word-break:break-all;font-family:var(--font-mono);">
+                {{ drawerPath }}
+            </div>
+            <div class="drawer-body">
+                <div v-if="drawerLoading" class="text-center text-muted py-3">加载中…</div>
+                <div v-else-if="drawerFiles.length">
+                    <div v-for="f in drawerFiles" :key="f.name" class="file-item">
+                        <span class="name">{{ f.name }}</span>
+                        <span class="size">{{ f.size || '' }}</span>
+                    </div>
+                </div>
+                <div v-else class="text-muted text-center py-3">无文件</div>
+            </div>
+        </div>
+    </div>
+{% endraw %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        config: { port: '', env_key: '', env_dir: '', obs_base: '', workers: 0, interval: 0, mtimes: [], roots: [] },
+        hasMultiRoot: false,
+        obsPrefix: '',
+        keys: [],
+        loading: false,
+        keysLoaded: false,
+        lastRefreshTs: 0,
+        error: '',
+        keyFilter: '',
+        models: [],
+        modelFilter: '',
+        modelKw: '',
+        logDirFilter: '',
+        statusFilter: '',
+        pillsOpen: {},
+        pillsOverflow: {},
+
+        showModal: false,
+        modalKey: null,
+        modalMtimes: [],
+        selectedMtimes: [],
+        forceExport: false,
+        autoEval: false,
+        exportMode: 'export',
+        exporting: false,
+        nowTag: '',
+
+        drawerVisible: false,
+        drawerPath: '',
+        drawerFiles: [],
+        drawerLoading: false,
+
+        nameModal: false,
+        nameTarget: null,
+        nameInput: '',
+
+        pollTimer: null,
+        pollRecordId: null,
+
+        logVisible: false,
+        logRecordId: null,
+        logEntries: [],
+        logTailLimit: 50,
+        logLoading: false,
+        logPollTimer: null,
+
+        backfill: { enabled: false, running: false, current_name: null, current_status: null, queued: [], queue_len: 0, roots: [] },
+        backfillTimer: null,
+        recordsTimer: null,
+    },
+    directives: {
+        pillClamp: {
+            // 元素插入/数据更新后测量真实溢出；窗口 resize 时重测
+            inserted: function(el, binding, vnode) {
+                var vm = vnode.context;
+                var slot = binding.value;
+                var measure = function() { vm.measurePillOverflow(el, slot); };
+                el.__pillMeasure = measure;
+                vm.$nextTick(measure);
+                window.addEventListener('resize', measure);
+            },
+            componentUpdated: function(el, binding, vnode) {
+                var vm = vnode.context;
+                vm.$nextTick(function() { vm.measurePillOverflow(el, binding.value); });
+            },
+            unbind: function(el) {
+                if (el.__pillMeasure) window.removeEventListener('resize', el.__pillMeasure);
+            },
+        },
+    },
+    computed: {
+        // 日志只渲染最后 logTailLimit 条，避免 reformat/analyze 上万条进度拖垮抽屉、跟不上进度
+        visibleLogEntries: function() {
+            if (this.logEntries.length <= this.logTailLimit) return this.logEntries;
+            return this.logEntries.slice(this.logEntries.length - this.logTailLimit);
+        },
+        lastRefreshTime: function() {
+            if (!this.lastRefreshTs) return '';
+            var d = new Date(this.lastRefreshTs * 1000);
+            var y = d.getFullYear();
+            var m = ('0' + (d.getMonth() + 1)).slice(-2);
+            var dd = ('0' + d.getDate()).slice(-2);
+            var hh = ('0' + d.getHours()).slice(-2);
+            var mm = ('0' + d.getMinutes()).slice(-2);
+            return y + '/' + m + '/' + dd + ' ' + hh + ':' + mm;
+        },
+        totalSessions: function() {
+            return this.keys.reduce(function(s, k) { return s + k.total_sessions; }, 0);
+        },
+        qualifiedSessions: function() {
+            return this.keys.reduce(function(s, k) { return s + (k.qualified_sessions || 0); }, 0);
+        },
+        filteredKeys: function() {
+            var q = (this.keyFilter || '').toLowerCase();
+            var mf = this.modelFilter;
+            var kw = (this.modelKw || '').toLowerCase();
+            return this.keys.filter(function(k) {
+                var textOk = !q ||
+                       (k.key_slot || '').toLowerCase().indexOf(q) !== -1 ||
+                       (k.key_name || '').toLowerCase().indexOf(q) !== -1 ||
+                       (k.api_key || '').toLowerCase().indexOf(q) !== -1;
+                var md = k.model_distribution || {};
+                var modelOk = !mf || md[mf] > 0;
+                var kwOk = !kw || Object.keys(md).some(function(name) {
+                    return name.toLowerCase().indexOf(kw) !== -1 && md[name] > 0;
+                });
+                var ld = this.logDirFilter;
+                var logDirOk = !ld || (k.mtime_distribution && k.mtime_distribution[ld]);
+                var sf = this.statusFilter;
+                var recs = k.records || [];
+                // queued 筛选同时命中 pending（UI 都显示「排队中」）
+                var statusOk = !sf ||
+                       (sf === 'none' ? recs.length === 0
+                                      : recs.some(function(r) {
+                                            return r.status === sf ||
+                                                   (sf === 'queued' && r.status === 'pending');
+                                        }));
+                return textOk && modelOk && kwOk && logDirOk && statusOk;
+            }, this);
+        },
+        modelFilterCount: function() {
+            var mf = this.modelFilter;
+            var kw = (this.modelKw || '').toLowerCase();
+            if (!mf && !kw) return 0;
+            return this.filteredKeys.reduce(function(sum, k) {
+                var md = k.model_distribution || {};
+                if (mf) return sum + (md[mf] || 0);
+                // 关键词：累加所有匹配到的模型条数
+                return sum + Object.keys(md).reduce(function(s2, name) {
+                    return name.toLowerCase().indexOf(kw) !== -1 ? s2 + (md[name] || 0) : s2;
+                }, 0);
+            }, 0);
+        },
+        backfillRing: function() {
+            var bf = this.backfill || {};
+            var done = 0, total = 0;
+            // 优先聚合各 root 的叶子进度；缺失时退回 current_status
+            var roots = bf.roots || [];
+            for (var i = 0; i < roots.length; i++) {
+                total += roots[i].total_leaves || 0;
+                done += roots[i].done_leaves || 0;
+            }
+            if (total === 0 && bf.current_status && bf.current_status.total_leaves) {
+                total = bf.current_status.total_leaves || 0;
+                done = bf.current_status.done_leaves || 0;
+            }
+            // 无正在进行/排队的回填且无叶子信息时，视为已同步完成（100%）
+            var idle = !bf.running && !(bf.queue_len > 0);
+            var pct;
+            if (total > 0) pct = Math.min(100, Math.round(100 * done / total));
+            else pct = idle ? 100 : 0;
+            var circumference = 2 * Math.PI * 42;
+            return {
+                done: done,
+                total: total,
+                pct: pct,
+                running: !!bf.running,
+                circumference: circumference,
+                dashOffset: circumference * (1 - pct / 100),
+            };
+        },
+    },
+    mounted: function() {
+        this.fetchConfig();
+        this.fetchKeys();
+        this.fetchBackfill();
+        // 回填在后台串行跑，页面轮询展示进度；跑完后自动刷新统计让数字收敛
+        var self = this;
+        this.backfillTimer = setInterval(function() { self.fetchBackfill(); }, 4000);
+        // 轻量记录轮询：每 3s 只更新每张卡片的记录状态/进度（不触发重的 /keys 扫盘）
+        this.recordsTimer = setInterval(function() { self.fetchRecordsSlim(); }, 3000);
+    },
+    beforeDestroy: function() {
+        if (this.pollTimer) clearInterval(this.pollTimer);
+        if (this.logPollTimer) clearInterval(this.logPollTimer);
+        if (this.backfillTimer) clearInterval(this.backfillTimer);
+        if (this.recordsTimer) clearInterval(this.recordsTimer);
+    },
+    methods: {
+        isPillsOpen: function(k) {
+            return !!this.pillsOpen[k.key_slot];
+        },
+        togglePills: function(k) {
+            // Vue2 对象新增属性需 $set 保证响应式
+            this.$set(this.pillsOpen, k.key_slot, !this.pillsOpen[k.key_slot]);
+        },
+        measurePillOverflow: function(el, slot) {
+            // 真实测量：clamp 收起态下 scrollHeight 超过 clientHeight 即溢出（放不下一行）
+            var wasOpen = el.classList.contains('open');
+            if (wasOpen) el.classList.remove('open');
+            var overflow = el.scrollHeight - el.clientHeight > 2;
+            if (wasOpen) el.classList.add('open');
+            if (!!this.pillsOverflow[slot] !== overflow) {
+                this.$set(this.pillsOverflow, slot, overflow);
+            }
+        },
+        _h: function(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
+
+        fetchBackfill: function() {
+            var self = this;
+            var wasRunning = this.backfill.running;
+            fetch('/api/export/backfill-status', {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    self.backfill = d || self.backfill;
+                    // 回填从「在跑」变为「跑完」→ 自动刷新统计，让 session 数收敛到归并值
+                    if (wasRunning && !self.backfill.running) {
+                        self.fetchKeys();
+                    }
+                })
+                .catch(function() {});
+        },
+
+        fetchConfig: function() {
+            fetch('/api/export/config', {headers: this._h()}).then(function(r) {
+                if (r.status === 401) { window.location.href = '/keys'; return Promise.reject('auth'); }
+                return r.json();
+            }).then(function(d) {
+                this.config = d;
+                this.hasMultiRoot = !!(d.roots && d.roots.length > 1);
+                if (d.obs_base && !this.obsPrefix) this.obsPrefix = d.obs_base;
+            }.bind(this)).catch(function() {});
+        },
+
+        topModels: function(dist) {
+            // {model: count} → 按 count 降序数组，取前 6；保证当前筛选模型可见
+            var arr = Object.keys(dist || {}).map(function(name) {
+                return { name: name, count: dist[name] };
+            }).sort(function(a, b) { return b.count - a.count; });
+            var top = arr.slice(0, 6);
+            if (this.modelFilter && !top.some(function(m) { return m.name === this.modelFilter; }, this)) {
+                var hit = arr.filter(function(m) { return m.name === this.modelFilter; }, this);
+                if (hit.length) top = top.concat(hit);
+            }
+            return top;
+        },
+
+        fetchKeys: function() {
+            this.loading = true;
+            this.error = '';
+            fetch('/api/export/keys', {headers: this._h()}).then(function(r) {
+                if (r.status === 401) { window.location.href = '/keys'; return Promise.reject('auth'); }
+                return r.json();
+            }).then(function(d) {
+                this.keys = d.keys || [];
+                if (d.mtimes) this.config.mtimes = d.mtimes;
+                if (d.models) this.models = d.models;
+                if (d.last_refresh_ts) this.lastRefreshTs = d.last_refresh_ts;
+            }.bind(this)).catch(function(e) {
+                if (e !== 'auth') this.error = '加载失败: ' + e;
+            }.bind(this)).finally(function() {
+                this.loading = false;
+                this.keysLoaded = true;
+            }.bind(this));
+        },
+
+        fetchRecordsSlim: function() {
+            // 轻量轮询：只拉 export_records（按 slot 分组），就地更新每张卡片的
+            // records，让 queued→running→success 的状态切换及时可见，
+            // 而不触发重的 /api/export/keys（含跨 root 统计扫盘）。
+            var self = this;
+            fetch('/api/export/records-slim', {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var bySlot = d.records_by_slot || {};
+                    self.keys.forEach(function(k) {
+                        var recs = bySlot[k.key_slot];
+                        if (recs) self.$set(k, 'records', recs);
+                    });
+                })
+                .catch(function() {});
+        },
+
+        statusText: function(s, mode) {
+            // 统一文案，不再按 mode（export/reformat/eval）分「导出中/合并中/质检中」。
+            // pending 视作即将排队，并入「排队中」。
+            return {
+                pending: '排队中', queued: '排队中', running: '运行中',
+                success: '已完成', failed: '失败', cancelled: '已取消',
+            }[s] || s;
+        },
+
+        openExportModal: function(k) {
+            this.modalKey = k;
+            this.modalMtimes = Object.keys(k.mtime_distribution).sort().reverse();
+            this.selectedMtimes = this.modalMtimes.slice();
+            this.forceExport = false;
+            this.nowTag = this._nowTag();
+            this.showModal = true;
+        },
+
+        _nowTag: function() {
+            var d = new Date();
+            var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+            return ('' + d.getFullYear()).slice(2) + pad(d.getMonth()+1) + pad(d.getDate()) + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+        },
+
+        runExport: function() {
+            if (!this.selectedMtimes.length) return;
+            this.exporting = true;
+            var body = {
+                api_key: this.modalKey.api_key,
+                mtime_dirs: this.selectedMtimes,
+                obs_prefix: this.obsPrefix,
+                force: this.forceExport,
+                mode: this.exportMode,
+            };
+            fetch('/api/export/run', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify(body),
+            }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.record_id) {
+                    this.showModal = false;
+                    this.pollRecordId = d.record_id;
+                    this._startPoll();
+                } else {
+                    this.error = d.detail || '导出失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this)).finally(function() {
+                this.exporting = false;
+            }.bind(this));
+        },
+
+        _startPoll: function() {
+            if (this.pollTimer) clearInterval(this.pollTimer);
+            this.logRecordId = this.pollRecordId;
+            this.logEntries = [];
+            this.logVisible = true;
+            this.logLoading = false;
+            this.drawerVisible = false;
+            var self = this;
+            this.pollTimer = setInterval(function() {
+                fetch('/api/export/status/' + self.pollRecordId, {headers: self._h()})
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        try {
+                            self.logEntries = JSON.parse(d.progress_log || '[]');
+                        } catch(e) {}
+                        var done = (d.status === 'success' || d.status === 'failed' || d.status === 'cancelled');
+                        if (done) {
+                            clearInterval(self.pollTimer);
+                            self.pollTimer = null;
+                            self.fetchKeys();
+                            if (d.status === 'failed' && d.error_message) {
+                                self.error = '导出失败: ' + d.error_message;
+                            }
+                        }
+                    });
+            }, 2000);
+        },
+
+        openDrawer: function(obsPath) {
+            this.drawerPath = obsPath;
+            this.drawerFiles = [];
+            this.drawerVisible = true;
+            this.drawerLoading = true;
+            this.logVisible = false;
+            fetch('/api/export/obs/ls?path=' + encodeURIComponent(obsPath), {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    this.drawerFiles = d.items || [];
+                }.bind(this))
+                .catch(function() {
+                    this.drawerFiles = [];
+                }.bind(this))
+                .finally(function() {
+                    this.drawerLoading = false;
+                }.bind(this));
+        },
+
+        openLogDrawer: function(recordId) {
+            if (this.logPollTimer) { clearInterval(this.logPollTimer); this.logPollTimer = null; }
+            this.logRecordId = recordId;
+            this.logEntries = [];
+            this.logVisible = true;
+            this.logLoading = true;
+            this.drawerVisible = false;
+            var self = this;
+            fetch('/api/export/status/' + recordId, {headers: this._h()})
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    try {
+                        self.logEntries = JSON.parse(d.progress_log || '[]');
+                    } catch(e) {
+                        self.logEntries = [];
+                    }
+                    if (d.status === 'running') {
+                        self._startLogPoll(recordId);
+                    }
+                })
+                .catch(function() { self.logEntries = []; })
+                .finally(function() { self.logLoading = false; });
+        },
+
+        _startLogPoll: function(recordId) {
+            if (this.logPollTimer) clearInterval(this.logPollTimer);
+            var self = this;
+            this.logPollTimer = setInterval(function() {
+                if (!self.logVisible || self.logRecordId !== recordId) {
+                    clearInterval(self.logPollTimer);
+                    self.logPollTimer = null;
+                    return;
+                }
+                fetch('/api/export/status/' + recordId, {headers: self._h()})
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                        try {
+                            self.logEntries = JSON.parse(d.progress_log || '[]');
+                        } catch(e) {}
+                        self.$nextTick(function() {
+                            var body = self.$el.querySelector('.drawer-body');
+                            if (body) body.scrollTop = body.scrollHeight;
+                        });
+                        if (d.status === 'success' || d.status === 'failed' || d.status === 'cancelled') {
+                            clearInterval(self.logPollTimer);
+                            self.logPollTimer = null;
+                        }
+                    });
+            }, 2000);
+        },
+
+        closeLogDrawer: function() {
+            this.logVisible = false;
+            if (this.logPollTimer) { clearInterval(this.logPollTimer); this.logPollTimer = null; }
+        },
+
+        openReport: function(recordId) {
+            window.open('/keys/export/report/' + recordId, '_blank');
+        },
+
+        openNameModal: function(r) {
+            if (r._importing) return;
+            this.nameTarget = r;
+            this.nameInput = '';
+            this.nameModal = true;
+        },
+
+        closeNameModal: function() {
+            if (this.nameTarget && this.nameTarget._importing) return;
+            this.nameModal = false;
+            this.nameTarget = null;
+            this.nameInput = '';
+        },
+
+        confirmName: function() {
+            var r = this.nameTarget;
+            if (!r || r._importing) return;
+            this.importToManage(r, (this.nameInput || '').trim());
+        },
+
+        importToManage: function(r, name) {
+            if (r._importing) return;
+            this.$set(r, '_importing', true);
+            fetch('/api/reflection/datasets/add', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({ids: [r.id], name: name || ''}),
+            }).then(function(res) { return res.json().then(function(d){ return {ok: res.ok, d: d}; }); })
+            .then(function(x) {
+                this.$set(r, '_importing', false);
+                if (x.ok && x.d.status === 'ok') {
+                    this.$set(r, 'in_manage', 1);
+                    this.nameModal = false;
+                    this.nameTarget = null;
+                    this.nameInput = '';
+                    alert('已加入数据集管理');
+                } else {
+                    this.error = (x.d && x.d.detail) || '导入失败';
+                    alert(this.error);
+                }
+            }.bind(this)).catch(function(e) {
+                this.$set(r, '_importing', false);
+                this.error = '请求失败: ' + e;
+                alert(this.error);
+            }.bind(this));
+        },
+
+        cancelTask: function(r) {
+            fetch('/api/export/cancel', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({record_id: r.id}),
+            }).then(function(res) { return res.json(); }).then(function(d) {
+                if (d.status === 'cancelled') {
+                    // 乐观更新本地状态，即时反馈；records-slim 3s 轮询会确认。
+                    // 不调重的 fetchKeys（导出高峰时可能慢）。
+                    this.$set(r, 'status', 'cancelled');
+                } else {
+                    this.error = d.detail || '终止失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this));
+        },
+
+        retryTask: function(r) {
+            // 整任务重跑：后端用原记录参数新建一条记录入队；原记录保留作历史。
+            fetch('/api/export/retry', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({record_id: r.id}),
+            }).then(function(res) { return res.json(); }).then(function(d) {
+                if (d.record_id) {
+                    // 新记录属同一 key_slot，records-slim 3s 轮询会自动带出并显示"排队中"。
+                    // 先立即拉一次轻量记录，缩短可见延迟；不调重的 fetchKeys。
+                    this.fetchRecordsSlim();
+                } else {
+                    this.error = d.detail || '重试失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this));
+        },
+
+        retryUpload: function(r) {
+            fetch('/api/export/upload_retry', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({record_id: r.id}),
+            }).then(function(res) { return res.json(); }).then(function(d) {
+                if (d.record_id) {
+                    this.pollRecordId = d.record_id;
+                    this._startPoll();
+                } else {
+                    this.error = d.detail || '重试失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this));
+        },
+    }
+});
+</script>
+{% endblock %}

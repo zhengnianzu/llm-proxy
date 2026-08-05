@@ -763,6 +763,10 @@ init_export_db(SERVICE_LOG_DIR)
 init_backup_db(SERVICE_LOG_DIR)
 init_logdir_db(SERVICE_LOG_DIR)
 reset_logdir_building()
+# 「数据管理」以 log_dir.db 的 sources 表为唯一数据源，无 YAML 导入。
+# 每次启动刷新活跃目录行（root_id='default'）root_path，空库时补插。
+from utils.logdir_store import _refresh_active_row
+_refresh_active_row(ENV_DIR)
 from utils.newapi_backfill import init_backfill_logger
 init_backfill_logger(SERVICE_LOG_DIR)
 init_user_db(SERVICE_LOG_DIR)

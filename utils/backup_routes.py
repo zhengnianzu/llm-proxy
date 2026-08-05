@@ -680,10 +680,16 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
     # env_name = 根目录的稳定 root_id（消除同 basename 冲突，如两个 new-api details 根）。
     # 对历史根，其 root_id 作为一个「env」，其 天/小时 叶子作为 mtime_tag。
     def _extra_roots() -> list:
-        """配置的历史路径（排除活跃 logs_all 自身，那条已由 logs_all 扫描覆盖）。"""
+        """配置的历史路径（排除活跃 logs_all 自身，那条已由 logs_all 扫描覆盖）。
+
+        以 log_dir.db 的 sources 为准（「数据管理」登记清单）；DB 为空时返回 []。
+        """
         try:
-            from utils.logs_config import get_history_paths
-            return [p for p in get_history_paths() if Path(p).is_dir()]
+            from utils.logs_config import get_registered_roots
+            active_env = os.path.normpath(str(Path(logs_dir).parent))
+            roots = get_registered_roots(active_env)
+            return [r for r in roots if r and Path(r).is_dir()
+                    and os.path.normpath(r) != active_env]
         except Exception:
             return []
 
