@@ -460,7 +460,7 @@
 
     <!-- 日志详情 Drawer -->
     <div v-if="logVisible" class="drawer-overlay" @click.self="closeLogDrawer">
-        <div class="drawer">
+        <div class="drawer" style="width:min(880px,94vw);">
             <div class="drawer-header">
                 <h5 class="mb-0">
                     详情 #{{ logRecordId }}
@@ -470,9 +470,9 @@
             </div>
             <div class="drawer-body">
                 <div v-if="logLoading" class="text-muted small py-3 text-center">加载中…</div>
-                <div v-else-if="logEntries.length" style="font-family:var(--font-mono);font-size:.8rem;line-height:1.6;background:var(--panel-dark-bg);color:var(--panel-dark-text);padding:10px;border-radius:var(--radius);">
+                <div v-else-if="logEntries.length" style="font-family:var(--font-mono);font-size:.8rem;line-height:1.6;background:var(--panel-dark-bg);color:var(--panel-dark-text);padding:10px;border-radius:var(--radius);overflow-x:auto;">
                     <div v-if="logEntries.length > logTailLimit" style="color:var(--panel-dark-muted);padding-bottom:4px;">…省略前 {{ logEntries.length - logTailLimit }} 条，仅显示最后 {{ logTailLimit }} 条</div>
-                    <div v-for="(entry, i) in visibleLogEntries" :key="i">
+                    <div v-for="(entry, i) in visibleLogEntries" :key="i" style="white-space:nowrap;">
                         <span style="color:var(--panel-dark-muted);">{{ entry.ts }}</span> {{ entry.msg }}
                     </div>
                 </div>
