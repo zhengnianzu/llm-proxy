@@ -301,7 +301,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             "current_logs_dir": logs_dir,
             "roots": _all_roots(),
             "obs_base": load_obs_base(),
-            "workers": sync_cfg.get("workers", 4),
+            "workers": sync_cfg.get("workers", 8),
             "interval": sync_cfg.get("interval", 600),
             "upload_script": sync_cfg.get("upload_script", ""),
             "mtimes": mtimes,
@@ -484,10 +484,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         # workers：优先用任务记录里显式配置的并发数（新建任务时可选）；
         # 记录未设（0/缺失，含旧任务）时回退全局 sync 配置默认。
         _rec_workers = rec.get("workers") or 0
-        workers = _rec_workers if _rec_workers > 0 else sync_cfg.get("workers", 4)
+        workers = _rec_workers if _rec_workers > 0 else sync_cfg.get("workers", 8)
         # dir_workers：多个 mtime 目录并行处理的并发数（每目录内部仍各用 workers 线程）。
-        # 0/缺失（含旧任务）= 串行（1）；总线程 ≈ dir_workers × workers。
-        dir_workers = int(rec.get("dir_workers") or 0) or 1
+        # 0/缺失（含旧任务）= 默认 8；总线程 ≈ dir_workers × workers。
+        dir_workers = int(rec.get("dir_workers") or 0) or 8
         upload_script = sync_cfg.get("upload_script") or None
 
         mtime_dirs = json.loads(rec.get("mtime_dirs", "[]"))

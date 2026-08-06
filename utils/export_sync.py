@@ -297,7 +297,7 @@ def _save_sync_state(logs_dir: str, state: dict):
 def sync_session_index(
     logs_dir: str,
     obs_dst: str,
-    workers: int = 4,
+    workers: int = 8,
     upload_script: Optional[str] = None,
     key: Optional[str] = None,
     local_copy_dir: Optional[str] = None,

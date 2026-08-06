@@ -369,21 +369,6 @@
                     <strong style="margin-left:8px;">{{ modalKey.key_name || modalKey.api_key }}</strong>
                 </div>
                 <div class="mb-3">
-                    <label class="form-label small">选择 mtime 目录（节点）</label>
-                    <div v-for="mt in modalMtimes" :key="mt" class="mtime-check">
-                        <input type="checkbox" :value="mt" v-model="selectedMtimes" :id="'mt-'+mt">
-                        <label :for="'mt-'+mt">{{ mt }}
-                            <small class="text-muted" v-if="modalKey.mtime_distribution && modalKey.mtime_distribution[mt]">
-                                ({{ modalKey.mtime_distribution[mt].total }} sessions)
-                            </small>
-                        </label>
-                    </div>
-                    <div class="text-muted" style="font-size:.76rem; margin-top:6px;" v-if="hasMultiRoot">
-                        带 <code>目录名/</code> 前缀的为其它日志路径（如 new-api）。导出时会自动补齐会话数据；
-                        大目录首次较慢，建议先在「日志管理」页完成回填。
-                    </div>
-                </div>
-                <div class="mb-3">
                     <label class="form-label small">OBS 路径前缀</label>
                     <input type="text" class="input input-sm" v-model="obsPrefix" placeholder="obs://bucket/path（可选，留空仅本地复制）">
                 </div>
@@ -402,18 +387,33 @@
                     <div class="mb-2">
                         <label class="form-label small mb-1">并发 worker 数</label>
                         <input type="number" min="0" max="64" class="input input-sm" v-model.number="taskWorkers"
-                               :placeholder="'默认（配置：' + (config.workers || 4) + '）'" style="max-width:200px;">
+                               :placeholder="'默认（配置：' + (config.workers || 8) + '）'" style="max-width:200px;">
                         <div class="text-muted" style="font-size:.72rem;margin-top:2px;">0 或留空用全局配置默认；调大加快导出，注意磁盘/网络压力。</div>
                     </div>
                     <div class="mb-2" v-if="selectedMtimes.length > 1">
                         <label class="form-label small mb-1">目录并发数</label>
                         <input type="number" min="0" max="16" class="input input-sm" v-model.number="taskDirWorkers"
-                               placeholder="默认（串行，1）" style="max-width:200px;">
+                               placeholder="默认（8）" style="max-width:200px;">
                         <div class="text-muted" style="font-size:.72rem;margin-top:2px;">多个 mtime 目录同时处理的数量；0/留空=逐个串行。总线程≈目录并发×worker 数，目录多时注意资源。</div>
                     </div>
                     <div class="form-check mt-1">
                         <input type="checkbox" class="form-check-input" v-model="forceExport" id="force-check">
                         <label class="form-check-label small" for="force-check">强制重新导出（忽略缓存）</label>
+                    </div>
+                    <div class="mb-3 mt-3">
+                        <label class="form-label small">选择 mtime 目录（节点）</label>
+                        <div v-for="mt in modalMtimes" :key="mt" class="mtime-check">
+                            <input type="checkbox" :value="mt" v-model="selectedMtimes" :id="'mt-'+mt">
+                            <label :for="'mt-'+mt">{{ mt }}
+                                <small class="text-muted" v-if="modalKey.mtime_distribution && modalKey.mtime_distribution[mt]">
+                                    ({{ modalKey.mtime_distribution[mt].total }} sessions)
+                                </small>
+                            </label>
+                        </div>
+                        <div class="text-muted" style="font-size:.76rem; margin-top:6px;" v-if="hasMultiRoot">
+                            带 <code>目录名/</code> 前缀的为其它日志路径（如 new-api）。导出时会自动补齐会话数据；
+                            大目录首次较慢，建议先在「日志管理」页完成回填。
+                        </div>
                     </div>
                 </div>
                 <div class="d-flex justify-content-between align-items-center">
@@ -551,9 +551,9 @@ new Vue({
         modalMtimes: [],
         selectedMtimes: [],
         forceExport: false,
-        exportMode: 'export',
-        taskWorkers: 0,
-        taskDirWorkers: 0,
+        exportMode: 'reformat',
+        taskWorkers: 8,
+        taskDirWorkers: 8,
         exporting: false,
         nowTag: '',
         hoverKey: '',
@@ -876,10 +876,10 @@ new Vue({
                 if (!(k in rec)) return;
                 var v = rec[k];
                 if (v === null || v === undefined || v === '') return;
-                // workers=0 表示未显式设置、执行时用全局配置默认，标注清楚避免误解
-                if (k === 'workers' && (v === 0 || v === '0')) { rows.push({ k: k, v: '默认（全局配置）' }); return; }
-                // dir_workers=0 表示未设、多目录逐个串行处理
-                if (k === 'dir_workers' && (v === 0 || v === '0')) { rows.push({ k: k, v: '串行（1）' }); return; }
+                // workers=0 表示未显式设置、执行时用全局配置默认（8），标注清楚避免误解
+                if (k === 'workers' && (v === 0 || v === '0')) { rows.push({ k: k, v: '默认（全局配置，8）' }); return; }
+                // dir_workers=0 表示未设、执行时用默认目录并发（8）
+                if (k === 'dir_workers' && (v === 0 || v === '0')) { rows.push({ k: k, v: '默认（8）' }); return; }
                 rows.push({ k: k, v: String(v) });
             });
             return rows;
@@ -914,9 +914,9 @@ new Vue({
             this.showModal = true;
             this.modalKey = null;
             this.forceExport = false;
-            this.exportMode = 'export';
-            this.taskWorkers = 0;
-            this.taskDirWorkers = 0;
+            this.exportMode = 'reformat';
+            this.taskWorkers = 8;
+            this.taskDirWorkers = 8;
             // 每次打开重置 Modal 自己的筛选，避免残留上次的条件
             this.mKeyFilter = '';
             this.mModelFilter = '';
