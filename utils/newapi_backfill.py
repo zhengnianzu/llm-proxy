@@ -384,7 +384,11 @@ def _run(root: str, workers: int, force: bool = False):
 
 
 def _run_guarded(root: str, workers: int, force: bool):
-    """线程入口：跑完 _run 后从 _running 里摘除自己（无论成败）。"""
+    """[DEPRECATED] 进程内线程入口：跑完 _run 后从 _running 摘除自己。
+
+    回填已剥离到独立 backfill_worker 进程（走 backfill_requests 表 + _run），此线程
+    版仅在 EXPORT/BACKFILL 尚未切换的历史路径保留，正常不再调用。
+    """
     try:
         _run(root, workers, force)
     except Exception as e:  # noqa: BLE001 — 单个 root 失败不拖垮别的回填线程
@@ -404,37 +408,51 @@ def _running_roots() -> list:
         return list(_running.keys())
 
 
-def get_queue_snapshot() -> dict:
-    """供 UI/导出页展示当前正在回填的 root 及其进度。
+def has_active_backfill(root: str) -> bool:
+    """该 root 是否有在途回填请求（pending/running）。跨进程真相源 = backfill_requests 表。"""
+    try:
+        import utils.logdir_store as lds
+        return lds.has_active_backfill(os.path.normpath(root))
+    except Exception:
+        return False
 
-    已去掉全局串行队列——多个 root 可并发回填，不再有「排队」概念。
-    为兼容旧调用方（导出页读 current/current_status/queued），保留字段：
-      - current：任取一个正在跑的 root（多 root 并发时无单一「当前」，取其一）
-      - running_roots：所有正在跑的 root（新增，完整列表）
-      - queued：恒为空
+
+def get_queue_snapshot() -> dict:
+    """供 UI/导出页展示当前排队 / 正在回填的 root。
+
+    真相源改为 backfill_requests 表（跨进程）：worker 领取一条置 running，串行执行，
+    故 running 至多一条，其余 pending 即真实排队。为兼容旧调用方保留字段：
+      - current：正在跑的 root（running 行，至多一个）
+      - running_roots：所有 running 行的 root（完整列表，通常 0/1 个）
+      - queued：pending 行的 root 列表（真实排队，向用户透明）
+    进度（total/done 叶子）由调用方另读 get_backfill_status/count_summary，不在此拼。
     """
-    roots = _running_roots()
-    current = roots[0] if roots else None
+    try:
+        import utils.logdir_store as lds
+        active = lds.list_active_backfill()
+    except Exception:
+        active = []
+    running = [r["root"] for r in active if r.get("status") == "running"]
+    queued = [r["root"] for r in active if r.get("status") == "pending"]
+    current = running[0] if running else None
     with _status_lock:
         cur_st = dict(_status.get(current, {})) if current else None
     return {
         "current": current,
         "current_status": cur_st,
-        "running_roots": roots,
-        "queued": [],
-        "queue_len": 0,
-        "running": bool(roots),
+        "running_roots": running,
+        "queued": queued,
+        "queue_len": len(queued),
+        "running": bool(running),
     }
 
 
 def start_backfill(path: str, workers: Optional[int] = None, force: bool = False) -> dict:
-    """为某 root 起一个后台线程立即回填。幂等、立即返回（不阻塞调用方）。
+    """[DEPRECATED] 进程内起线程立即回填。已被「入队 backfill_requests + backfill_worker
+    独立进程」取代（见 logs_routes.logs_admin_backfill）。保留仅供历史/排障回退，
+    正常路径不再调用——它把执行放回 app 进程内，正是本次剥离要消除的。
 
-    点击即起独立 daemon 线程跑 _run，多个 root 可同时回填（各自开进程池）。
-    同一 root 已在跑 → 不重复起（避免同源两份进程池打架）。
-
-    force=False（默认）：跳过已完成且无新增的小时叶子，只处理首次/活跃/有增量的目录。
-    force=True：全量重建该 root 下所有叶子（用于修复数据或口径变更）。
+    幂等、立即返回：同一 root 已在跑 → 不重复起。force 语义同 _run。
     """
     root = os.path.normpath(path)
     if detect_format(root) != "newapi":

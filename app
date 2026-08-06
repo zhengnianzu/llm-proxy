@@ -302,6 +302,10 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"[app] env -> {service_key}")
     print(f"[app] log -> {log_file}")
 
+    # 默认随 app 拉起导出 / 回填 worker（执行已剥离到独立进程）。--no-workers 可跳过。
+    if not getattr(args, "no_workers", False):
+        _start_all_workers(args)
+
     if getattr(args, "sync", False):
         config = load_sync_config(state)
         if config.get("obs_base"):
@@ -360,6 +364,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
         pid_from_file = read_pid(BASE_DIR / pid_file)
         if pid_from_file:
             pid = pid_from_file
+
+    # 默认随 app 一并停掉导出 / 回填 worker。--no-workers 可跳过（仅停 app）。
+    if not getattr(args, "no_workers", False):
+        _stop_all_workers(args)
 
     if not is_pid_running(pid):
         print(f"[app] not running: env={service_key}")
@@ -1338,6 +1346,264 @@ def cmd_key(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# 独立 worker 进程管理（导出 export_worker / 回填 backfill_worker），仿 sync 守护模式
+#
+# 两个 worker 各是独立 `python -m` 入口、独立 pid/log、独立信号处理，共用下面这套
+# 参数化的 start/stop/logs/status 逻辑。每类 worker 用一个 WorkerSpec 描述。
+# ---------------------------------------------------------------------------
+
+class WorkerSpec:
+    def __init__(self, name: str, module: str, state_key: str):
+        self.name = name              # 展示用 & pid/log 文件名前缀，如 "export"
+        self.module = module          # python -m 目标，如 "utils.export_worker"
+        self.state_key = state_key    # .cli_state.yaml 里的服务表键，如 "export_services"
+        self.pid_name = f"{name}_worker.pid"
+        self.log_name = f"{name}_worker.log"
+
+
+_WORKER_SPECS = {
+    "export": WorkerSpec("export", "utils.export_worker", "export_services"),
+    "backfill": WorkerSpec("backfill", "utils.backfill_worker", "backfill_services"),
+}
+
+
+def _worker_svc_dir(state: dict):
+    """解析当前 env 的 svc_dir + service_key（与 app/sync 同源）。"""
+    env_path, env_values, _host, port, _, _ = state_runtime(state)
+    service_key = get_service_key(env_path)
+    service_slug = get_service_slug(service_key)
+    api_key_suffix = get_api_key_suffix(env_values)
+    svc_dir = _service_log_dir(port, service_slug, api_key_suffix)
+    return svc_dir, service_key, service_slug, env_path, env_values
+
+
+def _worker_start(spec: WorkerSpec, args: argparse.Namespace) -> int:
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    svc_dir, service_key, service_slug, env_path, env_values = _worker_svc_dir(state)
+    svc_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = svc_dir / spec.pid_name
+    log_file = svc_dir / spec.log_name
+
+    pid = read_pid(pid_file)
+    if is_pid_running(pid):
+        print(f"[{spec.name}] already running: pid={pid} env={service_key}")
+        print(f"[{spec.name}] log -> {log_file}")
+        return 0
+
+    # child_env 与 app 完全一致，保证 worker 的 get_service_log_dir() 落到同一 svc_dir，
+    # 命中同一 DB / 同一槽位锁目录（跨进程互斥的前提）。
+    child_env = os.environ.copy()
+    child_env.update(env_values)
+    child_env["ENV_FILE"] = str(env_path)
+    child_env["LOG_TASK_TAG"] = service_slug
+
+    with log_file.open("ab") as log_fp:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", spec.module],
+            cwd=str(BASE_DIR),
+            env=child_env,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
+    time.sleep(1)
+    if not is_pid_running(proc.pid):
+        eprint(f"[{spec.name}] failed to start, check log: {log_file}")
+        return 1
+
+    svcs = state.setdefault(spec.state_key, {})
+    svcs[service_key] = {
+        "pid": proc.pid,
+        "pid_file": os.path.relpath(pid_file, BASE_DIR),
+        "log_file": os.path.relpath(log_file, BASE_DIR),
+        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    save_state(state)
+    print(f"[{spec.name}] started: pid={proc.pid} env={service_key}")
+    print(f"[{spec.name}] log -> {log_file}")
+    return 0
+
+
+def _worker_stop(spec: WorkerSpec, args: argparse.Namespace) -> int:
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    env_path = resolve_env_path(state["source_env"])
+    service_key = get_service_key(env_path)
+    svc = (state.get(spec.state_key) or {}).get(service_key, {})
+
+    pid_file_rel = svc.get("pid_file")
+    pid = svc.get("pid")
+    if pid_file_rel:
+        pid_from_file = read_pid(BASE_DIR / pid_file_rel)
+        if pid_from_file:
+            pid = pid_from_file
+
+    if not is_pid_running(pid):
+        print(f"[{spec.name}] not running: env={service_key}")
+        if pid_file_rel:
+            (BASE_DIR / pid_file_rel).unlink(missing_ok=True)
+        if svc:
+            svc["pid"] = None
+            save_state(state)
+        return 0
+
+    print(f"[{spec.name}] stopping pid={pid} env={service_key} "
+          f"(waiting for current task to reach a checkpoint...)")
+    # 按进程组发 SIGTERM：worker 在 _interruptible_sleep 分片醒来，正在跑的任务在
+    # 目录/叶子检查点自然收尾。等待 ≤120s 后强杀。
+    _signal_service(pid, signal.SIGTERM)
+    for _ in range(240):
+        time.sleep(0.5)
+        if not is_pid_running(pid):
+            break
+    if is_pid_running(pid):
+        print(f"[{spec.name}] force kill pid={pid}")
+        _signal_service(pid, signal.SIGKILL)
+        time.sleep(0.2)
+
+    if pid_file_rel:
+        (BASE_DIR / pid_file_rel).unlink(missing_ok=True)
+    if svc:
+        svc["pid"] = None
+        svc["stopped_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_state(state)
+    print(f"[{spec.name}] stopped")
+    return 0
+
+
+def _worker_logs(spec: WorkerSpec, args: argparse.Namespace) -> int:
+    state = load_state()
+    state["source_env"] = get_selected_env(args, state)
+    env_path = resolve_env_path(state["source_env"])
+    service_key = get_service_key(env_path)
+    svc = (state.get(spec.state_key) or {}).get(service_key, {})
+
+    log_file_rel = svc.get("log_file")
+    if log_file_rel:
+        log_file = BASE_DIR / log_file_rel
+    else:
+        svc_dir, _sk, _slug, _ep, _ev = _worker_svc_dir(state)
+        log_file = svc_dir / spec.log_name
+
+    if not log_file.exists():
+        eprint(f"[{spec.name}] log file not found: {log_file}")
+        return 1
+
+    if args.follow:
+        try:
+            subprocess.run(["tail", "-n", str(args.lines), "-f", str(log_file)], check=False)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    sys.stdout.writelines(tail_lines(log_file, args.lines))
+    return 0
+
+
+def _print_worker_services(spec: WorkerSpec, state: dict) -> int:
+    svcs = state.get(spec.state_key) or {}
+    if not svcs:
+        print(f"[{spec.name}] no recorded {spec.name} workers")
+        return 0
+    for key, svc in svcs.items():
+        pid = svc.get("pid")
+        pid_file_rel = svc.get("pid_file")
+        if pid_file_rel:
+            pid_from_file = read_pid(BASE_DIR / pid_file_rel)
+            if pid_from_file:
+                pid = pid_from_file
+        running = is_pid_running(pid)
+        marker = "*" if key == state.get("source_env") else " "
+        print(f"{marker} {key}: {'running' if running else 'stopped'} "
+              f"pid={pid or '-'} started={svc.get('started_at', '-')}")
+        if not running:
+            print(f"    (start with: ./app {spec.name} start)")
+    return 0
+
+
+def cmd_export_worker(args: argparse.Namespace) -> int:
+    spec = _WORKER_SPECS["export"]
+    action = args.export_action
+    if action == "start":
+        return _worker_start(spec, args)
+    if action == "stop":
+        return _worker_stop(spec, args)
+    if action == "logs":
+        return _worker_logs(spec, args)
+    if action == "status":
+        return _print_worker_services(spec, load_state())
+    if action == "list":
+        return _print_worker_services(spec, load_state())
+    return 1
+
+
+def cmd_backfill_worker(args: argparse.Namespace) -> int:
+    spec = _WORKER_SPECS["backfill"]
+    action = args.backfill_action
+    if action == "start":
+        return _worker_start(spec, args)
+    if action == "stop":
+        return _worker_stop(spec, args)
+    if action == "logs":
+        return _worker_logs(spec, args)
+    if action == "status":
+        return _print_worker_services(spec, load_state())
+    if action == "list":
+        return _print_worker_services(spec, load_state())
+    return 1
+
+
+def _start_all_workers(args: argparse.Namespace) -> None:
+    """随 app 一起拉起导出 / 回填两个独立 worker（各自幂等：已在跑则跳过）。
+
+    执行已从 app 进程剥离到独立进程，若不随 app 启动，导出会一直停在 queued、
+    回填停在 pending。默认随 `app start` 启动，`--no-workers` 可关闭。
+    """
+    for name in ("export", "backfill"):
+        try:
+            _worker_start(_WORKER_SPECS[name], args)
+        except Exception as e:
+            eprint(f"[{name}] start failed: {e}")
+
+
+def _stop_all_workers(args: argparse.Namespace) -> None:
+    """随 app 一起停止两个 worker（各自幂等：未在跑则跳过）。"""
+    for name in ("export", "backfill"):
+        try:
+            _worker_stop(_WORKER_SPECS[name], args)
+        except Exception as e:
+            eprint(f"[{name}] stop failed: {e}")
+
+
+def _add_worker_subparser(subparsers, name: str, dest: str, cmd_func) -> None:
+    """给 build_parser 注册一个 worker 命令组（start/stop/logs/status/list）。"""
+    p = subparsers.add_parser(name, help=f"Manage {name} worker daemon (start/stop/logs/status)")
+    sub = p.add_subparsers(dest=dest, required=True)
+
+    ps = sub.add_parser("start", help=f"Start {name} worker daemon")
+    ps.add_argument("--env", dest="env_file", help="Env file to use")
+    ps.set_defaults(func=cmd_func)
+
+    pt = sub.add_parser("stop", help=f"Stop {name} worker daemon")
+    pt.add_argument("--env", dest="env_file", help="Env file whose worker to stop")
+    pt.set_defaults(func=cmd_func)
+
+    pl = sub.add_parser("logs", help=f"Show {name} worker logs")
+    pl.add_argument("--env", dest="env_file", help="Env file whose worker logs to show")
+    pl.add_argument("-f", "--follow", action="store_true", help="Follow the log file")
+    pl.add_argument("-n", "--lines", type=int, default=100, help="Number of lines to show")
+    pl.set_defaults(func=cmd_func)
+
+    pst = sub.add_parser("status", help=f"Show {name} worker status")
+    pst.set_defaults(func=cmd_func)
+
+    pls = sub.add_parser("list", help=f"List all recorded {name} workers")
+    pls.set_defaults(func=cmd_func)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LLM proxy service CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1345,15 +1611,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = subparsers.add_parser("start", help="Start app.py using configured source_env")
     p_start.add_argument("--env", dest="env_file", help="Env file to use for this start")
     p_start.add_argument("--sync", action="store_true", help="Also start sync daemon (requires obs_base configured)")
+    p_start.add_argument("--no-workers", dest="no_workers", action="store_true",
+                         help="Do not start export/backfill workers with the app")
     p_start.set_defaults(func=cmd_start)
 
     p_stop = subparsers.add_parser("stop", help="Stop the running app")
     p_stop.add_argument("--env", dest="env_file", help="Env file to stop")
+    p_stop.add_argument("--no-workers", dest="no_workers", action="store_true",
+                        help="Do not stop export/backfill workers with the app")
     p_stop.set_defaults(func=cmd_stop)
 
     p_restart = subparsers.add_parser("restart", help="Restart the app")
     p_restart.add_argument("--env", dest="env_file", help="Env file to restart")
     p_restart.add_argument("--sync", action="store_true", help="Also start sync daemon after restart")
+    p_restart.add_argument("--no-workers", dest="no_workers", action="store_true",
+                           help="Do not start/stop export/backfill workers with the app")
     p_restart.set_defaults(func=cmd_restart)
 
     p_logs = subparsers.add_parser("logs", help="Show log output")
@@ -1440,6 +1712,10 @@ def build_parser() -> argparse.ArgumentParser:
     ps_config = sync_sub.add_parser("config", help="Set or show sync config file")
     ps_config.add_argument("config_file", nargs="?", help="YAML config file path, e.g. settings/obs_base.yaml")
     ps_config.set_defaults(func=cmd_sync_config)
+
+    # --- export / backfill worker subcommands（独立进程，仿 sync 守护模式）---
+    _add_worker_subparser(subparsers, "export", "export_action", cmd_export_worker)
+    _add_worker_subparser(subparsers, "backfill", "backfill_action", cmd_backfill_worker)
 
     # --- key subcommands ---
     p_key = subparsers.add_parser("key", help="API key management (list/add/del/stop/start/config)")

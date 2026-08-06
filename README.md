@@ -134,7 +134,7 @@ pip install -r requirements.txt
 
 ## 启动与管理
 
-推荐使用根目录下的 CLI，而不是手动执行 `bash server.sh start .env`。
+推荐使用根目录下的 CLI（`source env.sh` 后用 `app start`）。
 
 先给 CLI 执行权限：
 
@@ -276,8 +276,12 @@ PROXY_WORKERS=4
 ### 停止 / 重启
 
 多 worker 下一个服务是「1 个 master + N 个 worker」共 N+1 个进程。`./app stop`、`./app restart`
-（以及 `server.sh stop/restart`）会按**进程组**停止，master 和所有 worker 一起退出，不会残留
-占端口的孤儿进程 —— 服务启动时用独立 session（master 是进程组组长），停止时对整个进程组发信号。
+会按**进程组**停止，master 和所有 worker 一起退出，不会残留占端口的孤儿进程 —— 服务启动时用
+独立 session（master 是进程组组长），停止时对整个进程组发信号。
+
+`app start` 默认还会拉起导出、回填两个独立执行进程（`export_worker` / `backfill_worker`），
+`app stop` 一并停止；两者执行已从 app 主进程剥离，不随 app 启动就会导致导出停在 queued、
+回填停在 pending。如只想单独起停 app，用 `app start --no-workers` / `app stop --no-workers`。
 
 ### 注意
 

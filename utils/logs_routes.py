@@ -236,8 +236,18 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         force = bool(body.get("force", False))
         if not os.path.isdir(path):
             return JSONResponse({"ok": False, "msg": f"目录不存在: {path}"}, status_code=400)
-        from utils.newapi_backfill import start_backfill
-        st = start_backfill(path, workers=int(workers) if workers else None, force=force)
+        # 只入队，执行交给独立 backfill_worker 进程（与 app 隔离 CPU/IO）。
+        # 同源去重：已有 pending/running 请求 → 不重复入队（避免两份进程池打架）。
+        norm = os.path.normpath(path)
+        if detect_format(norm) != "newapi":
+            return JSONResponse({"ok": True, "status": {"status": "skipped", "reason": "not a new-api root"}})
+        import utils.logdir_store as lds
+        if lds.has_active_backfill(norm):
+            st = {"status": "running", "root": norm}
+        else:
+            w = int(workers) if workers else 8
+            rid = lds.enqueue_backfill(norm, workers=w, force=force)
+            st = {"status": "queued", "root": norm, "request_id": rid, "workers": w, "force": force}
         return JSONResponse({"ok": True, "status": st})
 
     @app.post("/api/logs-admin/sync")
@@ -399,7 +409,11 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
             import utils.logdir_store as lds
             from utils.logs_config import get_root_id
             rid = get_root_id(path)
-            running = st.get("status") == "running"
+            # 运行态真相源 = backfill_requests 表（回填在独立 worker 进程，app 内存 _status
+            # 已不再有其运行态）。有 pending/running 请求即视为运行中。
+            running = lds.has_active_backfill(os.path.normpath(path)) or st.get("status") == "running"
+            if running:
+                st["status"] = "running"
             if lds.has_any(rid):
                 summ = lds.count_summary(rid)
                 st["db_summary"] = summ

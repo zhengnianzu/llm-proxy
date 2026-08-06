@@ -45,7 +45,7 @@ from utils.channel_routes import register_channel_routes
 from utils.user_routes import register_user_routes
 from utils.export_store import init_db as init_export_db
 from utils.backup_store import init_db as init_backup_db
-from utils.logdir_store import init_db as init_logdir_db, reset_building_on_startup as reset_logdir_building
+from utils.logdir_store import init_db as init_logdir_db
 from utils.backup_routes import register_backup_routes
 from utils.obs_routes import register_obs_routes
 from utils.logs_routes import register_logs_routes
@@ -762,7 +762,9 @@ init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
 init_backup_db(SERVICE_LOG_DIR)
 init_logdir_db(SERVICE_LOG_DIR)
-reset_logdir_building()
+# 注意：leaf_status 的 building→pending 复位与 backfill_requests 的队列清空，已随回填
+# 执行一起剥离到 backfill_worker._init_env。app 启动不再复位，避免误清 worker 正在跑的
+# 叶子（app/worker 各自重启互不干扰）。见 utils/backfill_worker.py。
 # 「数据管理」以 log_dir.db 的 sources 表为唯一数据源，无 YAML 导入。
 # 每次启动刷新活跃目录行（root_id='default'）root_path，空库时补插。
 from utils.logdir_store import _refresh_active_row

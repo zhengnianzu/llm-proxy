@@ -143,9 +143,16 @@ def main() -> int:
     from utils.key_store import init_db as init_key_db
     from utils.export_store import init_db as init_export_db
     from utils.session_store import init_db as init_session_db
+    from utils.logdir_store import init_db as init_logdir_db
     init_session_db(service_log_dir)   # 供 export_session_index / build_stats_multi
     init_export_db(service_log_dir)    # 记录读写（export_session_record.db）
     init_key_db(service_log_dir)       # key 元数据（可选，用于名称展示）
+    # logdir_store 也必须初始化（与 export_worker._init_env 同款）：build_stats_multi /
+    # _resolve_mt 解析 mtime key 里的 <root_id>/ 前缀要读 sources 表
+    # （get_stats_roots → _list_sources → lds.list_sources）。未 init 时 _ready()=False
+    # 使 _list_sources 返回 []，历史 new-api 源（如 de3d5938=jumper）全部丢失 →
+    # get_stats_roots 只剩活跃 env_dir 一个 root，静默漏导那些数据源。
+    init_logdir_db(service_log_dir)    # 数据源注册表（log_dir.db 的 sources 表）
 
     # 延迟导入（依赖上面的 init）
     from utils.stats_index import build_stats_multi

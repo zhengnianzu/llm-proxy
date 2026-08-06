@@ -11,7 +11,8 @@
 #   bash deploy.sh
 # 装完后：
 #   source ~/.bashrc          # 让 uv 进 PATH（或重开 shell）
-#   bash server.sh start .env.xxx
+#   source env.sh             # 加载 app 命令
+#   app start --env .env.xxx  # 启动服务（含导出/回填 worker）
 
 set -euo pipefail
 
@@ -139,7 +140,8 @@ main() {
     log "✅ 部署完成"
     log "下一步:"
     log "  source ~/.bashrc                    # 让 uv 进 PATH（或重开 shell）"
-    log "  bash server.sh start .env.xxx       # 启动服务"
+    log "  source env.sh                       # 加载 app 命令"
+    log "  app start --env .env.xxx            # 启动服务（含导出/回填 worker）"
 }
 
 main "$@"

@@ -99,6 +99,12 @@ def init_db(db_dir: str):
             "workers INTEGER NOT NULL DEFAULT 0",
             "dir_workers INTEGER NOT NULL DEFAULT 0",
             "leaves_cache TEXT NOT NULL DEFAULT ''",
+            # 任务执行参数（JSON），供独立 export_worker 进程从 DB 重建执行上下文，
+            # 不再依赖 app 进程内的内存闭包。见 utils/export_jobs.py。
+            "task_json TEXT NOT NULL DEFAULT ''",
+            # 软删除标记：删除任务=置 1，列表默认过滤掉。行与 obs_dst/local_copy_dir
+            # 等指向云端/本地产物的元数据都保留，误删可恢复。见 delete_record()。
+            "is_delete INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 _conn.execute(f"ALTER TABLE export_records ADD COLUMN {col_def}")
@@ -157,6 +163,66 @@ def update_status(record_id: int, status: str, **kwargs):
         conn.commit()
 
 
+def delete_record(record_id: int, *, purge: bool = False, purge_local: bool = False) -> Optional[dict]:
+    """删除一条导出记录。
+
+    返回被删记录（删前快照）；不存在返回 None。调用方负责状态守卫
+    （running 记录不应删，避免删掉 worker 正在写的行）。
+
+    默认软删除：仅置 is_delete=1，列表默认过滤掉。行与 obs_dst / local_copy_dir
+    等元数据全部保留，误删可 restore_record() 恢复，也不会丢掉指向云端产物的唯一索引。
+
+    purge=True 为永久删除（硬删）：真正 DELETE 行 + 清外置日志文件；再叠加
+    purge_local=True 时递归删本地产物目录 local_copy_dir。硬删不可逆，需调用方显式请求。
+    OBS 云端产物本函数一律不动。
+    """
+    conn = _get_conn()
+    rec = get_record(record_id)
+    if not rec:
+        return None
+    if not purge:
+        # 软删除：改状态，元数据与产物一律保留
+        with _lock:
+            conn.execute("UPDATE export_records SET is_delete = 1 WHERE id = ?", (record_id,))
+            conn.commit()
+        return rec
+    # ---- 以下为永久删除（硬删）路径 ----
+    # 1) DB 行
+    with _lock:
+        conn.execute("DELETE FROM export_records WHERE id = ?", (record_id,))
+        conn.commit()
+    # 2) 外置日志文件：progress_log / analysis_json 等大字段以 file:// 落在 export_log/
+    log_dir = _get_export_log_dir()
+    if log_dir.is_dir():
+        for p in log_dir.glob(f"{record_id}.*.log"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    # 3) 可选：本地产物目录（不可逆，默认不动）
+    if purge_local:
+        local = (rec.get("local_copy_dir") or "").strip()
+        if local and os.path.isdir(local):
+            import shutil
+            try:
+                shutil.rmtree(local)
+            except OSError:
+                pass
+    return rec
+
+
+def restore_record(record_id: int) -> Optional[dict]:
+    """撤销软删除：is_delete 置 0。不存在返回 None。"""
+    conn = _get_conn()
+    rec = get_record(record_id)
+    if not rec:
+        return None
+    with _lock:
+        conn.execute("UPDATE export_records SET is_delete = 0 WHERE id = ?", (record_id,))
+        conn.commit()
+    return rec
+
+
 def save_leaves_cache(record_id: int, leaves: list, warnings: list | None = None) -> None:
     """把某记录的节点分布结果落库（JSON），供之后展开直接读、免重复扫盘。"""
     payload = json.dumps({"leaves": leaves, "warnings": warnings or []}, ensure_ascii=False)
@@ -180,6 +246,43 @@ def get_leaves_cache(record_id: int) -> Optional[dict]:
         return json.loads(raw)
     except (ValueError, TypeError):
         return None
+
+
+def set_task_json(record_id: int, task_json: str) -> None:
+    """持久化任务执行参数（JSON 字符串），供独立 export_worker 进程重建执行上下文。"""
+    conn = _get_conn()
+    with _lock:
+        conn.execute("UPDATE export_records SET task_json = ? WHERE id = ?", (task_json, record_id))
+        conn.commit()
+
+
+def claim_next_queued() -> Optional[dict]:
+    """worker 领取下一条待执行任务：取最老的 queued 记录，原子置为 pending 并返回该行。
+
+    用 UPDATE ... WHERE id=(SELECT ... LIMIT 1) + changes() 判定是否抢到，配合共享连接
+    的 _lock 保证同进程内单次领取；跨进程（多 worker）下 SQLite 行级串行 + 领取后立刻
+    改状态，二次领取会落空（该行已非 queued）。返回 None 表示暂无待执行任务。
+
+    置 pending（而非直接 running）：running 由 _run_task_inner 真正开跑时再置，
+    使「已领取待跑」与「执行中」可区分；cancel_interrupted 会把二者一并清理。
+    """
+    conn = _get_conn()
+    with _lock:
+        row = conn.execute(
+            "SELECT * FROM export_records WHERE status = 'queued' AND is_delete = 0 ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        rec = dict(row)
+        cur = conn.execute(
+            "UPDATE export_records SET status = 'pending' WHERE id = ? AND status = 'queued'",
+            (rec["id"],),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None  # 被其他 worker 抢先
+    rec["status"] = "pending"
+    return rec
 
 
 def get_record(record_id: int) -> Optional[dict]:
@@ -217,7 +320,7 @@ def list_records(limit: int = 100) -> list:
     conn = _get_conn()
     with _lock:
         rows = conn.execute(
-            "SELECT * FROM export_records ORDER BY created_at DESC LIMIT ?", (limit,)
+            "SELECT * FROM export_records WHERE is_delete = 0 ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -226,7 +329,7 @@ def list_records_by_key(key_slot: str, limit: int = 50) -> list:
     conn = _get_conn()
     with _lock:
         rows = conn.execute(
-            "SELECT * FROM export_records WHERE key_slot = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM export_records WHERE key_slot = ? AND is_delete = 0 ORDER BY created_at DESC LIMIT ?",
             (key_slot, limit),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -254,10 +357,10 @@ def list_records_for_datasets(limit: int = 1000, in_manage: Optional[bool] = Non
     in_manage=None: 全部；True: 仅已加入管理列表；False: 仅未加入。
     """
     conn = _get_conn()
-    sql = f"SELECT {_DS_COLS} FROM export_records"
+    sql = f"SELECT {_DS_COLS} FROM export_records WHERE is_delete = 0"
     params: list = []
     if in_manage is not None:
-        sql += " WHERE in_manage = ?"
+        sql += " AND in_manage = ?"
         params.append(1 if in_manage else 0)
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
@@ -306,7 +409,7 @@ def get_records_summary() -> tuple:
     conn = _get_conn()
     with _lock:
         row = conn.execute(
-            "SELECT MAX(id), COUNT(*), SUM(CASE WHEN status IN ('running','queued') THEN 1 ELSE 0 END) FROM export_records"
+            "SELECT MAX(id), COUNT(*), SUM(CASE WHEN status IN ('running','queued') THEN 1 ELSE 0 END) FROM export_records WHERE is_delete = 0"
         ).fetchone()
     return (row[0] or 0, row[1] or 0, row[2] or 0)
 
@@ -316,7 +419,7 @@ def list_records_all_slim(limit_per_key: int = 10) -> dict:
     conn = _get_conn()
     with _lock:
         rows = conn.execute(
-            f"SELECT {_SLIM_COLS} FROM export_records ORDER BY created_at DESC"
+            f"SELECT {_SLIM_COLS} FROM export_records WHERE is_delete = 0 ORDER BY created_at DESC"
         ).fetchall()
     grouped: dict = {}
     for r in rows:

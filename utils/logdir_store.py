@@ -72,6 +72,25 @@ def init_db(db_dir: str):
                 created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
             )
         """)
+        # 回填请求表：把「哪个 root 要回填」从 app 进程内存（newapi_backfill._running）
+        # 搬到 DB，供独立 backfill_worker 进程领取执行、app 进程查询运行态。
+        # 运行态真相 = status='running' 的行；逐叶进度仍以 leaf_status(count_summary) 为准。
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS backfill_requests (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                root        TEXT NOT NULL,
+                workers     INTEGER NOT NULL DEFAULT 8,
+                force       INTEGER NOT NULL DEFAULT 0,
+                status      TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
+                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                started_at  TEXT,
+                finished_at TEXT,
+                error       TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_backfill_requests_status ON backfill_requests(status)"
+        )
         _conn.commit()
 
 
@@ -382,3 +401,108 @@ def reset_building_on_startup():
             "UPDATE leaf_status SET state = 'pending' WHERE state = 'building'"
         )
         _conn.commit()
+
+
+# ── 回填请求队列（backfill_requests 表）─────────────────────────────────
+# app 侧入队 / 查询运行态；backfill_worker 侧领取 / 完成。跨进程靠此表 + WAL。
+# 运行态真相 = status='running' 的行；逐叶进度仍读 count_summary(leaf_status)。
+
+_BACKFILL_ACTIVE = ("pending", "running")
+
+
+def enqueue_backfill(root: str, workers: int = 8, force: bool = False) -> int:
+    """入队一条回填请求，返回新记录 id。调用方应先 has_active_backfill 去重。"""
+    if not _ready():
+        raise RuntimeError("logdir_store not initialized")
+    root = os.path.normpath(root)
+    with _lock:
+        cur = _conn.execute(
+            "INSERT INTO backfill_requests (root, workers, force, status) "
+            "VALUES (?, ?, ?, 'pending')",
+            (root, int(workers or 8), 1 if force else 0),
+        )
+        _conn.commit()
+        return cur.lastrowid
+
+
+def has_active_backfill(root: str) -> bool:
+    """该 root 是否已有 pending/running 请求（同源去重，避免两份进程池打架）。"""
+    if not _ready():
+        return False
+    root = os.path.normpath(root)
+    with _lock:
+        row = _conn.execute(
+            "SELECT 1 FROM backfill_requests WHERE root = ? AND status IN ('pending','running') LIMIT 1",
+            (root,),
+        ).fetchone()
+    return row is not None
+
+
+def list_active_backfill() -> List[dict]:
+    """所有 pending/running 请求行（按 id）。供 UI/导出页展示排队与运行。"""
+    if not _ready():
+        return []
+    with _lock:
+        rows = _conn.execute(
+            "SELECT * FROM backfill_requests WHERE status IN ('pending','running') ORDER BY id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def claim_next_backfill() -> Optional[dict]:
+    """worker 领取下一条 pending 请求：最老的一条原子置 running 并返回。
+
+    UPDATE ... WHERE id=? AND status='pending' + rowcount 判定抢占；多 worker/重复
+    领取会落空（该行已非 pending）。返回 None 表示暂无待执行请求。
+    """
+    if not _ready():
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT * FROM backfill_requests WHERE status = 'pending' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        rec = dict(row)
+        cur = _conn.execute(
+            "UPDATE backfill_requests SET status = 'running', "
+            "started_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'",
+            (rec["id"],),
+        )
+        _conn.commit()
+        if cur.rowcount == 0:
+            return None  # 被其他 worker 抢先
+    rec["status"] = "running"
+    return rec
+
+
+def complete_backfill(req_id: int, ok: bool, error: str = "") -> None:
+    """标记请求终态：ok→done，否则→failed（附 error）。"""
+    if not _ready():
+        return
+    with _lock:
+        _conn.execute(
+            "UPDATE backfill_requests SET status = ?, error = ?, "
+            "finished_at = datetime('now','localtime') WHERE id = ?",
+            ("done" if ok else "failed", error or "", req_id),
+        )
+        _conn.commit()
+
+
+def reset_running_backfill_on_startup() -> int:
+    """worker 启动时把上次中断的 running/pending 请求标 failed（队列从零开始）。
+
+    与 export_store.cancel_interrupted 同语义：崩溃/重启视为放弃在途请求，
+    用户可在页面重新发起。返回受影响行数。leaf_status 的 building→pending 由
+    reset_building_on_startup 单独处理。
+    """
+    if not _ready():
+        return 0
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE backfill_requests SET status = 'failed', "
+            "error = '服务重启，队列已清空', finished_at = datetime('now','localtime') "
+            "WHERE status IN ('pending', 'running')"
+        )
+        _conn.commit()
+    return cur.rowcount

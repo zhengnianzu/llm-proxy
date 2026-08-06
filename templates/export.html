@@ -315,6 +315,7 @@
                                     <span v-else-if="t.mode === 'eval' && t.status === 'success'" class="op"
                                           :style="t._importing ? 'opacity:.5;cursor:not-allowed' : ''"
                                           @click="opsOpen = null; openNameModal(t)">{{ t._importing ? '导入中…' : '导入数据集' }}</span>
+                                    <span v-if="t.status === 'draft' || t.status === 'success' || t.status === 'failed' || t.status === 'cancelled'" class="op op-danger" @click="opsOpen = null; deleteTask(t)">删除</span>
                                 </div>
                             </div>
                         </div>
@@ -1181,6 +1182,25 @@ new Vue({
                     this.fetchRecordsSlim();
                 } else {
                     this.error = d.detail || '重试失败';
+                }
+            }.bind(this)).catch(function(e) {
+                this.error = '请求失败: ' + e;
+            }.bind(this));
+        },
+        deleteTask: function(r) {
+            // 软删除：仅从列表移除（is_delete=1）。记录行、本地产物、OBS 云端全部保留，误删可恢复。
+            if (!confirm('从列表移除该导出记录？\n\n这是软删除：记录与本地产物、OBS 云端都会保留，之后可恢复。')) {
+                return;
+            }
+            fetch('/api/export/delete', {
+                method: 'POST',
+                headers: this._h({'Content-Type': 'application/json'}),
+                body: JSON.stringify({record_id: r.id}),
+            }).then(function(res) { return res.json(); }).then(function(d) {
+                if (d.deleted) {
+                    this.fetchRecordsSlim();
+                } else {
+                    this.error = d.detail || '删除失败';
                 }
             }.bind(this)).catch(function(e) {
                 this.error = '请求失败: ' + e;
