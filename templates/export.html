@@ -42,6 +42,18 @@
 .task-ops .op-warn { color: var(--warning); }
 .task-ops .op-ok { color: var(--success); }
 .task-ops .op-muted { color: var(--muted-foreground); cursor: default; }
+/* 操作列「更多」下拉 */
+.ops-more { position: relative; display: inline-block; }
+.ops-more .op { cursor: pointer; font-size: .8rem; color: var(--primary); font-weight: 600; white-space: nowrap; }
+.ops-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; min-width: 150px;
+             background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+             box-shadow: 0 4px 14px rgba(0,0,0,.18); padding: 4px; }
+.ops-menu .op { display: block; padding: 7px 12px; border-radius: 6px; font-weight: 500; }
+.ops-menu .op:hover { background: color-mix(in srgb, var(--primary) 10%, transparent); text-decoration: none; }
+.ops-menu .op-danger { color: var(--destructive); }
+.ops-menu .op-warn { color: var(--warning); }
+.ops-menu .op-ok { color: var(--success); }
+.ops-menu .op-muted { color: var(--muted-foreground); cursor: default; }
 .obs-path { font-family: var(--font-mono); font-size: .76rem; color: var(--muted-foreground); word-break: break-all; cursor: pointer; }
 .obs-path:hover { color: var(--primary); }
 
@@ -290,16 +302,21 @@
                     </td>
                     <td>
                         <div class="task-ops">
-                            <span class="op" @click="openLogDrawer(t.id)">[日志]</span>
-                            <span v-if="t.status === 'draft'" class="op op-ok" @click="startTask(t)">[启动]</span>
-                            <span v-if="t.status === 'running' || t.status === 'queued' || t.status === 'pending'" class="op op-danger" @click="cancelTask(t)">[终止]</span>
-                            <span v-if="t.status === 'failed' || t.status === 'cancelled'" class="op" @click="retryTask(t)">[重试]</span>
-                            <span v-if="t.status === 'failed' && t.obs_dst && t.local_copy_dir" class="op op-warn" @click="retryUpload(t)">[重试上传]</span>
-                            <span v-if="t.mode === 'eval' && t.status === 'success'" class="op op-ok" @click="openReport(t.id)">[报告]</span>
-                            <span v-if="t.mode === 'eval' && t.status === 'success' && t.in_manage" class="op op-muted" title="该导出已在 Session 管理列表中">[已在管理]</span>
-                            <span v-else-if="t.mode === 'eval' && t.status === 'success'" class="op"
-                                  :style="t._importing ? 'opacity:.5;cursor:not-allowed' : ''"
-                                  @click="openNameModal(t)">{{ t._importing ? '[导入中…]' : '[导入数据集]' }}</span>
+                            <div class="ops-more">
+                                <span class="op" @click.stop="opsOpen = opsOpen === t.id ? null : t.id">更多 ▾</span>
+                                <div v-if="opsOpen === t.id" class="ops-menu" @click.stop>
+                                    <span class="op" @click="opsOpen = null; openLogDrawer(t.id)">日志</span>
+                                    <span v-if="t.status === 'draft'" class="op op-ok" @click="opsOpen = null; startTask(t)">启动</span>
+                                    <span v-if="t.status === 'running' || t.status === 'queued' || t.status === 'pending'" class="op op-danger" @click="opsOpen = null; cancelTask(t)">终止</span>
+                                    <span v-if="t.status === 'failed' || t.status === 'cancelled'" class="op" @click="opsOpen = null; retryTask(t)">重试</span>
+                                    <span v-if="t.status === 'failed' && t.obs_dst && t.local_copy_dir" class="op op-warn" @click="opsOpen = null; retryUpload(t)">重试上传</span>
+                                    <span v-if="t.mode === 'eval' && t.status === 'success'" class="op op-ok" @click="opsOpen = null; openReport(t.id)">报告</span>
+                                    <span v-if="t.mode === 'eval' && t.status === 'success' && t.in_manage" class="op op-muted" title="该导出已在 Session 管理列表中">已在管理</span>
+                                    <span v-else-if="t.mode === 'eval' && t.status === 'success'" class="op"
+                                          :style="t._importing ? 'opacity:.5;cursor:not-allowed' : ''"
+                                          @click="opsOpen = null; openNameModal(t)">{{ t._importing ? '导入中…' : '导入数据集' }}</span>
+                                </div>
+                            </div>
                         </div>
                     </td>
                 </tr>
@@ -531,6 +548,8 @@ new Vue({
         logDirFilter: '',
         statusFilter: '',
         modeFilter: '',
+        // 操作列「更多」下拉：记录当前展开哪一行的菜单（null = 全部收起）
+        opsOpen: null,
 
         // 新建任务 Modal 第一步选 key 的筛选（与主列表筛选相互独立，不联动）
         mKeyFilter: '',
@@ -703,12 +722,16 @@ new Vue({
         this.backfillTimer = setInterval(function() { self.fetchBackfill(); }, 4000);
         // 任务表轮询：轻量 records-slim（完整任务表），3s 更新状态/进度
         this.recordsTimer = setInterval(function() { self.fetchRecordsSlim(); }, 3000);
+        // 点击页面其它地方时收起「更多」下拉
+        this._opsClose = function() { self.opsOpen = null; };
+        document.addEventListener('click', this._opsClose);
     },
     beforeDestroy: function() {
         if (this.pollTimer) clearInterval(this.pollTimer);
         if (this.logPollTimer) clearInterval(this.logPollTimer);
         if (this.backfillTimer) clearInterval(this.backfillTimer);
         if (this.recordsTimer) clearInterval(this.recordsTimer);
+        if (this._opsClose) document.removeEventListener('click', this._opsClose);
     },
     methods: {
         _h: function(extra) { return Object.assign({'X-Requested-With': 'XMLHttpRequest'}, extra || {}); },
