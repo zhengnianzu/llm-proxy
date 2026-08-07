@@ -55,6 +55,8 @@ def _describe(src: dict, active: bool, active_env_dir: str = "") -> dict:
     fmt = src.get("format") or (detect_format(path) if exists else "missing")
     leaf_count = 0
     built_count = 0
+    building_count = 0
+    build_status = "unknown"
     synced = False
     if exists:
         # 节点数/已 index 数：统一以 log_dir.db 为准（count_summary），首屏不扫盘。
@@ -72,15 +74,28 @@ def _describe(src: dict, active: bool, active_env_dir: str = "") -> dict:
                     summ = lds.count_summary(rid)
                     leaf_count = summ.get("total", 0)
                     built_count = summ.get("built", 0)
+                    # 构建状态:仅反映 backfill 任务状态(running/pending/无)
+                    norm_path = os.path.normpath(path)
+                    if lds.has_active_backfill(norm_path):
+                        active_req = lds.get_active_backfill_request(norm_path)
+                        if active_req and active_req.get("status") == "running":
+                            build_status = "building"  # 正在进行(闪烁)
+                        else:
+                            build_status = "queued"    # 排队
+                    else:
+                        build_status = "none"  # 无活跃任务
                 elif fmt == "native":
                     # native 从未同步：不首屏扫盘，标未统计，前端提示先「同步」。
                     leaf_count = None
+                    build_status = "none"  # 无活跃任务
             except Exception:
                 synced = False
+                build_status = "none"
         else:
             # 其它非 newapi/native 源：叶子计数需网络盘全量递归遍历（iter_index_dirs），慢，
             # 移出 list 热路径；leaf_count 置 None，前端显示占位 + 「统计」按钮按需触发。
             leaf_count = None
+            build_status = "none"  # 非 newapi/native,不参与回填构建
 
     return {
         "path": path,
@@ -91,6 +106,8 @@ def _describe(src: dict, active: bool, active_env_dir: str = "") -> dict:
         "format": fmt,
         "leaf_count": leaf_count,
         "built_count": built_count,
+        "building_count": building_count,
+        "build_status": build_status,
         "synced": synced,
         "templates": templates,
         "status": "活跃" if active else "历史",

@@ -757,11 +757,36 @@ def _resp_to_obj(r):  # httpx.Response -> dict
 
 # 启动时初始化
 init_key_db(SERVICE_LOG_DIR)
+# 全局路径注册表,供各模块快速查询
+ALL_PATH = os.path.join(SERVICE_LOG_DIR, "log_paths.json")
+
 init_key_config(SERVICE_LOG_DIR)
 init_channel_db(SERVICE_LOG_DIR)
 init_export_db(SERVICE_LOG_DIR)
 init_backup_db(SERVICE_LOG_DIR)
 init_logdir_db(SERVICE_LOG_DIR)
+
+# 写入路径注册表 log_paths.json,供 worker 快速读取,免解析环境变量
+def _write_log_paths_registry():
+    """写入全局路径注册表到 logs/port{PORT}/log_paths.json。"""
+    import json
+    registry = {
+        "service_log_dir": SERVICE_LOG_DIR,
+        "export_db": os.path.join(SERVICE_LOG_DIR, "export_session_record.db"),
+        "logdir_db": os.path.join(SERVICE_LOG_DIR, "log_dir.db"),
+        "logs_all": ENV_DIR,
+        "backfill_log": os.path.join(SERVICE_LOG_DIR, "backfill.log"),
+        "export_log": os.path.join(SERVICE_LOG_DIR, "export_log"),
+    }
+    registry_path = os.path.join(SERVICE_LOG_DIR, "log_paths.json")
+    try:
+        with open(registry_path, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass  # 写失败不影响启动,worker 回退到解析环境变量
+
+_write_log_paths_registry()
+
 # 注意：leaf_status 的 building→pending 复位与 backfill_requests 的队列清空，已随回填
 # 执行一起剥离到 backfill_worker._init_env。app 启动不再复位，避免误清 worker 正在跑的
 # 叶子（app/worker 各自重启互不干扰）。见 utils/backfill_worker.py。

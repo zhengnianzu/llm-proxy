@@ -1364,7 +1364,7 @@ class WorkerSpec:
 
 _WORKER_SPECS = {
     "export": WorkerSpec("export", "utils.export_worker", "export_services"),
-    "backfill": WorkerSpec("backfill", "utils.backfill_worker", "backfill_services"),
+    "backfill": WorkerSpec("backfill", "src.backfill.worker", "backfill_services"),
 }
 
 

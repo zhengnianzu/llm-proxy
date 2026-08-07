@@ -188,6 +188,17 @@ def count_summary(root_id: str) -> dict:
     return {k: (row[k] or 0) for k in ("total", "built", "pending", "building", "error")}
 
 
+def get_last_leaf_synced_at(root_id: str) -> Optional[str]:
+    """返回该 root 最后一次叶子同步时间（max(synced_at)），用于检测是否长时间无更新。"""
+    if not _ready():
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT MAX(synced_at) FROM leaf_status WHERE root_id = ?", (root_id,)
+        ).fetchone()
+    return row[0] if row and row[0] else None
+
+
 def has_any(root_id: str) -> bool:
     """该源是否已同步过（DB 里是否有其叶子记录）。"""
     if not _ready():
@@ -436,6 +447,19 @@ def has_active_backfill(root: str) -> bool:
             (root,),
         ).fetchone()
     return row is not None
+
+
+def get_active_backfill_request(root: str) -> Optional[dict]:
+    """返回该 root 的活跃请求详情(pending/running),供构建状态判断 status。"""
+    if not _ready():
+        return None
+    root = os.path.normpath(root)
+    with _lock:
+        row = _conn.execute(
+            "SELECT * FROM backfill_requests WHERE root = ? AND status IN ('pending','running') ORDER BY id LIMIT 1",
+            (root,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def list_active_backfill() -> List[dict]:
