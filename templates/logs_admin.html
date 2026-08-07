@@ -236,7 +236,8 @@
                                 <template v-if="r.exists && r.format === 'newapi'">
                                     <button @click="menuAction(r.path, 'buildlog')">构建日志</button>
                                     <button @click="menuAction(r.path, 'incremental')"
-                                        :disabled="isBuilding(r)">增量构建</button>
+                                        :disabled="isBuilding(r)"
+                                        :style="isBuilding(r) ? 'opacity: 0.5; cursor: not-allowed;' : ''">增量构建</button>
                                 </template>
                                 <div class="divider" v-if="(r.exists && (r.format === 'newapi' || r.format === 'native')) && !r.active"></div>
                                 <button v-if="!r.active" @click="menuAction(r.path, 'rename')">改名</button>
