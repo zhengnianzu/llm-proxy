@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tools/offline_reformat_export.py — 离线批量 reformat 导出（对齐 Web 版）
+tools/offline_reformat_export.py — 离线批量导出（对齐 Web 版）
 
 对当前所有 key，逐个 key 做「合并导出（reformat）」：
   1) build_stats_multi 拿到每个 key 的 full api_key + 全部 mtime 目录；
@@ -15,6 +15,14 @@ tools/offline_reformat_export.py — 离线批量 reformat 导出（对齐 Web �
 
 即：网页版 reformat 导出的离线跑版本。
 
+另支持 --mode reconstruct（Hermes 轨迹重构，仅 new-api 合并文件）：
+  与 reformat 共享同一「session 迭代并行」框架，但每个 session 不是只取
+  latest_file 合并成单文件，而是用 hermes_traj 聚合其 trace_list 指向的
+  多个合并文件（按最后 user 锚点分组 → 保留极大分支 → 去重精确重放 →
+  回填 reasoning_content），输出重构后的合并文件 + 每 session 的
+  _manifest.jsonl。本地落 logs_session_reconstruct/，OBS 走 session_reconstruct/
+  前缀；非 new-api 叶子（native 三元组）没有合并文件，直接跳过（warning）。
+
 用法（在项目根目录 /mnt/llm-proxy-main 下运行）：
   python3 tools/offline_reformat_export.py                 # 所有 key，全部 mtime，上传 OBS
   python3 tools/offline_reformat_export.py --no-obs        # 只本地导出，不传 OBS
@@ -22,6 +30,7 @@ tools/offline_reformat_export.py — 离线批量 reformat 导出（对齐 Web �
   python3 tools/offline_reformat_export.py --key Kjfu      # 只导后4位为 Kjfu 的 key（或 --key key-Kjfu）
   python3 tools/offline_reformat_export.py --mtime 260803  # 只导匹配的 mtime 目录（可多次，子串匹配）
   python3 tools/offline_reformat_export.py --threshold 5   # qualified 阈值（同 Web，默认 5）
+  python3 tools/offline_reformat_export.py --mode reconstruct  # Hermes 轨迹重构导出（仅 new-api）
   python3 tools/offline_reformat_export.py --dry-run       # 只打印计划，不执行
   python3 tools/offline_reformat_export.py \
       --service-log-dir logs/port8084/env-99oR \
@@ -113,6 +122,8 @@ def main() -> int:
     ap.add_argument("--env-dir", default="",
                     help="ENV_DIR，形如 logs_all/env-99oR。默认从 app-meta 自动探测")
     ap.add_argument("--threshold", type=int, default=5, help="qualified 阈值（同 Web，默认 5）")
+    ap.add_argument("--mode", default="reformat", choices=["reformat", "reconstruct"],
+                    help="导出方式: reformat=合并导出（默认）; reconstruct=Hermes 轨迹重构（仅 new-api 合并文件）")
     ap.add_argument("--key", action="append", default=[],
                     help="只导指定 key（可多次）；支持完整 api_key / key-XXXX slot / 后4位；缺省=所有 key")
     ap.add_argument("--mtime", action="append", default=[],
@@ -159,8 +170,17 @@ def main() -> int:
     from utils.logs_config import get_stats_roots, get_root_id
     from utils.export_store import create_record, update_status, append_log, get_record
     from utils.export_sync import export_session_index, sync_session_index, _load_session_index
-    from utils.eval.reformat import reformat_and_analyze
     from utils.obs_utils import run_upload_cmd, load_obs_base, load_sync_config
+
+    # 处理器按 mode 切换：reformat=合并导出（对齐 Web），reconstruct=Hermes 轨迹重构。
+    # 两者共享同一「session 迭代并行」框架（_run_one_export），只是每 session 的处理不同。
+    mode = args.mode
+    if mode == "reconstruct":
+        from utils.eval.reconstruct import reconstruct_and_export as _processor
+        _mode_label = "重构导出"
+    else:
+        from utils.eval.reformat import reformat_and_analyze as _processor
+        _mode_label = "合并导出"
 
     # --- 复刻 export_routes 里的 mtime 解析辅助（多 root 前缀感知） ---
     def _all_roots():
@@ -259,19 +279,19 @@ def main() -> int:
         logger.info("dry-run，结束。")
         return 0
 
-    # --- 逐 key 执行 reformat（复刻 _run_task_inner 的 reformat 分支） ---
+    # --- 逐 key 执行导出（复刻 _run_task_inner 的 reformat/reconstruct 分支） ---
     ok_cnt = fail_cnt = 0
     for api_key, mt_keys in plan:
-        rc = _run_one_reformat(
+        rc = _run_one_export(
             api_key=api_key, mtime_dirs=mt_keys,
             env_dir_p=env_dir_p, env_key_name=env_key_name,
             obs_prefix=obs_prefix, workers=workers, upload_script=upload_script,
+            mode=mode, _mode_label=_mode_label, processor=_processor,
             _key_slot=_key_slot, _resolve_mt=_resolve_mt, _log_dir_key=_log_dir_key,
             create_record=create_record, update_status=update_status,
             append_log=append_log, get_record=get_record,
             export_session_index=export_session_index,
             _load_session_index=_load_session_index,
-            reformat_and_analyze=reformat_and_analyze,
             run_upload_cmd=run_upload_cmd,
         )
         if ok_cnt is not None and rc:
@@ -283,42 +303,54 @@ def main() -> int:
     return 0 if fail_cnt == 0 else 1
 
 
-def _run_one_reformat(*, api_key, mtime_dirs, env_dir_p, env_key_name,
+def _run_one_export(*, api_key, mtime_dirs, env_dir_p, env_key_name,
                       obs_prefix, workers, upload_script,
+                      mode, _mode_label, processor,
                       _key_slot, _resolve_mt, _log_dir_key,
                       create_record, update_status, append_log, get_record,
                       export_session_index, _load_session_index,
-                      reformat_and_analyze, run_upload_cmd) -> bool:
-    """对单个 key 执行 reformat 导出，写记录并回写状态。返回 True=success。
+                      run_upload_cmd) -> bool:
+    """对单个 key 执行导出，写记录并回写状态。返回 True=success。
 
-    严格对齐 utils/export_routes.py::_run_task_inner 的 mode=="reformat" 分支：
+    严格对齐 utils/export_routes.py::_run_task_inner 的 reformat 分支：
     obs_sub / local_base / obs_dst 路径规则、日志文案、上传方式、字段回写全部一致。
+
+    mode: "reformat"（合并导出，对齐 Web）或 "reconstruct"（Hermes 轨迹重构）。
+    processor: 每 session 的处理函数（reformat_and_analyze / reconstruct_and_export，
+        两者同签名，仅每 session 处理方式不同）。reconstruct 仅在 new-api 叶子生效，
+        非 new-api（native 三元组）叶子直接跳过（warning，不判失败）。
     """
     _api_key = "" if api_key == "(empty)" else api_key
     slot = _key_slot(_api_key)
     now_tag = datetime.now().strftime("%y%m%d%H%M%S")
 
-    # 建记录（与 Web 的 /api/export/run 一致：mode=reformat）
+    # 建记录（与 Web 的 /api/export/run 一致：reformat / reconstruct）
     record_id = create_record(
         api_key=_api_key, key_slot=slot,
         mtime_dirs=json.dumps(mtime_dirs),
         obs_dst="", local_copy_dir="",
-        mode="reformat",
+        mode=mode,
     )
     _log = lambda msg: append_log(record_id, msg)
 
     try:
         update_status(record_id, "running")
 
-        # local_base / obs_dst 规则完全对齐 _run_task_inner（reformat → session_analysis）
-        local_base = (env_dir_p.parent.parent / "logs_session_analysis" /
-                      env_key_name / slot / f"ex-{now_tag}").resolve()
-        obs_sub = "session_analysis"
+        # local_base / obs_dst 规则完全对齐 _run_task_inner：
+        # reformat → session_analysis；reconstruct → session_reconstruct（平行路径，互不混放）
+        if mode == "reconstruct":
+            local_base = (env_dir_p.parent.parent / "logs_session_reconstruct" /
+                          env_key_name / slot / f"ex-{now_tag}").resolve()
+            obs_sub = "session_reconstruct"
+        else:
+            local_base = (env_dir_p.parent.parent / "logs_session_analysis" /
+                          env_key_name / slot / f"ex-{now_tag}").resolve()
+            obs_sub = "session_analysis"
         obs_dst = f"{obs_prefix}/{obs_sub}/{env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
         local_base.mkdir(parents=True, exist_ok=True)
         update_status(record_id, "running", obs_dst=obs_dst, local_copy_dir=str(local_base))
 
-        _log(f"开始合并导出: key_slot={slot}, mtime_dirs={mtime_dirs}")
+        _log(f"开始{_mode_label}: key_slot={slot}, mtime_dirs={mtime_dirs}")
         _log(f"本地目录: {local_base}")
         if obs_dst:
             _log(f"OBS 目标: {obs_dst}")
@@ -347,6 +379,16 @@ def _run_one_reformat(*, api_key, mtime_dirs, env_dir_p, env_key_name,
                     warnings.append(f"{mt}: 索引未构建/不完整，已跳过（检查异常: {_pe}）")
                     continue
 
+                # reconstruct 只认 new-api 合并文件：native 三元组叶子没有合并文件，
+                # hermes 聚合器读不到顶层 req，跳过（warning 非致命，与索引未构建同语义）。
+                if mode == "reconstruct":
+                    from utils.log_scan import detect_format as _df_fmt
+                    fmt = _df_fmt(mt_src)
+                    if fmt != "newapi":
+                        _log(f"[{mt}] 目录格式 {fmt}，重构导出仅支持 new-api 合并文件，跳过")
+                        warnings.append(f"{mt}: 非 new-api 格式（{fmt}），已跳过")
+                        continue
+
                 _log(f"[{mt}] 生成 session_index...")
                 exp_result = export_session_index(mt_src, force=False)
                 _log(f"[{mt}] session_index: {exp_result.get('total_sessions', 0)} sessions"
@@ -362,25 +404,27 @@ def _run_one_reformat(*, api_key, mtime_dirs, env_dir_p, env_key_name,
                 if _api_key:
                     _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 {len(session_entries)}")
 
-                _log(f"[{mt}] 进入 reformat: {len(session_entries)} sessions, workers={workers}...")
-                ra_result = reformat_and_analyze(
+                _log(f"[{mt}] 进入{_mode_label}: {len(session_entries)} sessions, workers={workers}...")
+                processor_kwargs = dict(
                     src_dir=mt_src, out_dir=str(local_base),
                     session_entries=session_entries, api_key=_api_key, workers=workers,
                     progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
                     log_dir=_log_dir_key(mt_src),
-                    analyze=False,
                 )
+                if mode == "reformat":
+                    processor_kwargs["analyze"] = False  # 与 Web reformat-only 一致
+                ra_result = processor(**processor_kwargs)
                 all_results.extend(ra_result["results"])
                 all_entries.extend(session_entries)
                 total_sessions += len(ra_result["results"])
-                _log(f"[{mt}] reformat 返回: results={ra_result['total_files']}, "
+                _log(f"[{mt}] {_mode_label}返回: results={ra_result['total_files']}, "
                      f"errors={len(ra_result.get('errors', []))}")
             except Exception as e:
                 _log(f"[{mt}] 错误: {e}")
                 errors.append(f"{mt}: {e}")
-                logger.exception("reformat failed for %s", mt)
+                logger.exception("%s failed for %s", mode, mt)
 
-        # reformat 收尾：写 session_index.jsonl 清单 + 整目录上传（对齐 Web）
+        # 收尾：写 session_index.jsonl 清单 + 整目录上传（对齐 Web）
         if all_results:
             idx_path = local_base / "session_index.jsonl"
             with open(idx_path, "w", encoding="utf-8") as f:
@@ -407,7 +451,7 @@ def _run_one_reformat(*, api_key, mtime_dirs, env_dir_p, env_key_name,
                 reason = f"无 session 数据{warn_suffix}" if warnings else "无 session 数据"
             else:
                 reason = "; ".join(errors) + warn_suffix
-            _log(f"合并导出失败: {reason}")
+            _log(f"{_mode_label}失败: {reason}")
             update_status(record_id, "failed",
                           error_message=reason,
                           total_sessions=total_sessions,
@@ -416,7 +460,7 @@ def _run_one_reformat(*, api_key, mtime_dirs, env_dir_p, env_key_name,
             logger.warning("record %s (slot=%s) FAILED: %s", record_id, slot, reason)
             return False
         else:
-            msg = f"合并导出完成: {total_sessions} sessions"
+            msg = f"{_mode_label}完成: {total_sessions} sessions"
             if warnings:
                 msg += f"，{len(warnings)} 个目录跳过（索引未构建）"
             _log(msg)
@@ -429,7 +473,7 @@ def _run_one_reformat(*, api_key, mtime_dirs, env_dir_p, env_key_name,
             return True
 
     except Exception as exc:
-        logger.exception("_run_one_reformat crashed (record=%s)", record_id)
+        logger.exception("_run_one_export crashed (record=%s)", record_id)
         try:
             _log(f"任务异常终止: {exc}")
         except Exception:
