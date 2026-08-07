@@ -312,13 +312,20 @@ def _run_upload_only(record_id, local_copy_dir, obs_dst):
 
 def _run_task(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force=False):
     from utils.eval.reformat import reformat_and_analyze
+    from utils.eval.reconstruct import reconstruct_and_export
     from utils.eval.eval import evaluate_sessions
     from utils.obs_sync import _run_upload_cmd
 
     _log = lambda msg: append_log(record_id, msg)
     try:
-        _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
-                        reformat_and_analyze, evaluate_sessions, _run_upload_cmd, _log)
+        # reconstruct 与 reformat/eval 同框架但 processor 不同：前者逐 session 聚合多个
+        # trace 文件（去重 + 保留分支 + 回填 reasoning），后者只处理 latest_file。
+        if mode == "reconstruct":
+            _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
+                            reconstruct_and_export, evaluate_sessions, _run_upload_cmd, _log)
+        else:
+            _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
+                            reformat_and_analyze, evaluate_sessions, _run_upload_cmd, _log)
     except Exception as exc:
         logger.exception("_run_task crashed (record=%s)", record_id)
         try:
@@ -355,7 +362,10 @@ def _run_task_from_record(record_id: int, params: dict) -> None:
 
 
 def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
-                    reformat_and_analyze, evaluate_sessions, _run_upload_cmd, _log):
+                    processor, evaluate_sessions, _run_upload_cmd, _log):
+    """逐 mtime 目录并行导出。processor 按 mode 注入：
+    reformat/eval → reformat_and_analyze（analyze 按 mode 开/关）；
+    reconstruct → reconstruct_and_export（无 analyze 参数，逐 session 聚合多个 trace）。"""
     rec = get_record(record_id)
     update_status(record_id, "running")
 
@@ -376,6 +386,11 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
     if mode == "export":
         local_base = _env_dir.parent.parent / "logs_session" / _env_key_name / slot / f"ex-{now_tag}"
         obs_sub = "session"
+    elif mode == "reconstruct":
+        # hermes 重构聚合：每 session 落多个聚合文件 + _manifest.jsonl，
+        # 走 session_reconstruct/（平行于 session_analysis/，互不混放）
+        local_base = (_env_dir.parent.parent / "logs_session_reconstruct" / _env_key_name / slot / f"ex-{now_tag}").resolve()
+        obs_sub = "session_reconstruct"
     else:
         # eval 与 reformat 都产出合并后的 session JSON，落 session_analysis 目录
         local_base = (_env_dir.parent.parent / "logs_session_analysis" / _env_key_name / slot / f"ex-{now_tag}").resolve()
@@ -386,7 +401,7 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
 
     update_status(record_id, "running", obs_dst=obs_dst, local_copy_dir=str(local_base))
 
-    _mode_label = {"eval": "质检", "reformat": "合并导出"}.get(mode, "导出")
+    _mode_label = {"eval": "质检", "reformat": "合并导出", "reconstruct": "重构导出"}.get(mode, "导出")
     _log(f"开始{_mode_label}: key_slot={slot}, mtime_dirs={mtime_dirs}")
     _log(f"本地目录: {local_base}")
     if obs_dst:
@@ -412,11 +427,18 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
             return res
         mt_src = _resolve_mt_for(_env_dir, mt) or str(_env_dir / mt)
         try:
-            # new-api：导出不触发回填。若 index.db 未构建/不完整，不静默导出不完整数据，
-            # 而是提示用户先在数据管理界面手动构建索引（needs_build 只读、不起进程池）。
+            # 格式检测：new-api 导出不触发回填；reconstruct 仅支持 new-api 合并文件，
+            # native 三元组叶子没有合并文件实物（hermes 聚合器读合并文件本身，见
+            # doc/REAMDE_traj.md §3.2），在生成 session_index 前就跳过，省一次构建。
             try:
                 from utils.log_scan import detect_format as _df
-                if _df(mt_src) == "newapi":
+                _fmt = _df(mt_src)
+                if mode == "reconstruct" and _fmt != "newapi":
+                    _log(f"[{mt}] 目录格式 {_fmt}，重构导出仅支持 new-api 合并文件，跳过")
+                    res["warnings"].append(f"{mt}: 非 new-api 格式（{_fmt}），已跳过")
+                    res["skip"] = True
+                    return res
+                if _fmt == "newapi":
                     import utils.newapi_index_db as _nidb
                     if _nidb.needs_build(mt_src):
                         _log(f"[{mt}] 索引未构建/不完整，跳过；请先在数据管理界面手动构建索引后再导出")
@@ -461,20 +483,30 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                     return res
                 if api_key:
                     _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 {len(session_entries)}")
-                _do_analyze = (mode == "eval")
-                _step = "reformat+analyze" if _do_analyze else "reformat"
-                _log(f"[{mt}] 进入 {_step}: {len(session_entries)} sessions, workers={workers}...")
-                ra_result = reformat_and_analyze(
-                    src_dir=mt_src, out_dir=str(local_base),
-                    session_entries=session_entries, api_key=api_key, workers=workers,
-                    progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
-                    log_dir=_log_dir_key_for(_env_dir, mt_src),
-                    analyze=_do_analyze,
-                )
+                if mode == "reconstruct":
+                    # 格式守卫已在上方 detect_format 处提前拦截（非 new-api 已跳过）。
+                    _log(f"[{mt}] 进入 hermes 重构: {len(session_entries)} sessions, workers={workers}...")
+                    ra_result = processor(
+                        src_dir=mt_src, out_dir=str(local_base),
+                        session_entries=session_entries, api_key=api_key, workers=workers,
+                        progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
+                        log_dir=_log_dir_key_for(_env_dir, mt_src),
+                    )
+                else:
+                    _do_analyze = (mode == "eval")
+                    _step = "reformat+analyze" if _do_analyze else "reformat"
+                    _log(f"[{mt}] 进入 {_step}: {len(session_entries)} sessions, workers={workers}...")
+                    ra_result = processor(
+                        src_dir=mt_src, out_dir=str(local_base),
+                        session_entries=session_entries, api_key=api_key, workers=workers,
+                        progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
+                        log_dir=_log_dir_key_for(_env_dir, mt_src),
+                        analyze=_do_analyze,
+                    )
                 res["results"] = ra_result["results"]
                 res["entries"] = session_entries
                 _n_err = len(ra_result.get('errors', []))
-                _done_word = "质检" if _do_analyze else "导出"
+                _done_word = {"eval": "质检", "reconstruct": "重构"}.get(mode, "导出")
                 _log(f"[{mt}] {_done_word}完成：成功 {ra_result['total_files']} 个 session"
                      + (f"，失败 {_n_err}" if _n_err else ""))
         except Exception as e:
@@ -552,9 +584,10 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                 _log("未配置 OBS 目标，仅本地复制完成")
         else:
             _log("无新 session 需要导出")
-    elif mode == "reformat":
-        # reformat-only：合并后的 session JSON 已由 worker 落在 local_base/<session>/，
-        # 这里补一份 session_index.jsonl 清单后整目录上传，不跑 evaluate/质检。
+    elif mode in ("reformat", "reconstruct"):
+        # reformat-only / reconstruct：合并/聚合后的 session JSON 已由 worker 落在
+        # local_base/<session>/，这里补一份 session_index.jsonl 清单后整目录上传，
+        # 不跑 evaluate/质检。
         if all_results:
             idx_path = local_base / "session_index.jsonl"
             with open(idx_path, "w", encoding="utf-8") as f:
@@ -619,11 +652,11 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                 _log(f"上传失败: {msg}")
                 errors.append(f"OBS upload: {msg}")
 
-    _done_label = {"eval": "质检", "reformat": "合并导出"}.get(mode, "导出")
+    _done_label = {"eval": "质检", "reformat": "合并导出", "reconstruct": "重构导出"}.get(mode, "导出")
 
     # 判定失败只看「真错误」(errors)：上传失败、异常等。
     # warnings（如 new-api 索引未构建被跳过）不影响已成功部分的产出，不判失败。
-    no_output = (mode in ("eval", "reformat") and not all_results)
+    no_output = (mode in ("eval", "reformat", "reconstruct") and not all_results)
     warn_suffix = f"（{len(warnings)} 个目录跳过：{'; '.join(warnings)}）" if warnings else ""
 
     if errors or no_output:
@@ -940,9 +973,9 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             dir_workers = 0
         # 默认立即入队执行；start=False 时只建草稿（draft）记录，由前端手动「启动」。
         start = body.get("start", True)
-        # mode 优先显式取值（export / eval / reformat）；兼容旧的 auto_eval 布尔
+        # mode 优先显式取值（export / eval / reformat / reconstruct）；兼容旧的 auto_eval 布尔
         mode = body.get("mode")
-        if mode not in ("export", "eval", "reformat"):
+        if mode not in ("export", "eval", "reformat", "reconstruct"):
             mode = "eval" if body.get("auto_eval", False) else "export"
 
         if not mtime_dirs:

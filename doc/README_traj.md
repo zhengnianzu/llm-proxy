@@ -165,7 +165,12 @@ offline_reformat_export.py → hermes_traj → _process_one_hermes
 
 ## 6. 当前处理流程（--mode reconstruct 全链路）
 
-整合已完成，`--mode reconstruct` 是平行于 reformat 的第二条导出路径。完整链路：
+整合已完成，`--mode reconstruct` 是平行于 reformat 的第二条导出路径。**Web 端与离线端都支持**：
+
+- **离线**：`tools/offline_reformat_export.py --mode reconstruct`（下方全链路图）
+- **Web**：`utils/export_routes.py` 的 `export_run` mode 白名单已含 `reconstruct`（export / eval / reformat / reconstruct 四选一，前端 `export.html` 导出方式下拉）；`_run_task` 按 mode 注入 processor（reconstruct → `reconstruct_and_export`，无 `analyze` 参数）；`_run_task_inner` 按 mode 定 local_base / obs_sub，重构走 `logs_session_reconstruct/` + OBS `session_reconstruct/`；reconstruct 模式下非 new-api 目录在 `detect_format` 处提前跳过（warning，不生成 session_index）
+
+完整链路：
 
 ```
 tools/offline_reformat_export.py --mode reconstruct
@@ -237,7 +242,8 @@ hermes_recon_full/
 | 环节 | 位置 |
 |---|---|
 | 离线入口 + 逐 key / mtime 迭代 + 上传 | `tools/offline_reformat_export.py` `_run_one_export` |
-| newapi 格式守卫 | `tools/offline_reformat_export.py`（`detect_format != "newapi"` 跳过） |
+| Web 入口（mode 注入 + 路径 + 守卫） | `utils/export_routes.py:313` `_run_task` / `:357` `_run_task_inner` / `export_run` mode 白名单 |
+| newapi 格式守卫 | 离线 `tools/offline_reformat_export.py`；Web `utils/export_routes.py` `_process_mtime`（`detect_format != "newapi"` 跳过） |
 | 线程池逐 session 并行 | `utils/eval/reconstruct.py:185` `reconstruct_and_export` |
 | 单 session 聚合（读 trace → 选分支 → 回填 → 写） | `utils/eval/reconstruct.py:127` `_process_one_hermes` |
 | trace filename → 合并文件路径 | `utils/eval/reconstruct.py:45` `_resolve_trace_paths` |

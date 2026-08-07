@@ -209,6 +209,7 @@
                 <option value="">全部方式</option>
                 <option value="export">原始导出</option>
                 <option value="reformat">合并导出</option>
+                <option value="reconstruct">重构导出</option>
                 <option value="eval">质检</option>
             </select>
             <small class="text-muted" v-if="hasTaskFilters">匹配 {{ filteredTasks.length }} / {{ tasks.length }}</small>
@@ -238,7 +239,7 @@
                     </td>
                     <td>
                         <span class="badge badge-info" v-if="t.mode === 'eval'">{{ modeLabel(t.mode) }}</span>
-                        <span class="badge badge-warning" v-else-if="t.mode === 'reformat'">{{ modeLabel(t.mode) }}</span>
+                        <span class="badge badge-warning" v-else-if="t.mode === 'reformat' || t.mode === 'reconstruct'">{{ modeLabel(t.mode) }}</span>
                         <span class="badge" v-else>{{ modeLabel(t.mode) }}</span>
                     </td>
                     <td style="white-space:nowrap;">
@@ -391,7 +392,7 @@
                     <input type="text" class="input input-sm" v-model="obsPrefix" placeholder="obs://bucket/path（可选，留空仅本地复制）">
                 </div>
                 <div v-if="obsPrefix" class="obs-preview">
-                    目标: {{ obsPrefix.replace(/\/+$/, '') }}/{{ exportMode === 'export' ? 'session' : 'session_analysis' }}/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
+                    目标: {{ obsPrefix.replace(/\/+$/, '') }}/{{ exportMode === 'export' ? 'session' : (exportMode === 'reconstruct' ? 'session_reconstruct' : 'session_analysis') }}/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
                 </div>
                 <div class="mb-3 mt-2">
                     <div class="mb-2">
@@ -399,6 +400,7 @@
                         <select class="input input-sm" v-model="exportMode">
                             <option value="export">导出原始文件（三元组，不分析）</option>
                             <option value="reformat">合并导出（三元组合并成单 JSON，不质检）</option>
+                            <option value="reconstruct">重构导出（hermes 聚合去重+回填 reasoning，仅 new-api）</option>
                             <option value="eval">质检模式（reformat+分析，出报告）</option>
                         </select>
                     </div>
@@ -930,7 +932,7 @@ new Vue({
             }[s] || s;
         },
         modeLabel: function(mode) {
-            return {eval: '质检', reformat: '合并导出'}[mode] || '导出';
+            return {eval: '质检', reformat: '合并导出', reconstruct: '重构导出'}[mode] || '导出';
         },
 
         // ---- 新建任务 ----
