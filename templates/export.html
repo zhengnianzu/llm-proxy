@@ -311,6 +311,7 @@
                                     <span v-if="t.status === 'running' || t.status === 'queued' || t.status === 'pending'" class="op op-danger" @click="opsOpen = null; cancelTask(t)">终止</span>
                                     <span v-if="t.status === 'failed' || t.status === 'cancelled'" class="op" @click="opsOpen = null; retryTask(t)">重试</span>
                                     <span v-if="t.status === 'failed' && t.obs_dst && t.local_copy_dir" class="op op-warn" @click="opsOpen = null; retryUpload(t)">重试上传</span>
+                                    <span v-if="t.status === 'success' && t.local_copy_dir && !t.obs_dst" class="op op-warn" @click="opsOpen = null; retryUpload(t)" title="本地已有产物、云端未上传，补传到 OBS">上传到 OBS</span>
                                     <span v-if="t.mode === 'eval' && t.status === 'success'" class="op op-ok" @click="opsOpen = null; openReport(t.id)">报告</span>
                                     <span v-if="t.mode === 'eval' && t.status === 'success' && t.in_manage" class="op op-muted" title="该导出已在 Session 管理列表中">已在管理</span>
                                     <span v-else-if="t.mode === 'eval' && t.status === 'success'" class="op"

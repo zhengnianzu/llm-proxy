@@ -604,6 +604,8 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                 else:
                     _log(f"上传失败: {msg}")
                     errors.append(f"OBS upload: {msg}")
+            else:
+                _log("仅本地复制，未上传 OBS（提交时 OBS 前缀为空）；如需上传可对本记录「重试上传」")
         else:
             _log("无 session 数据")
     elif mode == "eval":
@@ -651,6 +653,8 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
             else:
                 _log(f"上传失败: {msg}")
                 errors.append(f"OBS upload: {msg}")
+        elif all_results:
+            _log("仅本地复制，未上传 OBS（提交时 OBS 前缀为空）；如需上传可对本记录「重试上传」")
 
     _done_label = {"eval": "质检", "reformat": "合并导出", "reconstruct": "重构导出"}.get(mode, "导出")
 
@@ -1103,11 +1107,13 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             return JSONResponse({"detail": "只能重试失败/已取消的任务"}, status_code=400)
 
         mode = rec.get("mode") or "export"
-        # obs_prefix 复原：obs_dst 形如 <prefix>/session/... 或 <prefix>/session_analysis/...
+        # obs_prefix 复原：obs_dst 形如 <prefix>/session/... 、<prefix>/session_analysis/...
+        # 或 <prefix>/session_reconstruct/...（reconstruct 模式，见 _run_task_inner 的 obs_sub）。
+        # reconstruct 段放最前匹配，避免被其它子串误切。
         obs_dst = rec.get("obs_dst", "") or ""
         obs_prefix = ""
         if obs_dst:
-            for _seg in ("/session_analysis/", "/session/"):
+            for _seg in ("/session_reconstruct/", "/session_analysis/", "/session/"):
                 if _seg in obs_dst:
                     obs_prefix = obs_dst.split(_seg)[0]
                     break
@@ -1143,14 +1149,35 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         rec = get_record(record_id)
         if not rec:
             return JSONResponse({"detail": "Record not found"}, status_code=404)
-        if rec["status"] != "failed":
-            return JSONResponse({"detail": "只能对失败记录重试上传"}, status_code=400)
+        # 允许 failed（上传失败重试）与 success（当初空前缀仅本地、事后补传）。
+        if rec["status"] not in ("failed", "success"):
+            return JSONResponse({"detail": "只能对失败或已完成的记录重试上传"}, status_code=400)
         local_copy_dir = rec.get("local_copy_dir", "")
         if not local_copy_dir or not Path(local_copy_dir).is_dir():
             return JSONResponse({"detail": "本地文件不存在，无法重试（可能已被清理）"}, status_code=400)
-        obs_dst = rec.get("obs_dst", "")
+        obs_dst = rec.get("obs_dst", "") or ""
         if not obs_dst:
-            return JSONResponse({"detail": "无 OBS 目标路径，无法上传"}, status_code=400)
+            # 空 obs_dst（当初提交时 OBS 前缀为空，仅本地复制）：用 obs_base 现拼目标。
+            # 拼法与 _run_task_inner 一致：{obs_base}/{obs_sub}/{env_key}/{slot}/ex-<tag>/。
+            obs_base = (_load_sync_config().get("obs_base") or "").strip().rstrip("/")
+            if not obs_base:
+                return JSONResponse(
+                    {"detail": "无 OBS 目标路径，且未配置 obs_base，无法上传"}, status_code=400)
+            mode = rec.get("mode") or "export"
+            obs_sub = {"reconstruct": "session_reconstruct",
+                       "reformat": "session_analysis",
+                       "eval": "session_analysis"}.get(mode, "session")
+            # env_key / slot / ex-tag 从 local_copy_dir 末三段解析：
+            #   .../<obs_sub 对应本地目录>/<env_key>/<slot>/ex-<tag>
+            lparts = Path(local_copy_dir).parts
+            if len(lparts) < 3:
+                return JSONResponse(
+                    {"detail": f"本地目录结构异常，无法推断 OBS 路径: {local_copy_dir}"},
+                    status_code=400)
+            env_key, slot, ex_tag = lparts[-3], lparts[-2], lparts[-1]
+            obs_dst = f"{obs_base}/{obs_sub}/{env_key}/{slot}/{ex_tag}/"
+            # 回写记录，后续 _run_upload_only 与前端展示都用这个完整路径。
+            update_status(record_id, rec["status"], obs_dst=obs_dst)
 
         def _upload_retry_task(rid=record_id, lcd=local_copy_dir, od=obs_dst):
             update_status(rid, "running", error_message="")
