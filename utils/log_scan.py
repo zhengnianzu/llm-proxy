@@ -214,7 +214,11 @@ def detect_format(root: str) -> str:
         if "tok_in" in entry or "channel_key" in entry or "q1_hash" in entry:
             return "native"
         usage = entry.get("usage")
-        if isinstance(usage, dict) and ("token_in" in usage or "token_out" in usage):
+        # new-api 的 usage 可能用本项目风格(token_in/token_out)或 OpenAI 风格
+        # (prompt_tokens/completion_tokens)；与下游 normalize_entry 的口径保持一致。
+        if isinstance(usage, dict) and any(
+            k in usage for k in ("token_in", "token_out", "prompt_tokens", "completion_tokens")
+        ):
             return "newapi"
         return "unknown"
     return "empty"
