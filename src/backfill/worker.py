@@ -75,6 +75,15 @@ def _setup_logging() -> None:
         sh.setFormatter(logging.Formatter(
             "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
         logger.addHandler(sh)
+        # 周期 auto_sync 用独立 logger 'backfill_auto_sync'（sync_leaves 各源刷盘、
+        # 入队等日志走它）。默认没有 handler → 周期同步静默，排障看不到「入队 N 个
+        # 回填任务」「自动 sync 失败 root=...」等行。挂同一个 stdout handler，让它和
+        # worker 日志同流同格式，写进 backfill_worker.log。
+        as_logger = logging.getLogger("backfill_auto_sync")
+        if not as_logger.handlers:
+            as_logger.setLevel(logging.INFO)
+            as_logger.addHandler(sh)
+            as_logger.propagate = False
 
 
 def _init_env(svc_dir: str) -> None:
