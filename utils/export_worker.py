@@ -42,6 +42,7 @@ import utils.export_store as export_store
 import utils.export_jobs as export_jobs
 import utils.export_routes as export_routes
 import utils.logdir_store as logdir_store
+import utils.session_store as session_store
 
 logger = logging.getLogger("export_worker")
 
@@ -82,6 +83,14 @@ def _init_env(svc_dir: str) -> None:
     register_export_routes 对齐 → 槽位文件锁跨进程互斥成立。
     """
     export_store.init_db(svc_dir)
+    # session_store 也必须初始化：native 目录导出走 export_session_index →
+    # _refresh_session_cache → log_routes._refresh_state，后者逐行读 index.jsonl 并
+    # 写 session_store（_ss.create_session/set_progress 等）。未 init 时该模块级 _conn
+    # 为 None，凡「有 index.jsonl、需增量刷新写库」的 native 目录都会抛
+    # "session_store not initialized"（空/无 index 目录因提前 return 反而躲过）。
+    # 与 app.py init_session_db(SERVICE_LOG_DIR) 同源（svc_dir 与之同源），
+    # 指向同一个 session_cache.db。
+    session_store.init_db(svc_dir)
     # logdir_store 也必须初始化：reformat/eval 解析 mtime key 里的 <root_id>/ 前缀
     # 要读 sources 表（get_stats_roots → _list_sources → lds.list_sources）。
     # 未 init 时 _list_sources 遇 _ready()=False 返回 []，历史 new-api 源的

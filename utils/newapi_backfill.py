@@ -202,22 +202,48 @@ def _root_id(root: str) -> str:
         return ""
 
 
+def _native_leaf_built(leaf: Path, progress: Dict[str, int]) -> bool:
+    """native 叶子是否「完全构建」：index.jsonl 已被 session 聚合消费到末尾。
+
+    native 无独立 index.db，其「已 index」不再等价于「index.jsonl 存在」，而是
+    session_cache.db 的 index_progress.byte_offset 已追平 index.jsonl 字节大小
+    （惰性增量聚合，见 log_routes._refresh_state）。progress 由调用方一次性传入
+    （session_store.get_all_progress()，{叶子绝对路径: byte_offset}）。
+
+    off is None（该库从未聚合过此叶子）→ 未 built。用 >= 而非 == 容错：网络盘上
+    index.jsonl 大小读取抖动、或历史 offset 略超时，语义仍是「追平即 built」。
+    stat 失败（文件消失/权限）→ 保守判未 built。
+    """
+    off = progress.get(str(leaf))
+    if off is None:
+        return False
+    try:
+        return off >= (leaf / "index.jsonl").stat().st_size
+    except OSError:
+        return False
+
+
 def sync_leaves(path: str, templates=None) -> dict:
     """扫描某源的叶子目录，把节点清单同步进 logdir_store（不触发回填）。
 
     只做「清单 + 是否已建」的轻量同步：
     - built 判定按格式分口径：
         · newapi：用 _db_exists（一次 stat）判该叶是否已建 index.db。
-        · native：index.jsonl 本身即索引（无独立 index.db / 回填概念），
-          凡枚举到的叶子一律视作「已 index」（built=True）。
+        · native：以 session 聚合进度为准 —— index_progress.byte_offset 追平
+          index.jsonl 字节大小才算 built（见 _native_leaf_built）。「index.jsonl
+          存在」不再等价于「已 index」：惰性增量聚合可能只消费了一部分。判定用
+          循环外一次性取的 get_all_progress()（内存 dict 命中），每叶仍只一次 stat。
       两者都只做一次 stat，不打开 SQLite、不跑统计查询——网络盘上每叶
       open+多查询会让同步卡很久。
     - ingested/pending 精确数不在此写：留给「构建」阶段填（对已存在叶子不传
       → upsert 保留其上次构建写入的值，不清零）。
-    - sessions 例外：仅对 newapi「已建」且 DB 里 sessions 仍为 0 的叶子读一次
-      nidb.status 顺带写回，补齐历史/异地同步注册那批「有 index.db 但 DB sessions=0」
-      的叶子（build_leaf 早于 sessions 落库逻辑时建的）。已有非零 sessions 的叶子跳过
-      读 status（open sqlite 贵）；native 无 index.db 可读，跳过。
+    - sessions：
+        · native：以 session_cache.db 为准，一次 GROUP BY 批量取真实会话数写回
+          （无论是否追平；get 不到=0，覆盖历史脏值）。native 无 index.db，会话数
+          只在这本聚合库里，故 sync 时一并回填，叶子详情才显示得对。
+        · newapi：仅「已建」且 DB 里 sessions 仍为 0 的叶子读一次 nidb.status 写回，
+          补齐历史/异地同步注册那批「有 index.db 但 DB sessions=0」的叶子。已有非零
+          sessions 的叶子跳过读 status（open sqlite 贵），sessions 留 None → upsert 不覆盖。
 
     templates：用户注册的占位符层级模板列表（多行/多序列取并集）。空则按 fmt
     回退默认模板（default_templates）。同步末尾 upsert 一行 sources（表 1）。
@@ -236,28 +262,53 @@ def sync_leaves(path: str, templates=None) -> dict:
     # 现有叶子的 sessions（一次查询）：已有非零值的叶子跳过 nidb.status()——那是每叶
     # open sqlite 的最贵操作。仅历史 sessions=0（或 DB 无此叶）的已建叶子才补读。
     existing_sessions = {r["dir_key"]: (r.get("sessions") or 0) for r in lds.bulk_get(rid)}
+    # native 的 built 判定要读 session 聚合进度：一次性取该库全部 index_progress
+    # （{叶子绝对路径: byte_offset}），循环内 dict 命中，避免逐叶查 SQLite。
+    # session_store 未初始化时返回 {} → native 叶子一律判未 built（软失败，不崩同步）。
+    # newapi 不用进度，跳过取以省一次全表读。
+    native_progress: Dict[str, int] = {}
+    native_sessions: Dict[str, int] = {}
+    if is_native:
+        import utils.session_store as session_store
+        native_progress = session_store.get_all_progress()
+        # native 的 session 数以 session_cache.db 为准（惰性聚合的真实结果），一次
+        # GROUP BY 批量取，回填 leaf_status.sessions —— native 无 index.db 可读 status，
+        # 旧逻辑此字段恒 0，叶子详情显示的 session 数一直不对。
+        native_sessions = session_store.get_all_session_counts()
     for leaf in iter_leaf_dirs_by_templates(root_path, tpls):
         dir_key = dir_key_for(root_path, leaf)
         total += 1
-        # native：index.jsonl 即索引，枚举到即「已 index」；newapi：看 index.db 是否已建。
-        is_built = True if is_native else nidb._db_exists(str(leaf))
+        # native：index.jsonl 消费追平才算 built；newapi：看 index.db 是否已建。
+        is_built = (_native_leaf_built(leaf, native_progress)
+                    if is_native else nidb._db_exists(str(leaf)))
         sessions = None
-        if is_built:
+        if is_native:
+            # native：无论 built 与否都回填真实 session 数（未追平的叶子也已聚合了
+            # 部分会话，如实显示）。get 不到（从未聚合）→ 0，覆盖历史遗留脏值。
+            sessions = native_sessions.get(str(leaf), 0)
+            if is_built:
+                built += 1
+        elif is_built:
             built += 1
             # newapi 已建叶子：仅当 DB 里该叶 sessions 还是 0（历史遗留/新叶）时才读一次
             # status 落库（open sqlite 贵）；已有值的跳过，sessions 留 None → upsert 不覆盖。
-            # native 无 index.db，跳过读 status（sessions 不在此写）。
-            if not is_native and existing_sessions.get(dir_key, 0) == 0:
+            if existing_sessions.get(dir_key, 0) == 0:
                 try:
                     st = nidb.status(str(leaf))
                     sessions = st.get("sessions", 0)
                 except Exception:
                     sessions = None
+        # state：已建=done。未建时 —— native 有 index.jsonl 却未追平 = 聚合在途，标
+        # building 更贴切；newapi 无 index.db = 尚未回填，仍标 pending。
+        if is_built:
+            state = "done"
+        else:
+            state = "building" if is_native else "pending"
         res = lds.upsert_leaf(
             rid, dir_key, root_path=root,
             built=is_built,
             sessions=sessions,
-            state="done" if is_built else "pending",
+            state=state,
         )
         if res == "added":
             added += 1

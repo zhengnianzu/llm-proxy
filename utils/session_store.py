@@ -109,6 +109,23 @@ def get_progress(root_dir: str) -> Tuple[int, int]:
     return 0, 0
 
 
+def get_all_progress() -> Dict[str, int]:
+    """返回 {root_dir: byte_offset}，供批量判定叶子是否已「追平」index.jsonl。
+
+    「数据管理」同步（newapi_backfill.sync_leaves）用它一次性拿到该库所有叶子的
+    消费进度，避免逐叶 get_progress 的 N 次查询。未初始化（_conn is None）时返回
+    空 dict —— 软失败：调用方据此把叶子一律判为「未追平/未 built」，不抛异常拖垮同步。
+    """
+    if _conn is None:
+        return {}
+    with _lock:
+        rows = _conn.execute(
+            "SELECT root_dir, byte_offset FROM index_progress"
+        ).fetchall()
+    return {r["root_dir"]: r["byte_offset"] for r in rows}
+
+
+
 def set_progress(root_dir: str, byte_offset: int, line_count: int) -> None:
     conn = _get_conn()
     with _lock:
@@ -288,6 +305,21 @@ def get_session_count_by_root(root_dir: str) -> int:
         "SELECT COUNT(*) AS c FROM sessions WHERE root_dir = ?", (root_dir,)
     ).fetchone()
     return row["c"] if row else 0
+
+
+def get_all_session_counts() -> Dict[str, int]:
+    """返回 {root_dir: session 数}，一次 GROUP BY 拿全库各叶子的会话数。
+
+    与 get_all_progress() 配套：「数据管理」同步时批量回填 leaf_status.sessions，
+    避免逐叶 get_session_count_by_root 的 N 次查询。未初始化返回空 dict（软失败）。
+    """
+    if _conn is None:
+        return {}
+    with _lock:
+        rows = _conn.execute(
+            "SELECT root_dir, COUNT(*) AS c FROM sessions GROUP BY root_dir"
+        ).fetchall()
+    return {r["root_dir"]: r["c"] for r in rows}
 
 
 def get_model_stats_by_key(root_dir: str = "") -> Dict[str, Dict[str, int]]:
