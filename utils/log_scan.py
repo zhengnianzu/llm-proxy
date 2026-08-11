@@ -158,6 +158,89 @@ def iter_leaf_dirs_by_templates(root: Path, templates: list) -> Iterator[Path]:
             yield leaf
 
 
+def fast_scan_leaf_dirs_by_templates(root: Path, templates: list) -> Iterator[Path]:
+    """按模板枚举叶子的快速版：逐段下降，只 stat 目标 index.jsonl，
+    绝不列举叶子目录里的海量小文件。
+
+    老版 iter_leaf_dirs_by_templates 慢的根因：占位符段用 `Path.iterdir()`
+    列目录后对**每个条目**调 `c.is_dir()`。当模板某段匹配到「平叶子」（内含
+    几万~上百万个 *.json）时，会去列这个海量目录并逐个 stat，网络盘上卡死。
+
+    本版关键：**下钻某目录前，先看它是不是已经是叶子（含 index.jsonl），
+    是则不再往下列**。因为本源里平叶子的目录名也符合 `{时8}`，第一段会把它
+    收进候选；到第二段若不短路，就会去 scandir 平叶子而卡死。短路后：
+      - 平叶子在它该出现的那一段就被当作叶子产出，从不被列举内部文件。
+      - 只有「非叶子的层级目录」才 scandir（层级目录只含少量子目录，很快）。
+    占位符段 scandir 时目录名正则先筛（纯字符串），再用 DirEntry.is_dir()
+    （scandir 自带类型，零额外 IO）。字面段用路径构造 + 一次 is_dir()。
+    多模板并集去重；非法模板跳过；templates 空则不产出。
+    """
+    import os as _os
+    if not root.is_dir() or not templates:
+        return
+    seen = set()
+
+    def _emit(d):
+        """d 或其同名折叠子目录 d/<basename> 含 index.jsonl 则登记并返回真实叶子；否则 None。
+
+        与慢扫 iter_leaf_dirs_by_templates 的 _leaf_or_folded 对齐：某些 native 源把真叶子
+        多套一层同名子目录（.../26071620/26071620/index.jsonl），单段模板 {时8} 匹配到外层
+        空壳后，只 stat 外层 index.jsonl 会漏掉整个折叠叶子。此处补一次 folded stat（仍只
+        stat index.jsonl，不列举叶子内海量小文件，保持快扫的零列举保证）。
+        """
+        direct = _os.path.join(d, _INDEX_NAME)
+        if _os.path.isfile(direct):
+            if d not in seen:
+                seen.add(d)
+                return d
+            return None
+        base = _os.path.basename(_os.path.normpath(d))
+        nested = _os.path.join(d, base)
+        if _os.path.isfile(_os.path.join(nested, _INDEX_NAME)) and nested not in seen:
+            seen.add(nested)
+            return nested
+        return None
+
+    for tpl in templates:
+        try:
+            segs = compile_leaf_template(tpl)
+        except ValueError:
+            continue
+        current = [str(root)]  # 走到本段为止的候选目录（字符串路径）
+        for kind, m in segs:
+            nxt = []
+            if kind == "lit":
+                for d in current:
+                    sub = _os.path.join(d, m)
+                    if _os.path.isdir(sub):     # 直接构造 + 一次 stat，不列目录
+                        nxt.append(sub)
+            else:  # 占位符段
+                for d in current:
+                    # 短路：d 已是叶子就不下钻（避免 scandir 平叶子的海量文件）
+                    if _os.path.isfile(_os.path.join(d, _INDEX_NAME)):
+                        continue
+                    try:
+                        with _os.scandir(d) as it:
+                            for e in it:
+                                name = e.name
+                                if name.startswith("."):
+                                    continue
+                                if not m.match(name):   # 正则先行：刷掉文件名
+                                    continue
+                                if e.is_dir():          # scandir 自带类型，零额外 IO
+                                    nxt.append(e.path)
+                    except OSError:
+                        continue
+            current = nxt
+            if not current:
+                break
+        # 终态目录：只 stat index.jsonl（含同名折叠层），绝不列叶子
+        for d in current:
+            leaf = _emit(d)
+            if leaf is not None:
+                yield Path(leaf)
+
+
 def iter_leaf_dirs_explicit(root: Path, fmt: str) -> Iterator[Path]:
     """按 fmt 默认模板枚举叶子（compat 包装：= iter_leaf_dirs_by_templates + 默认模板）。
 

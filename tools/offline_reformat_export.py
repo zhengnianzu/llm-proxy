@@ -23,6 +23,14 @@ tools/offline_reformat_export.py — 离线批量导出（对齐 Web 版）
   _manifest.jsonl。本地落 logs_session_reconstruct/，OBS 走 session_reconstruct/
   前缀；非 new-api 叶子（native 三元组）没有合并文件，直接跳过（warning）。
 
+另支持 --mode full_reformat（全量合并导出，无质检）：
+  与 reformat 共享同一「session 迭代并行」框架，但每个 session 不是只取
+  latest_file 合并成单文件，而是把 trace_list 指向的**全部** trace 文件都合并
+  落盘（out_dir/<first_ts>/<stem>.json，一 trace 一文件）。用于导出特定 key 的
+  某些 session 的全量文件。纯合并落盘、不跑 analyze/质检；本地落
+  logs_session_analysis_full/，OBS 走 session_analysis_full/ 前缀；三元组 /
+  new-api 两种格式都支持。
+
 用法（在项目根目录 /mnt/llm-proxy-main 下运行）：
   python3 tools/offline_reformat_export.py                 # 所有 key，全部 mtime，上传 OBS
   python3 tools/offline_reformat_export.py --no-obs        # 只本地导出，不传 OBS
@@ -31,6 +39,8 @@ tools/offline_reformat_export.py — 离线批量导出（对齐 Web 版）
   python3 tools/offline_reformat_export.py --mtime 260803  # 只导匹配的 mtime 目录（可多次，子串匹配）
   python3 tools/offline_reformat_export.py --threshold 5   # qualified 阈值（同 Web，默认 5）
   python3 tools/offline_reformat_export.py --mode reconstruct  # Hermes 轨迹重构导出（仅 new-api）
+  python3 tools/offline_reformat_export.py --mode full_reformat # 全量合并导出（导 trace_list 全部文件，无质检）
+  python3 tools/offline_reformat_export.py --mode full_reformat --key Kjfu --mtime 260803  # 特定 key/mtime 全量导出
   python3 tools/offline_reformat_export.py --dry-run       # 只打印计划，不执行
   python3 tools/offline_reformat_export.py \
       --service-log-dir logs/port8084/env-99oR \
@@ -122,8 +132,11 @@ def main() -> int:
     ap.add_argument("--env-dir", default="",
                     help="ENV_DIR，形如 logs_all/env-99oR。默认从 app-meta 自动探测")
     ap.add_argument("--threshold", type=int, default=5, help="qualified 阈值（同 Web，默认 5）")
-    ap.add_argument("--mode", default="reformat", choices=["reformat", "reconstruct"],
-                    help="导出方式: reformat=合并导出（默认）; reconstruct=Hermes 轨迹重构（仅 new-api 合并文件）")
+    ap.add_argument("--mode", default="reformat",
+                    choices=["reformat", "reconstruct", "full_reformat"],
+                    help="导出方式: reformat=合并导出（默认，只导 latest_file）; "
+                         "reconstruct=Hermes 轨迹重构（仅 new-api 合并文件）; "
+                         "full_reformat=全量合并导出（导 trace_list 的全部文件，无质检）")
     ap.add_argument("--key", action="append", default=[],
                     help="只导指定 key（可多次）；支持完整 api_key / key-XXXX slot / 后4位；缺省=所有 key")
     ap.add_argument("--mtime", action="append", default=[],
@@ -178,6 +191,9 @@ def main() -> int:
     if mode == "reconstruct":
         from utils.eval.reconstruct import reconstruct_and_export as _processor
         _mode_label = "重构导出"
+    elif mode == "full_reformat":
+        from utils.eval.reformat_full import full_reformat_export as _processor
+        _mode_label = "全量合并导出"
     else:
         from utils.eval.reformat import reformat_and_analyze as _processor
         _mode_label = "合并导出"
@@ -190,20 +206,38 @@ def main() -> int:
         return [r for r in _all_roots() if Path(r).is_dir()]
 
     def _resolve_mt(mt: str):
+        """把 mtime key（<root_id>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。
+
+        以 leaf_status.leaf_path 为准：逐 root 拆前缀得 rel_key，DB 查表命中即返回；
+        均未命中再退回「拼 root/rel_key 并 is_dir 校验」定位归属 root（未同步/裸 native）。
+        与 export_routes._resolve_mt_for 同源。
+        """
+        from utils.logdir_store import resolve_leaf_path
         roots = _existing_roots()
         multi = len(roots) > 1
+        cands = []  # (root, rel_key)
         for root in roots:
-            rp = Path(root)
             rid = get_root_id(root, str(env_dir_p))
             base = os.path.basename(os.path.normpath(root))
+            matched = False
             for pfx in (rid, base):
                 if multi and mt.startswith(pfx + "/"):
-                    cand = rp / mt[len(pfx) + 1:]
-                    if cand.is_dir():
-                        return str(cand)
-            cand2 = rp / mt
-            if cand2.is_dir():
-                return str(cand2)
+                    cands.append((root, rid, mt[len(pfx) + 1:])); matched = True
+            if not matched:
+                cands.append((root, rid, mt))
+        # 1) DB 查表优先
+        for root, rid, rel_key in cands:
+            try:
+                hit = resolve_leaf_path(rid, rel_key)
+            except Exception:
+                hit = None
+            if hit:
+                return hit
+        # 2) 兜底：拼 root/rel_key 并 is_dir 校验
+        for root, rid, rel_key in cands:
+            cand = Path(root) / rel_key
+            if cand.is_dir():
+                return str(cand)
         cand = env_dir_p / mt
         return str(cand) if cand.is_dir() else None
 
@@ -337,11 +371,16 @@ def _run_one_export(*, api_key, mtime_dirs, env_dir_p, env_key_name,
         update_status(record_id, "running")
 
         # local_base / obs_dst 规则完全对齐 _run_task_inner：
-        # reformat → session_analysis；reconstruct → session_reconstruct（平行路径，互不混放）
+        # reformat → session_analysis；reconstruct → session_reconstruct；
+        # full_reformat → session_analysis_full（三条平行路径，互不混放）
         if mode == "reconstruct":
             local_base = (env_dir_p.parent.parent / "logs_session_reconstruct" /
                           env_key_name / slot / f"ex-{now_tag}").resolve()
             obs_sub = "session_reconstruct"
+        elif mode == "full_reformat":
+            local_base = (env_dir_p.parent.parent / "logs_session_analysis_full" /
+                          env_key_name / slot / f"ex-{now_tag}").resolve()
+            obs_sub = "session_analysis_full"
         else:
             local_base = (env_dir_p.parent.parent / "logs_session_analysis" /
                           env_key_name / slot / f"ex-{now_tag}").resolve()

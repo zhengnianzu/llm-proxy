@@ -190,6 +190,7 @@ def reconstruct_and_export(
     workers: int = 4,
     progress_cb: Optional[Callable[[str], None]] = None,
     log_dir: Optional[str] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """
     线程池并行: 对每个 session 的 trace_list 做 hermes 聚合重构。
@@ -199,11 +200,14 @@ def reconstruct_and_export(
     workers: 线程数，硬上限 32（IO 密集，与 reformat 一致）。
     log_dir: 写入每个 result 的历史目录标识（相对 root 的 posix 路径，
         如 "260728/26072813"）；缺省退回 Path(src_dir).name。
+    should_cancel: 协作式取消回调（同 reformat_and_analyze），返回 True 表示用户已终止。
+        drain 循环里逐个结果检查，取消即停止收集并 cancel_futures 丢弃未开始任务。
 
     Returns:
-        {"total_sessions": N, "total_files": M, "errors": [...], "results": [...]}
+        {"total_sessions": N, "total_files": M, "errors": [...], "results": [...], "cancelled": bool}
     """
     _log = progress_cb or (lambda msg: None)
+    _should_cancel = should_cancel or (lambda: False)
     workers = max(1, min(int(workers), 32))  # 线程数硬上限 32
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -216,7 +220,12 @@ def reconstruct_and_export(
 
     total = len(entries)
     if total == 0:
-        return {"total_sessions": 0, "total_files": 0, "errors": [], "results": []}
+        return {"total_sessions": 0, "total_files": 0, "errors": [], "results": [], "cancelled": False}
+
+    # 建 tasks 前先看一眼取消：用户在排队/前一目录期间已终止时，连聚合都不必开始。
+    if _should_cancel():
+        _log("检测到取消，跳过本目录重构")
+        return {"total_sessions": total, "total_files": 0, "errors": [], "results": [], "cancelled": True}
 
     tasks = []
     for sess in entries:
@@ -234,14 +243,21 @@ def reconstruct_and_export(
     n_tasks = len(tasks)
     if n_tasks == 0:
         return {"total_sessions": total, "total_files": 0,
-                "errors": errors, "results": results}
+                "errors": errors, "results": results, "cancelled": False}
 
     _log(f"进入 hermes 重构: {n_tasks} sessions, workers={workers}...")
     # 线程池并行（而非进程池）：纯 IO + 轻量聚合，理由同 reformat.py 注释
     # （spawn 会重 import app.py 跑模块级启动、worker 挂死变孤儿堆积等历史顽疾）。
     executor = ThreadPoolExecutor(max_workers=workers)
+    cancelled = False
     try:
-        for future in as_completed([executor.submit(_process_one_hermes, t) for t in tasks]):
+        futures = [executor.submit(_process_one_hermes, t) for t in tasks]
+        for future in as_completed(futures):
+            # 协作式取消：每收到一个结果查一次 DB 状态（上层已节流）。取消则停止收集。
+            if _should_cancel():
+                cancelled = True
+                _log("检测到取消，停止重构剩余 session")
+                break
             try:
                 result = future.result()
                 if result:
@@ -253,7 +269,8 @@ def reconstruct_and_export(
             except Exception as e:  # noqa: BLE001
                 errors.append(str(e))
     finally:
-        executor.shutdown(wait=True)
+        # cancel_futures=True：丢弃线程池里尚未开始的任务（已在跑的自然收尾）。
+        executor.shutdown(wait=True, cancel_futures=True)
 
     return {"total_sessions": total, "total_files": len(results),
-            "errors": errors, "results": results}
+            "errors": errors, "results": results, "cancelled": cancelled}

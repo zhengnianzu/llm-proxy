@@ -252,22 +252,43 @@ def _existing_roots_for(env_dir) -> list:
 
 
 def _resolve_mt_for(env_dir, mt: str) -> Optional[str]:
-    """把 mtime key（<root_id>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。"""
+    """把 mtime key（<root_id>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。
+
+    以 leaf_status.leaf_path 为准（同步落库的真实叶子路径，含同名折叠层补回）：
+    逐 root 拆前缀得到 rel_key，DB 查表命中即返回；均未命中再退回「拼 root/rel_key
+    并 is_dir 校验」定位归属 root（未同步/裸 native 单层）。mtime 列表也读自
+    leaf_status，正常情况下首个 DB 查表即命中，无需扫盘。
+    """
     from utils.logs_config import get_root_id
+    from utils.logdir_store import resolve_leaf_path
     roots = _existing_roots_for(env_dir)
     multi = len(roots) > 1
+    # 拆前缀候选：(root, rel_key)。多 root 时按 <rid>/ 或旧 <basename>/ 前缀拆，
+    # 单 root（或裸 key）时 rel_key = mt。
+    cands = []
     for root in roots:
-        rp = Path(root)
         rid = get_root_id(root, str(env_dir))
         base = os.path.basename(os.path.normpath(root))
-        for pfx in (rid, base):  # 新前缀优先，旧 basename 回退
+        matched = False
+        for pfx in (rid, base):
             if multi and mt.startswith(pfx + "/"):
-                cand = rp / mt[len(pfx) + 1:]
-                if cand.is_dir():
-                    return str(cand)
-        cand2 = rp / mt
-        if cand2.is_dir():
-            return str(cand2)
+                cands.append((root, rid, mt[len(pfx) + 1:]))
+                matched = True
+        if not matched:
+            cands.append((root, rid, mt))
+    # 1) DB 查表优先：首个命中即返回（O(1)，不扫盘）
+    for root, rid, rel_key in cands:
+        try:
+            hit = resolve_leaf_path(rid, rel_key)
+        except Exception:
+            hit = None
+        if hit:
+            return hit
+    # 2) DB 未命中兜底：拼 root/rel_key 并 is_dir 校验，定位归属 root
+    for root, rid, rel_key in cands:
+        cand = Path(root) / rel_key
+        if cand.is_dir():
+            return str(cand)
     cand = Path(env_dir) / mt
     return str(cand) if cand.is_dir() else None
 
@@ -320,9 +341,15 @@ def _run_task(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, for
     try:
         # reconstruct 与 reformat/eval 同框架但 processor 不同：前者逐 session 聚合多个
         # trace 文件（去重 + 保留分支 + 回填 reasoning），后者只处理 latest_file。
+        # full_reformat：把每个 session 的 trace_list 全部文件合并落盘（无 analyze），
+        # 处理器签名与 reconstruct 同（不带 analyze 形参）。
         if mode == "reconstruct":
             _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
                             reconstruct_and_export, evaluate_sessions, _run_upload_cmd, _log)
+        elif mode == "full_reformat":
+            from utils.eval.reformat_full import full_reformat_export
+            _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
+                            full_reformat_export, evaluate_sessions, _run_upload_cmd, _log)
         else:
             _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mode, force,
                             reformat_and_analyze, evaluate_sessions, _run_upload_cmd, _log)
@@ -369,6 +396,25 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
     rec = get_record(record_id)
     update_status(record_id, "running")
 
+    # 透传给 processor 的协作式取消回调：processor 在逐 session 的 drain 循环里频繁调用，
+    # 而 _is_cancelled 每次都查一次 DB（外部日志目录 sqlite）。这里做时间节流——最多每
+    # ~2s 真查一次；一旦查到取消就永久缓存 True（取消不可逆），后续调用零成本立即返回。
+    # 这样既让「网页取消」能在几秒内穿透到重构/合并的内层循环，又不至于每 session 都打 DB。
+    import time as _time
+    _cancel_state = {"cancelled": False, "last_ts": 0.0}
+
+    def _should_cancel() -> bool:
+        if _cancel_state["cancelled"]:
+            return True
+        now = _time.monotonic()
+        if now - _cancel_state["last_ts"] < 2.0:
+            return False
+        _cancel_state["last_ts"] = now
+        if _is_cancelled(record_id):
+            _cancel_state["cancelled"] = True
+            return True
+        return False
+
     sync_cfg = _load_sync_config()
     # workers：优先用任务记录里显式配置的并发数（新建任务时可选）；
     # 记录未设（0/缺失，含旧任务）时回退全局 sync 配置默认。
@@ -391,6 +437,11 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
         # 走 session_reconstruct/（平行于 session_analysis/，互不混放）
         local_base = (_env_dir.parent.parent / "logs_session_reconstruct" / _env_key_name / slot / f"ex-{now_tag}").resolve()
         obs_sub = "session_reconstruct"
+    elif mode == "full_reformat":
+        # 全量导出：每 session 的 trace_list 全部文件合并落盘，
+        # 走 session_analysis_full/（平行于 session_analysis/，互不混放）
+        local_base = (_env_dir.parent.parent / "logs_session_analysis_full" / _env_key_name / slot / f"ex-{now_tag}").resolve()
+        obs_sub = "session_analysis_full"
     else:
         # eval 与 reformat 都产出合并后的 session JSON，落 session_analysis 目录
         local_base = (_env_dir.parent.parent / "logs_session_analysis" / _env_key_name / slot / f"ex-{now_tag}").resolve()
@@ -401,7 +452,8 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
 
     update_status(record_id, "running", obs_dst=obs_dst, local_copy_dir=str(local_base))
 
-    _mode_label = {"eval": "质检", "reformat": "合并导出", "reconstruct": "重构导出"}.get(mode, "导出")
+    _mode_label = {"eval": "质检", "reformat": "合并导出", "reconstruct": "重构导出",
+                   "full_reformat": "全量导出"}.get(mode, "导出")
     _log(f"开始{_mode_label}: key_slot={slot}, mtime_dirs={mtime_dirs}")
     _log(f"本地目录: {local_base}")
     if obs_dst:
@@ -422,7 +474,7 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                "new_sessions": 0, "uploaded": 0, "skipped": 0,
                "results": [], "entries": []}
         # 协作式取消：用户「终止」后，尚未开始的目录直接跳过（并行/串行同理）。
-        if _is_cancelled(record_id):
+        if _should_cancel():
             res["skip"] = True
             return res
         mt_src = _resolve_mt_for(_env_dir, mt) or str(_env_dir / mt)
@@ -483,14 +535,18 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                     return res
                 if api_key:
                     _log(f"[{mt}] 共 {total_before} sessions, 按 key 过滤后 {len(session_entries)}")
-                if mode == "reconstruct":
-                    # 格式守卫已在上方 detect_format 处提前拦截（非 new-api 已跳过）。
-                    _log(f"[{mt}] 进入 hermes 重构: {len(session_entries)} sessions, workers={workers}...")
+                if mode in ("reconstruct", "full_reformat"):
+                    # 处理器签名无 analyze 形参：reconstruct 逐 session 聚合多 trace，
+                    # full_reformat 逐 session 全量落盘。格式守卫（reconstruct 限 new-api）
+                    # 已在上方 detect_format 处提前拦截；full_reformat 两种格式都支持。
+                    _step = "hermes 重构" if mode == "reconstruct" else "全量合并"
+                    _log(f"[{mt}] 进入 {_step}: {len(session_entries)} sessions, workers={workers}...")
                     ra_result = processor(
                         src_dir=mt_src, out_dir=str(local_base),
                         session_entries=session_entries, api_key=api_key, workers=workers,
                         progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
                         log_dir=_log_dir_key_for(_env_dir, mt_src),
+                        should_cancel=_should_cancel,
                     )
                 else:
                     _do_analyze = (mode == "eval")
@@ -502,11 +558,13 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                         progress_cb=lambda msg, _mt=mt: _log(f"[{_mt}] {msg}"),
                         log_dir=_log_dir_key_for(_env_dir, mt_src),
                         analyze=_do_analyze,
+                        should_cancel=_should_cancel,
                     )
                 res["results"] = ra_result["results"]
                 res["entries"] = session_entries
                 _n_err = len(ra_result.get('errors', []))
-                _done_word = {"eval": "质检", "reconstruct": "重构"}.get(mode, "导出")
+                _done_word = {"eval": "质检", "reconstruct": "重构",
+                              "full_reformat": "全量导出"}.get(mode, "导出")
                 _log(f"[{mt}] {_done_word}完成：成功 {ra_result['total_files']} 个 session"
                      + (f"，失败 {_n_err}" if _n_err else ""))
         except Exception as e:
@@ -517,7 +575,7 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
 
     # 多目录调度：dir_workers=1 顺序执行；>1 用线程池并行（每目录内部仍各用 workers 线程）。
     # 结果按提交顺序收集后【串行合并】到共享累加量，避免并发写竞态。
-    if _is_cancelled(record_id):
+    if _should_cancel():
         _log("任务已终止（用户取消）")
         update_status(record_id, "cancelled", error_message="用户终止")
         return
@@ -558,8 +616,8 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
 
     # 目录循环结束后、进入收尾（evaluate/上传/判定）前再查一次取消：
     # 若用户在处理最后一个目录期间点了「终止」，这里退出，避免跑完整个 evaluate
-    # 与 OBS 上传。
-    if _is_cancelled(record_id):
+    # 与 OBS 上传。用 _should_cancel（带缓存）：processor 内已检测到取消时零成本命中。
+    if _should_cancel():
         _log("任务已终止（用户取消）")
         update_status(record_id, "cancelled", error_message="用户终止")
         return
@@ -584,10 +642,10 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
                 _log("未配置 OBS 目标，仅本地复制完成")
         else:
             _log("无新 session 需要导出")
-    elif mode in ("reformat", "reconstruct"):
-        # reformat-only / reconstruct：合并/聚合后的 session JSON 已由 worker 落在
-        # local_base/<session>/，这里补一份 session_index.jsonl 清单后整目录上传，
-        # 不跑 evaluate/质检。
+    elif mode in ("reformat", "reconstruct", "full_reformat"):
+        # reformat-only / reconstruct / full_reformat：合并/聚合后的 session JSON 已由
+        # worker 落在 local_base/<session>/，这里补一份 session_index.jsonl 清单后整目录
+        # 上传，不跑 evaluate/质检。
         if all_results:
             idx_path = local_base / "session_index.jsonl"
             with open(idx_path, "w", encoding="utf-8") as f:
@@ -660,7 +718,7 @@ def _run_task_inner(record_id, _env_dir, _env_key_name, obs_prefix, now_tag, mod
 
     # 判定失败只看「真错误」(errors)：上传失败、异常等。
     # warnings（如 new-api 索引未构建被跳过）不影响已成功部分的产出，不判失败。
-    no_output = (mode in ("eval", "reformat", "reconstruct") and not all_results)
+    no_output = (mode in ("eval", "reformat", "reconstruct", "full_reformat") and not all_results)
     warn_suffix = f"（{len(warnings)} 个目录跳过：{'; '.join(warnings)}）" if warnings else ""
 
     if errors or no_output:
@@ -715,47 +773,33 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         return [r for r in _all_roots() if Path(r).is_dir()]
 
     def _list_all_mtimes() -> list:
-        """列出所有 root 下含 index.jsonl 的叶子目录，多 root 时带 <root_basename>/ 前缀。
+        """列出所有 root 的叶子目录，多 root 时带 <root_id>/ 前缀，供前端 mtime 选择。
 
-        与 build_stats_multi 的 mtime_cells key 格式一致，供前端 mtime 选择。
+        读自 leaf_status（同步产物）而非实时扫盘：与 leaf_path 同源，保证「列表里有」
+        ≡「DB 有 leaf_path」，_resolve_mt 查表必命中（无需扫盘兜底）。未同步的源在此
+        不产出——先在「数据管理」页同步。key 格式与 build_stats_multi 的 mtime_cells 一致。
         """
-        from utils.log_scan import iter_index_dirs, dir_key_for
+        import utils.logdir_store as lds
+        from utils.logs_config import get_root_id
         roots = _existing_roots()
         multi = len(roots) > 1
         out = []
-        from utils.logs_config import get_root_id
         for root in roots:
-            rp = Path(root)
-            base = get_root_id(root, str(env_dir))
-            for leaf in iter_index_dirs(rp):
-                rel = dir_key_for(rp, leaf)
-                out.append(f"{base}/{rel}" if multi else rel)
+            rid = get_root_id(root, str(env_dir))
+            for row in lds.bulk_get(rid):
+                dk = row.get("dir_key", "")
+                if dk:
+                    out.append(f"{rid}/{dk}" if multi else dk)
         return sorted(set(out), reverse=True)
 
     def _resolve_mt(mt: str) -> Optional[str]:
         """把 mtime key（<root_id>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。
 
         优先按 root_id 前缀匹配；对 export_records 里遗留的旧 <basename>/ 前缀
-        保留回退匹配，保证历史记录仍可解析。
+        保留回退匹配，保证历史记录仍可解析。委托模块级 _resolve_mt_for，复用其
+        「同名折叠层」兜底（双层折叠源解析到内层真叶子），与离线脚本口径一致。
         """
-        from utils.logs_config import get_root_id
-        roots = _existing_roots()
-        multi = len(roots) > 1
-        for root in roots:
-            rp = Path(root)
-            rid = get_root_id(root, str(env_dir))
-            base = os.path.basename(os.path.normpath(root))
-            for pfx in (rid, base):  # 新前缀优先，旧 basename 回退
-                if multi and mt.startswith(pfx + "/"):
-                    cand = rp / mt[len(pfx) + 1:]
-                    if cand.is_dir():
-                        return str(cand)
-            cand2 = rp / mt
-            if cand2.is_dir():
-                return str(cand2)
-        # 兜底：活跃 env_dir 下直接拼
-        cand = env_dir / mt
-        return str(cand) if cand.is_dir() else None
+        return _resolve_mt_for(env_dir, mt)
 
     def _log_dir_key(mt_src: str) -> str:
         """把叶子目录绝对路径解析为相对 root 的 dir_key（如 "260728/26072813"）。
@@ -977,13 +1021,17 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             dir_workers = 0
         # 默认立即入队执行；start=False 时只建草稿（draft）记录，由前端手动「启动」。
         start = body.get("start", True)
-        # mode 优先显式取值（export / eval / reformat / reconstruct）；兼容旧的 auto_eval 布尔
+        # mode 优先显式取值（export / eval / reformat / reconstruct / full_reformat）；兼容旧的 auto_eval 布尔
         mode = body.get("mode")
-        if mode not in ("export", "eval", "reformat", "reconstruct"):
+        if mode not in ("export", "eval", "reformat", "reconstruct", "full_reformat"):
             mode = "eval" if body.get("auto_eval", False) else "export"
 
         if not mtime_dirs:
             return JSONResponse({"detail": "mtime_dirs is required"}, status_code=400)
+        # full_reformat（全量导出）单目录即产出海量文件，限定一次只导一个 mtime，
+        # 避免多目录放大资源占用/误操作。
+        if mode == "full_reformat" and len(mtime_dirs) != 1:
+            return JSONResponse({"detail": "全量导出仅支持单个 mtime 目录"}, status_code=400)
         for mt in mtime_dirs:
             if _resolve_mt(mt) is None:
                 return JSONResponse({"detail": f"目录不存在: {mt}"}, status_code=400)
@@ -1108,12 +1156,13 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         mode = rec.get("mode") or "export"
         # obs_prefix 复原：obs_dst 形如 <prefix>/session/... 、<prefix>/session_analysis/...
-        # 或 <prefix>/session_reconstruct/...（reconstruct 模式，见 _run_task_inner 的 obs_sub）。
-        # reconstruct 段放最前匹配，避免被其它子串误切。
+        # 、<prefix>/session_analysis_full/... 或 <prefix>/session_reconstruct/...
+        # （见 _run_task_inner 的 obs_sub）。session_analysis_full 是 session_analysis 的
+        # 父串，必须排在 session_analysis 之前匹配，否则被误切；reconstruct 同理放最前。
         obs_dst = rec.get("obs_dst", "") or ""
         obs_prefix = ""
         if obs_dst:
-            for _seg in ("/session_reconstruct/", "/session_analysis/", "/session/"):
+            for _seg in ("/session_reconstruct/", "/session_analysis_full/", "/session_analysis/", "/session/"):
                 if _seg in obs_dst:
                     obs_prefix = obs_dst.split(_seg)[0]
                     break
@@ -1165,6 +1214,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                     {"detail": "无 OBS 目标路径，且未配置 obs_base，无法上传"}, status_code=400)
             mode = rec.get("mode") or "export"
             obs_sub = {"reconstruct": "session_reconstruct",
+                       "full_reformat": "session_analysis_full",
                        "reformat": "session_analysis",
                        "eval": "session_analysis"}.get(mode, "session")
             # env_key / slot / ex-tag 从 local_copy_dir 末三段解析：

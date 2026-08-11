@@ -364,6 +364,7 @@ def reformat_and_analyze(
     progress_cb: Optional[Callable[[str], None]] = None,
     log_dir: Optional[str] = None,
     analyze: bool = True,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """
     线程池并行: 对每个 session 的 latest_file 做 reformat (+ 可选 analyze_best_data)。
@@ -377,10 +378,16 @@ def reformat_and_analyze(
         如 "260728/26072813"）；供报告生成 /history 链接用。缺省时退回
         Path(src_dir).name（仅在单级 native 布局下正确）。
 
+    should_cancel: 协作式取消回调，返回 True 表示用户已终止。上层（export_routes）
+        透传一个「查 DB 状态」的节流回调进来：这里在 drain 循环里每收到一个结果就查一次，
+        一旦取消就停止收集、cancel_futures 丢弃尚未开始的任务并提前返回已完成部分。
+        缺省 None（如离线 CLI）时永不取消，行为与旧版一致。
+
     Returns:
-        {"total_sessions": N, "total_files": M, "errors": [...], "results": [analyzed_dict, ...]}
+        {"total_sessions": N, "total_files": M, "errors": [...], "results": [analyzed_dict, ...], "cancelled": bool}
     """
     _log = progress_cb or (lambda msg: None)
+    _should_cancel = should_cancel or (lambda: False)
     workers = max(1, min(int(workers), 32))  # 线程数硬上限 32
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -395,7 +402,12 @@ def reformat_and_analyze(
 
     total = len(entries)
     if total == 0:
-        return {"total_sessions": 0, "total_files": 0, "errors": [], "results": []}
+        return {"total_sessions": 0, "total_files": 0, "errors": [], "results": [], "cancelled": False}
+
+    # 建 tasks 前先看一眼取消：用户在排队/前一目录期间已终止时，连合并落盘都不必开始。
+    if _should_cancel():
+        _log("检测到取消，跳过本目录处理")
+        return {"total_sessions": total, "total_files": 0, "errors": [], "results": [], "cancelled": True}
 
     tasks = []
     cached_results = []
@@ -427,7 +439,7 @@ def reformat_and_analyze(
     n_tasks = len(tasks)
 
     if n_tasks == 0:
-        return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results}
+        return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results, "cancelled": False}
 
     # 线程池并行（而非进程池）：每个任务只做「读三元组 JSON → 合并落盘 →（可选）纯本地
     # 质检」，是 IO 密集 + 轻量 CPU，线程足矣。用线程避免了进程池的两大历史顽疾：
@@ -438,8 +450,16 @@ def reformat_and_analyze(
     # 逐 session 进度不再打点（曾按 5% 一档，仍会在多 mtime 时刷屏日志抽屉）；
     # 每个 mtime 的起止由上层 export_routes 记录，本函数只在全部完成时汇总一条。
     executor = ThreadPoolExecutor(max_workers=workers)
+    cancelled = False
     try:
-        for future in as_completed([executor.submit(_process_one, t) for t in tasks]):
+        futures = [executor.submit(_process_one, t) for t in tasks]
+        for future in as_completed(futures):
+            # 协作式取消：每收到一个结果查一次 DB 状态（上层已节流）。取消则停止收集，
+            # 交给 finally 的 shutdown(cancel_futures=True) 丢弃尚未开始的任务，提前收尾。
+            if _should_cancel():
+                cancelled = True
+                _log("检测到取消，停止处理剩余 session")
+                break
             try:
                 result = future.result()
                 if result:
@@ -453,6 +473,7 @@ def reformat_and_analyze(
             # 逐 session 不打点：进度/完成汇总统一由上层 export_routes 每 mtime 输出一条，
             # 避免这里再刷屏或与上层日志重复。
     finally:
-        executor.shutdown(wait=True)
+        # cancel_futures=True：丢弃线程池里尚未开始的任务（已在跑的自然收尾）。
+        executor.shutdown(wait=True, cancel_futures=True)
 
-    return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results}
+    return {"total_sessions": total, "total_files": len(results), "errors": errors, "results": results, "cancelled": cancelled}

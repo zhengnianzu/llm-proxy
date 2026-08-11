@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from utils.log_scan import (
-    iter_index_dirs, iter_leaf_dirs_by_templates, default_templates,
+    iter_index_dirs, fast_scan_leaf_dirs_by_templates, default_templates,
     detect_format, dir_key_for,
 )
 import utils.newapi_index_db as nidb
@@ -275,7 +275,7 @@ def sync_leaves(path: str, templates=None) -> dict:
         # GROUP BY 批量取，回填 leaf_status.sessions —— native 无 index.db 可读 status，
         # 旧逻辑此字段恒 0，叶子详情显示的 session 数一直不对。
         native_sessions = session_store.get_all_session_counts()
-    for leaf in iter_leaf_dirs_by_templates(root_path, tpls):
+    for leaf in fast_scan_leaf_dirs_by_templates(root_path, tpls):
         dir_key = dir_key_for(root_path, leaf)
         total += 1
         # native：index.jsonl 消费追平才算 built；newapi：看 index.db 是否已建。
@@ -306,6 +306,7 @@ def sync_leaves(path: str, templates=None) -> dict:
             state = "building" if is_native else "pending"
         res = lds.upsert_leaf(
             rid, dir_key, root_path=root,
+            leaf_path=str(leaf),  # 真实折叠叶子绝对路径，供 mtime→叶子解析直接查表
             built=is_built,
             sessions=sessions,
             state=state,

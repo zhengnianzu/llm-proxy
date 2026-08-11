@@ -2,17 +2,16 @@
 """
 src/backfill/auto_sync.py — 自动回填机制
 
-触发条件:built < total 且 building = 0(没有叶子正在构建)且距上次更新超过 1 小时
-→ 自动提交回填任务,避免半途停滞的源长期挂在"部分构建"状态。
+每次运行：先对每个源 sync_leaves 把叶子清单/状态刷成磁盘现状，再对满足
+「built < total 且 building = 0 且无 pending/running 请求」的 newapi 源自动入队回填，
+避免半途停滞或磁盘新增未建的源长期挂在"部分构建"状态。native 源只同步不回填。
 
-可由 worker 定期调用,也可独立运行(cron)。
+由常驻 backfill worker 每小时定期调用（见 worker.py），也可独立运行(cron)。
 """
 
 import logging
 import os
 import sys
-import time
-from datetime import datetime, timedelta
 
 # 允许独立运行
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,31 +24,53 @@ import utils.newapi_backfill as newapi_backfill
 
 logger = logging.getLogger("backfill_auto_sync")
 
-STALE_THRESHOLD_SECONDS = 3600  # 1 小时
-
 
 def check_and_enqueue_stale(svc_dir: str) -> int:
-    """扫描所有 source,对满足条件的自动入队回填任务。
+    """扫描所有 source：先 sync 刷新叶子清单到磁盘现状，再对满足条件的 newapi 源入队回填。
 
-    条件:built < total 且 building = 0 且该 source 的 synced_at 距今 >1h 且当前无 pending/running 请求。
+    每个源先跑 sync_leaves（按其登记模板扫盘）把 leaf_status 的 total/built/building
+    刷成磁盘真实值——否则读到的是上次同步的陈旧快照，磁盘新落的叶子看不见、永不回填。
+    sync 后判入队条件（仅 newapi，native 无 index.db 可建，只同步不回填）：
+        built < total 且 building = 0 且当前无 pending/running 请求。
+    （不再用 synced_at>1h 阀值：sync 后 built/total 已是磁盘真值，有未建叶即应入队；
+      has_active_backfill 负责防重复入队。）
 
     返回入队数量。
     """
     logdir_store.init_db(svc_dir)
+    # native 源 sync 判 built 要读 session 聚合进度（get_all_progress），需先 init。
+    # 软失败：未 init 时 native 叶一律判未 built，不影响 newapi 入队主流程。
+    try:
+        import utils.session_store as session_store
+        session_store.init_db(svc_dir)
+    except Exception:
+        logger.exception("session_store 初始化失败（native 源 built 判定可能不准）")
+    from utils.logs_config import get_root_id
+    from utils.log_scan import default_templates
+    import utils.newapi_backfill as _nb
+
     sources = logdir_store.list_sources()
     enqueued = 0
-    now = datetime.now()
-    threshold = timedelta(seconds=STALE_THRESHOLD_SECONDS)
 
     for src in sources:
         root = src.get("root_path", "").strip()
         if not root or not os.path.isdir(root):
             continue
         fmt = src.get("format") or ""
-        if fmt != "newapi":  # 只对 newapi 源回填
+
+        # 先 sync 刷新该源叶子清单/状态到磁盘现状（全源都刷，让页面数跟磁盘一致）。
+        # 模板取该源登记值，空则回退该格式默认模板（等价旧硬规则）。单源 sync 失败
+        # 不拖垮整轮，记日志后继续下一个源。
+        tpls = src.get("templates") or default_templates(fmt)
+        try:
+            _nb.sync_leaves(root, tpls)
+        except Exception:
+            logger.exception("自动 sync 失败 root=%s，跳过该源", root)
             continue
 
-        from utils.logs_config import get_root_id
+        if fmt != "newapi":  # native 只同步、不回填（无 index.db 可建）
+            continue
+
         rid = get_root_id(root)
         summ = logdir_store.count_summary(rid)
         total = summ.get("total", 0)
@@ -64,21 +85,11 @@ def check_and_enqueue_stale(svc_dir: str) -> int:
         if logdir_store.has_active_backfill(root):
             continue
 
-        # 检查 source 的 synced_at(该源最后一次同步/活动时间)
-        synced_at = src.get("synced_at", "").strip()
-        if not synced_at:
-            continue  # 无时间戳,跳过
-        try:
-            last_dt = datetime.fromisoformat(synced_at)
-        except (ValueError, TypeError):
-            continue
-        if now - last_dt < threshold:
-            continue  # 未超 1h
-
-        # 满足条件,自动入队
+        # 满足条件,自动入队（sync 已把 built/total 刷成磁盘真值，有未建叶即入队；
+        # 不再用 synced_at>1h 阀值，has_active_backfill 已防重复）。
         workers = newapi_backfill._DEFAULT_WORKERS
-        logger.info("自动入队回填 root=%s (built=%d total=%d building=%d synced_at=%s)",
-                    root, built, total, building, synced_at)
+        logger.info("自动入队回填 root=%s (built=%d total=%d building=%d)",
+                    root, built, total, building)
         try:
             logdir_store.enqueue_backfill(root, workers=workers, force=False)
             enqueued += 1

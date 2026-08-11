@@ -126,8 +126,11 @@ def main() -> int:
     # native 判据：detect_format != 'newapi'；new-api 走 index.db 另一套，不在此脚本。
     import utils.logdir_store as lds
     lds.init_db(svc_dir)  # get_stats_roots / mtime 解析要读 sources 表
-    from utils.logs_config import get_stats_roots
-    from utils.log_scan import detect_format
+    from utils.logs_config import get_stats_roots, get_root_id
+    from utils.log_scan import (
+        detect_format, fast_scan_leaf_dirs_by_templates,
+        default_templates, dir_key_for,
+    )
 
     roots = [r for r in get_stats_roots(str(env_dir_p)) if Path(r).is_dir()]
     # 显式 --source 优先：直接用指定根目录，跳过自动探测（扫其下全部叶子）。
@@ -147,19 +150,28 @@ def main() -> int:
     targets = []  # list[str]，每个是一个 mtime 叶子目录绝对路径
     for root in roots:
         rp = Path(root)
-        for child in sorted(rp.iterdir()) if rp.is_dir() else []:
-            if not child.is_dir():
-                continue
-            mt_name = child.name
+        if not rp.is_dir():
+            continue
+        # 该源在 DB 登记的层级模板（含用户为嵌套目录加的 {时8}/{时8} 等）；
+        # 未登记 / 模板为空则回退该格式的默认模板，等价旧的「只列一层」硬规则。
+        src = lds.get_source(get_root_id(str(rp)))
+        templates = (src.get("templates") if src else None) or []
+        if not templates:
+            fmt = detect_format(str(rp))
+            templates = default_templates("native" if fmt != "newapi" else "newapi")
+        # 按模板逐段下降枚举叶子：只 stat 目标 index.jsonl，绝不列举叶子内的
+        # 海量文件；自带「已是叶子则不再下钻」短路，能取到嵌套内层真叶子
+        # （叶/叶/index.jsonl），而非旧 iterdir 只认第一层。
+        for leaf_p in fast_scan_leaf_dirs_by_templates(rp, templates):
+            # dir_key 把嵌套同名层折回标准 key（26070211/26070211 → 26070211），
+            # 与 leaf_status / --mtime 口径一致。
+            mt_key = dir_key_for(rp, leaf_p)
             # mtime 子串过滤
-            if args.mtime and not any(m in mt_name for m in args.mtime):
+            if args.mtime and not any(m in mt_key for m in args.mtime):
                 continue
-            # key 过滤：native 目录本身不按 key 分，key 过滤在 session 层，
-            # 这里 --key 仅作用于「目录名含该子串」的宽松匹配（多数无效，
-            # 但保留与 offline 一致的入口）；不匹配则不排除，交给 session 层。
-            leaf = str(child)
+            leaf = str(leaf_p)
             if not (Path(leaf) / "index.jsonl").is_file():
-                continue  # 无 index.jsonl = 无原料，跳过（空目录/未产生索引）
+                continue  # 无 index.jsonl = 无原料，跳过（模板兜底后仍无则确无）
             try:
                 if detect_format(leaf) == "newapi":
                     continue  # new-api 不归本脚本

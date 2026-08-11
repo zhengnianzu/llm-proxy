@@ -43,6 +43,7 @@ def init_db(db_dir: str):
                 root_id     TEXT NOT NULL,
                 dir_key     TEXT NOT NULL,
                 root_path   TEXT NOT NULL DEFAULT '',
+                leaf_path   TEXT NOT NULL DEFAULT '',
                 built       INTEGER NOT NULL DEFAULT 0,
                 ingested    INTEGER NOT NULL DEFAULT 0,
                 pending     INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +92,14 @@ def init_db(db_dir: str):
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_backfill_requests_status ON backfill_requests(status)"
         )
+        # 迁移：老库 leaf_status 无 leaf_path 列则补齐（存折叠层已补回的真实叶子
+        # 绝对路径，供 mtime→叶子解析直接查表，取代反复扫盘的兜底）。空值=未回填，
+        # 解析侧走模板扫兜底；下次同步刷新即落库。
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(leaf_status)").fetchall()}
+        if "leaf_path" not in cols:
+            _conn.execute(
+                "ALTER TABLE leaf_status ADD COLUMN leaf_path TEXT NOT NULL DEFAULT ''"
+            )
         _conn.commit()
 
 
@@ -103,10 +112,15 @@ def _ready() -> bool:
 
 
 def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
+                leaf_path: str = "",
                 built: Optional[bool] = None, ingested: Optional[int] = None,
                 pending: Optional[int] = None, sessions: Optional[int] = None,
                 state: Optional[str] = None, last_error: str = "") -> str:
-    """新增或更新一个叶子。返回 'added' | 'updated'。仅传入的字段被更新。"""
+    """新增或更新一个叶子。返回 'added' | 'updated'。仅传入的字段被更新。
+
+    leaf_path: 折叠层已补回的真实叶子绝对路径（含 index.jsonl 的那一层）。传入非空
+        才更新，供 resolve_leaf_path 直接查表，取代 mtime→叶子的反复扫盘兜底。
+    """
     if not _ready():
         return "skipped"
     with _lock:
@@ -119,6 +133,8 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
             params: list = [_now()]
             if root_path:
                 fields.append("root_path = ?"); params.append(root_path)
+            if leaf_path:
+                fields.append("leaf_path = ?"); params.append(leaf_path)
             if built is not None:
                 fields.append("built = ?"); params.append(int(built))
             if ingested is not None:
@@ -140,10 +156,10 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
         else:
             _conn.execute("""
                 INSERT INTO leaf_status
-                    (root_id, dir_key, root_path, built, ingested, pending, sessions,
+                    (root_id, dir_key, root_path, leaf_path, built, ingested, pending, sessions,
                      state, last_error, synced_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (root_id, dir_key, root_path, int(bool(built)),
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (root_id, dir_key, root_path, leaf_path, int(bool(built)),
                   ingested or 0, pending or 0, sessions or 0,
                   state or "pending", last_error, _now(), _now()))
             _conn.commit()
@@ -151,14 +167,36 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
 
 
 def set_leaf_state(root_id: str, dir_key: str, state: str, *,
+                   leaf_path: str = "",
                    built: Optional[bool] = None, ingested: Optional[int] = None,
                    pending: Optional[int] = None, sessions: Optional[int] = None,
                    last_error: str = ""):
-    """回填过程写单叶状态（building/done/error）。叶子不存在则插入。"""
+    """回填过程写单叶状态（building/done/error）。叶子不存在则插入。
+
+    leaf_path 传入非空则一并落库（真实折叠叶子绝对路径），供后续解析查表。
+    """
     if not _ready():
         return
-    upsert_leaf(root_id, dir_key, built=built, ingested=ingested,
+    upsert_leaf(root_id, dir_key, leaf_path=leaf_path, built=built, ingested=ingested,
                 pending=pending, sessions=sessions, state=state, last_error=last_error)
+
+
+def resolve_leaf_path(root_id: str, dir_key: str) -> Optional[str]:
+    """按 (root_id, dir_key) 直接查真实叶子绝对路径（同步时已折叠层补回并落库）。
+
+    命中且非空返回路径；未同步 / 老库未回填（leaf_path 为空）返回 None，调用方
+    据此退回模板扫兜底。这是取代「每次解析都反复扫盘 + 各处兜底」的查表快路径。
+    """
+    if not _ready():
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT leaf_path FROM leaf_status WHERE root_id = ? AND dir_key = ?",
+            (root_id, dir_key),
+        ).fetchone()
+    if row and row[0]:
+        return row[0]
+    return None
 
 
 def bulk_get(root_id: str) -> List[dict]:

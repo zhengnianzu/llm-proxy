@@ -48,6 +48,8 @@ logger = logging.getLogger("backfill_worker")
 
 _shutdown_requested = False
 
+AUTO_SYNC_INTERVAL = 3600  # 常驻模式下周期跑 auto_sync 的间隔（秒），默认 1 小时
+
 
 def _handle_signal(signum, frame):
     global _shutdown_requested
@@ -118,16 +120,34 @@ def _run_one(rec: dict) -> None:
         logdir_store.complete_backfill(req_id, ok=False, error=str(e))
 
 
-def _drain(once: bool, max_workers: int) -> None:
+def _drain(once: bool, max_workers: int, svc_dir: str = "") -> None:
     """主循环：线程池并发领取 pending 请求 → 执行 → 回写终态。
 
     单进程多线程：ThreadPoolExecutor(max_workers) 并发执行多条请求，有几个任务
     就跑几个（不像原版单线程全局串行）。每个任务仍调用 newapi_backfill._run，
     其内部开 ProcessPoolExecutor 并行叶子构建。空闲时分片轮询。
+
+    常驻模式（非 once）：每 AUTO_SYNC_INTERVAL 秒（默认 1h）在主线程调一次
+    auto_sync.check_and_enqueue_stale —— 先 sync 各源到磁盘现状，再把
+    built<total 的 newapi 源入队（入队的重活仍由本线程池领取执行）。启动即先
+    跑一轮，不必等满 1h。once 模式不跑周期 auto_sync（保持纯队列消费语义）。
     """
+    last_auto_sync = None  # None = 尚未跑过，启动即触发一次
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="backfill-") as executor:
         futures = set()
         while not _shutdown_requested:
+            # 周期性 auto_sync（仅常驻模式；扫盘+入队在主线程同步执行，不占线程池）
+            if not once and svc_dir:
+                nowm = time.monotonic()
+                if last_auto_sync is None or (nowm - last_auto_sync) >= AUTO_SYNC_INTERVAL:
+                    try:
+                        from src.backfill.auto_sync import check_and_enqueue_stale
+                        n = check_and_enqueue_stale(svc_dir)
+                        logger.info("周期 auto_sync 完成，入队 %d 个回填任务", n)
+                    except Exception:
+                        logger.exception("周期 auto_sync 执行失败")
+                    last_auto_sync = time.monotonic()
+
             # 清理已完成的 future
             done = {f for f in futures if f.done()}
             for f in done:
@@ -190,7 +210,7 @@ def main() -> int:
     _init_env(svc_dir)
 
     try:
-        _drain(once=args.once, max_workers=args.workers)
+        _drain(once=args.once, max_workers=args.workers, svc_dir=svc_dir)
     except Exception:
         logger.exception("backfill_worker 主循环异常退出")
         return 1
