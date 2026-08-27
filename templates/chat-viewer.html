@@ -443,12 +443,16 @@
 <div class="cv-header">
     <span class="min-msg-label" id="loadStatus" style="font-size:14px;font-weight:600;color:var(--foreground);"></span>
     <div class="cv-header-right">
+        {% if not export_view_mode %}
         <span class="min-msg-label" id="rootSelectLabel" style="display:none;">来源地址</span>
         <select class="folder-select" id="rootSelect" style="display:none;" onchange="onRootChange()">
         </select>
         <span class="min-msg-label">时间目录</span>
         <select class="folder-select" id="logDirSelect" onchange="resetAndLoad()">
         </select>
+        {% else %}
+        <input type="hidden" id="logDirSelect" value="" />
+        {% endif %}
         <span class="min-msg-label">文件夹</span>
         <select class="folder-select" id="folderSelect" onchange="resetAndLoad()">
             <option value="agg">聚合视图</option>
@@ -475,8 +479,10 @@
         <select class="folder-select" id="filterModel" onchange="reloadWithModel()">
             <option value="">全部</option>
         </select>
+        {% if not export_view_mode %}
         <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
-        <span id="lastRefreshTime" style="font-size:.74rem;color:var(--muted-foreground);margin-left:6px"></span>
+        {% endif %}
+        <span id="lastRefreshTime" style="font-size:.74rem;color:var(--muted-foreground);margin-left:6px;display:none;"></span>
     </div>
 </div>
 
@@ -535,8 +541,12 @@ if (typeof marked !== 'undefined') {
 const _sharedMode = {{ 'true' if shared_mode is defined and shared_mode else 'false' }};
 const _sharedKey = '{{ shared_api_key|default("") }}';
 const _sharedCode = '{{ shared_code|default("") }}';
-function _apiPrefix() { return _sharedMode ? '/api/shared/logs' : '/logs'; }
+const _exportViewMode = {{ 'true' if export_view_mode is defined and export_view_mode else 'false' }};
+const _exportKey = '{{ export_key|default("") }}';
+const _exportModel = '{{ export_model|default("") }}';
+function _apiPrefix() { return _exportViewMode ? '/export/view/api' : (_sharedMode ? '/api/shared/logs' : '/logs'); }
 function _sharedParams() {
+    if (_exportViewMode) return '&key=' + encodeURIComponent(_exportKey) + '&access-key=' + encodeURIComponent(_sharedCode);
     if (!_sharedMode) return '';
     return '&key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode);
 }
@@ -650,7 +660,7 @@ function _populateDirSelect(rootName) {
 async function loadLogDirs() {
     if (_logDirsLoaded) return;
     try {
-        const res = await fetch(_apiPrefix() + '/dirs?' + (_sharedMode ? 'key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode) : ''));
+        const res = await fetch(_apiPrefix() + '/dirs?' + (_exportViewMode ? 'key=' + encodeURIComponent(_exportKey) + '&access-key=' + encodeURIComponent(_sharedCode) : _sharedMode ? 'key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode) : ''));
         const data = await res.json();
         _allDirs = data.dirs || [];
         // 去重来源，保持首次出现顺序（当前目录所在来源已被后端排在最前）
@@ -1612,6 +1622,29 @@ document.addEventListener('click', function(e) {
 })();
 
 // Init
+if (_exportViewMode) {
+    _logDirsLoaded = true;  // 导出浏览跨全部叶子，无来源/时间目录下拉
+    _allDirs = [];
+    resetAndLoad();
+    const _params = new URLSearchParams(window.location.search);
+    const _urlFile = _params.get('file');
+    if (_urlFile) {
+        setTimeout(async () => {
+            chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
+            try {
+                const fp = `filename=${encodeURIComponent(_urlFile)}`;
+                const res = await fetch(`${_apiPrefix()}/file?${fp}${_sharedParams()}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                data._req_file = _urlFile;
+                data._log_dir = '';
+                renderMessages(data, _urlFile);
+            } catch(e) {
+                showError(`加载失败：${e.message}`);
+            }
+        }, 300);
+    }
+} else {
 loadLogDirs().then(() => {
     resetAndLoad();
     const _params = new URLSearchParams(window.location.search);
@@ -1635,5 +1668,6 @@ loadLogDirs().then(() => {
         }, 300);
     }
 });
+}
 </script>
 {% endblock %}

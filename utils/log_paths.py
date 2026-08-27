@@ -46,14 +46,26 @@ def _env_key_segment() -> str:
 
 
 def get_service_log_dir() -> str:
+    """服务实例目录（logs/port<P>/<segment>），导出/会话/备份等 DB 都落在它下面。
+
+    可用 env LOG_DIR 直接覆盖为绝对路径 —— 这是把「路径真相」交给 .env 的逃生通道：
+    .env 里定义 LOG_DIR=/root/llm-proxy-main/logs/port8084/env-99oR 后，
+    无论 LOG_TASK_TAG/PROXY_PORT/UPSTREAM_API_KEY 是否在 launcher 环境里一致，
+    都指向同一个目录，避免 ad-hoc 进程解析到已停用的旧实例（如 99oR）。
+    """
+    override = (os.getenv("LOG_DIR") or "").strip()
+    if override:
+        return override
     port = (os.getenv("PROXY_PORT") or "").strip() or "0"
     segment = _env_key_segment()
     return os.path.join("logs", f"port{port}", segment)
 
 
 def _resolve_base(base_name: str) -> str:
-    """logs_all 的 base 可由 env LOGS_DIR 覆盖。
-    其它 base（logs_anthropic/logs_openai 等）保持原样。"""
+    """logs_all 的 base 可由 env LOGS_DIR / DATA_DIR 覆盖（两者都是完整目录，含 segment）。
+    其它 base（logs_anthropic/logs_openai 等）保持原样。
+    LOGS_DIR 与 DATA_DIR 区别：LOGS_DIR 是「当前小时写入目录」，DATA_DIR 是「env 根目录」。
+    get_log_dir 只追加小时段；若 base 已含 segment，调用方需自行保证不再追加。"""
     if base_name != "logs_all":
         return base_name
     try:
@@ -64,7 +76,22 @@ def _resolve_base(base_name: str) -> str:
 
 
 def get_log_dir(base_name: str) -> str:
-    return os.path.join(_resolve_base(base_name), _env_key_segment(), STARTUP_DATE_TAG)
+    """当前小时写入目录：{base}/{segment}/{hour}。
+
+    当 base 由 LOGS_DIR 显式给定为「小时目录」时（已含 segment + 小时），直接返回 base，
+    不再追加；当 base 由 DATA_DIR 给定为「env 根目录」时（已含 segment，不含小时），
+    只追加小时段。未覆盖时走原始推导。
+    """
+    base = _resolve_base(base_name)
+    logs_dir_override = (os.getenv("LOGS_DIR") or "").strip()
+    if base_name == "logs_all" and logs_dir_override:
+        # LOGS_DIR 已被显式指定为最终小时目录：不追加，原样返回。
+        return logs_dir_override
+    data_dir_override = (os.getenv("DATA_DIR") or "").strip()
+    if base_name == "logs_all" and data_dir_override:
+        # DATA_DIR 是 env 根目录（含 segment），只需追加小时段。
+        return os.path.join(data_dir_override, STARTUP_DATE_TAG)
+    return os.path.join(base, _env_key_segment(), STARTUP_DATE_TAG)
 
 
 def build_index_path(log_dir: str) -> str:

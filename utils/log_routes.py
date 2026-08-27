@@ -770,6 +770,334 @@ def _aggregate_all_payload(kind: str, env_dir: str, min_messages: int, offset: i
     return {"items": items, "total": total, "known_keys": sorted(all_known_keys), "known_models": sorted(all_known_models)}
 
 
+def _export_view_leaves(roots, env_dir: str) -> List[str]:
+    """枚举导出浏览要覆盖的叶子目录（跨全部来源，去掉 mtime 层级语义）。
+
+    只从 leaf_status（同步产物，含绝对 leaf_path）读，不再扫盘兜底：每个登记
+    根在 sources 表里都有行，leaf_path 与 leaf_status 同源，保证「列表里有」≡
+    「DB 有 leaf_path」。root_id 用 sources 里按 root_path 归一化匹配出的
+    **实际存储** root_id（而非 get_root_id(root, env_dir)——那会把活跃 env 目录
+    强制折叠成 'default'，偏偏本系统里活跃目录的叶子挂在 md5 哈希 root_id 下，
+    bulk_get('default') 恒为空，旧实现只得退回 iter_index_dirs 全盘扫）。
+    返回去重后的叶子绝对路径 list。
+    """
+    import utils.logdir_store as _lds
+    from utils.logs_config import get_root_id
+    leaves: List[str] = []
+    seen = set()
+    for root in roots or []:
+        if not root:
+            continue
+        try:
+            rp = Path(root)
+        except (TypeError, ValueError):
+            continue
+        if not rp.is_dir():
+            continue
+        rid = None
+        try:
+            # 按 root_path 归一化匹配 sources 行，取其真实 root_id（不折叠活跃目录）
+            norm = os.path.normpath(str(root))
+            src = _lds.get_source_by_path(norm)
+            if src:
+                rid = src.get("root_id")
+            if not rid:
+                rid = get_root_id(str(root), env_dir)
+        except Exception:  # noqa: BLE001
+            rid = None
+        if not rid:
+            continue
+        try:
+            for row in _lds.bulk_get(rid):
+                lp = row.get("leaf_path") or ""
+                if not lp:
+                    continue
+                full = lp if os.path.isabs(lp) else os.path.join(str(root), lp)
+                if Path(full).is_dir():
+                    key = os.path.normpath(full)
+                    if key not in seen:
+                        seen.add(key)
+                        leaves.append(full)
+        except Exception:  # noqa: BLE001
+            continue
+    return leaves
+
+
+def _export_key_leaves(roots, env_dir: str, api_key: str) -> List[str]:
+    """导出浏览按单个 key 取叶子：直接用 build_stats_multi **已算好的** key→mtime 分布。
+
+    不再对全部叶子逐叶 list_sessions（导出浏览覆盖到 /mnt 上 1900+ 叶子，逐叶连库是
+    分钟级）。build_stats_multi 的 rows[].mtime_cells 正是「该 key 落在哪些 mtime 目录」，
+    与 public_export_submit 取 mtime_dirs 同一来源；用 _resolve_mt_for 把 mtime key
+    （<root_id>/<rel> 或裸 <rel>）解析回叶子绝对路径。api_key 为空 / 分布未命中 / 解析
+    失败时退回全量 _export_view_leaves（保证正确性优先于速度）。
+    """
+    if not api_key:
+        return _export_view_leaves(roots, env_dir)
+    existing = [r for r in roots if Path(r).is_dir()]
+    if not existing:
+        return []
+    try:
+        from utils.stats_index import build_stats_multi
+        stats = build_stats_multi(existing, active_env_dir=env_dir)
+    except Exception:  # noqa: BLE001
+        return _export_view_leaves(roots, env_dir)
+    mts = []
+    for row in stats.get("rows", []):
+        if row.get("api_key") == api_key:
+            mts = sorted(row.get("mtime_cells", {}).keys(), reverse=True)
+            break
+    if not mts:
+        return []
+    try:
+        from utils.export_routes import _resolve_mt_for
+    except Exception:  # noqa: BLE001
+        return _export_view_leaves(roots, env_dir)
+    leaves: List[str] = []
+    seen = set()
+    for mt in mts:
+        try:
+            lp = _resolve_mt_for(env_dir, mt)
+        except Exception:  # noqa: BLE001
+            lp = None
+        if lp:
+            key = os.path.normpath(lp)
+            if key not in seen:
+                seen.add(key)
+                leaves.append(lp)
+    return leaves or _export_view_leaves(roots, env_dir)
+
+
+def export_view_aggregate_payload(roots, env_dir: str, min_messages: int = 1, offset: int = 0, limit: int = 50,
+                                  api_key: str = "", model: str = "", search: str = "", q1search: str = "",
+                                  refresh: bool = False) -> Dict[str, Any]:
+    """导出浏览聚合：按 key 汇总会话，分页返回。
+
+    与 _aggregate_all_payload 的区别：_read_backend 按叶子选后端（newapi→index.db，
+    native→session_cache.db），api_key 下推过滤。叶子集用 _export_key_leaves ——
+    直接取 build_stats_multi **已算好的** key→mtime 分布（rows[].mtime_cells），
+    只加载该 key 落到的叶子，而非跨全部登记根逐叶扫（那要连 /mnt 上 1900+ 个叶子，
+    分钟级）。首句(q1search)/内容(search)过滤在合并后做。分页前先按 last_ts 全局
+    倒序，traces 仅对分页切片按叶子批量取。
+    """
+    leaves = _export_key_leaves(roots, env_dir, api_key)
+    all_sessions: List[Tuple[dict, str]] = []
+    known_keys: set = set()
+    known_models: set = set()
+
+    for leaf in leaves:
+        try:
+            _refresh_state("anthropic", leaf, force=refresh)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            backend = _read_backend(leaf)
+            sels = backend.list_sessions(leaf, api_key=api_key, model=model, min_msg_count=min_messages)
+            for s in sels:
+                all_sessions.append((s, leaf))
+                if s.get("api_key"):
+                    known_keys.add(s["api_key"])
+                for m in s.get("models", []):
+                    if m:
+                        known_models.add(m)
+            try:
+                for m in backend.get_known_models(leaf):
+                    if m:
+                        known_models.add(m)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            continue
+
+    q1search = (q1search or "").strip()
+    if q1search:
+        needle = q1search.lower()
+        all_sessions = [p for p in all_sessions if needle in (p[0].get("q1", "") or "").lower()]
+
+    search = (search or "").strip()
+    if search:
+        def _hit(pair):
+            s, ld = pair
+            fn = s.get("latest_file", "")
+            try:
+                ok = bool(fn) and _match_messages_content(ld, fn, search, _root_format(ld) == "newapi")
+            except Exception:  # noqa: BLE001
+                ok = False
+            return pair if ok else None
+        workers = min(32, (os.cpu_count() or 4) * 4)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            all_sessions = [p for p in ex.map(_hit, all_sessions) if p is not None]
+
+    all_sessions.sort(key=lambda t: t[0].get("last_ts", "") or t[0].get("first_ts", "") or "", reverse=True)
+    total = len(all_sessions)
+    paged = all_sessions[offset:offset + limit] if limit > 0 else all_sessions[offset:]
+
+    from collections import defaultdict
+    by_root: Dict[str, List[str]] = defaultdict(list)
+    for session, ld in paged:
+        by_root[ld].append(session["session_key"])
+    traces_map: Dict[str, Dict[str, List]] = {}
+    for ld, keys in by_root.items():
+        try:
+            traces_map[ld] = _read_backend(ld).get_traces_batch(keys)
+        except Exception:  # noqa: BLE001
+            traces_map[ld] = {}
+
+    items: List[Dict[str, Any]] = []
+    for session, ld in paged:
+        sk = session["session_key"]
+        trace_list = traces_map.get(ld, {}).get(sk, [])
+        payload: Dict[str, Any] = {
+            "first_time": _format_time(session.get("first_ts", "")),
+            "last_time": _format_time(session.get("last_ts", "")),
+            "file_count": len(trace_list),
+            "message_count": session.get("msg_count", 0),
+            "models": session.get("models", []),
+            "latest_file": session.get("latest_file", ""),
+            "api_key": session.get("api_key", ""),
+            "q1_preview": session.get("q1", ""),
+            "trace_list": trace_list,
+        }
+        if any(not t.get("success", True) for t in trace_list):
+            payload["has_failure"] = True
+        items.append(payload)
+
+    return {"items": items, "total": total, "known_keys": sorted(known_keys), "known_models": sorted(known_models)}
+
+
+def export_view_list_payload(roots, env_dir: str, min_messages: int = 1, offset: int = 0, limit: int = 50,
+                             api_key: str = "", model: str = "", search: str = "", q1search: str = "",
+                             refresh: bool = False) -> Dict[str, Any]:
+    """导出浏览「单文件列表」：把每 session 的 trace 展开为文件级条目，分页返回。
+
+    叶子集来自 _export_key_leaves（build_stats_multi 的 key→mtime 分布），只加载
+    该 key 落到的叶子。先聚合会话、对 session 做 q1search/search 过滤（与
+    export_view_aggregate_payload 同口径），再把命中的 session 展开成文件行；
+    文件行保留所属 session_key 供 trace 归属。
+    """
+    leaves = _export_key_leaves(roots, env_dir, api_key)
+    sessions_by_leaf: List[Tuple[dict, str]] = []
+    known_keys: set = set()
+    known_models: set = set()
+
+    for leaf in leaves:
+        try:
+            _refresh_state("anthropic", leaf, force=refresh)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            backend = _read_backend(leaf)
+            sels = backend.list_sessions(leaf, api_key=api_key, model=model, min_msg_count=min_messages)
+        except Exception:  # noqa: BLE001
+            continue
+        for s in sels:
+            sessions_by_leaf.append((s, leaf))
+            if s.get("api_key"):
+                known_keys.add(s["api_key"])
+            for m in s.get("models", []):
+                if m:
+                    known_models.add(m)
+
+    q1search = (q1search or "").strip()
+    if q1search:
+        needle = q1search.lower()
+        sessions_by_leaf = [p for p in sessions_by_leaf if needle in (p[0].get("q1", "") or "").lower()]
+
+    search = (search or "").strip()
+    if search:
+        def _hit(pair):
+            s, ld = pair
+            fn = s.get("latest_file", "")
+            ok = bool(fn) and _match_messages_content(ld, fn, search, _root_format(ld) == "newapi")
+            return pair if ok else None
+        workers = min(32, (os.cpu_count() or 4) * 4)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            sessions_by_leaf = [p for p in ex.map(_hit, sessions_by_leaf) if p is not None]
+
+    # 按叶子批量取 trace，展开为文件行
+    from collections import defaultdict
+    by_leaf: Dict[str, List[str]] = defaultdict(list)
+    for s, ld in sessions_by_leaf:
+        by_leaf[ld].append(s["session_key"])
+    traces_map: Dict[str, Dict[str, List]] = {}
+    for ld, keys in by_leaf.items():
+        try:
+            traces_map[ld] = _read_backend(ld).get_traces_batch(keys)
+        except Exception:  # noqa: BLE001
+            traces_map[ld] = {}
+
+    raw: List[Dict[str, Any]] = []
+    for s, ld in sessions_by_leaf:
+        for t in traces_map.get(ld, {}).get(s["session_key"], []):
+            fn = t.get("filename", "")
+            if not fn:
+                continue
+            raw.append({
+                "filename": fn,
+                "message_count": t.get("msg_count", 0),
+                "model": t.get("model", ""),
+                "api_key": s.get("api_key", ""),
+                "_ts": t.get("ts", "") or s.get("last_ts", ""),
+                "_session_key": s["session_key"],
+                "_leaf": ld,
+            })
+
+    raw.sort(key=lambda r: r.get("_ts", ""), reverse=True)
+    total = len(raw)
+    paged = raw[offset:offset + limit] if limit > 0 else raw[offset:]
+    items = [{k: v for k, v in r.items() if not k.startswith("_")} for r in paged]
+    return {"items": items, "total": total, "known_keys": sorted(known_keys), "known_models": sorted(known_models)}
+
+
+def _export_view_find_file(roots, env_dir: str, filename: str, api_key: str = "") -> Optional[str]:
+    """在导出浏览覆盖的叶子下查找文件，返回绝对路径或 None。
+
+    传 api_key 时按该 key 的 mtime 分布（_export_key_leaves）限定加载的叶子；
+    不传则回退全量 _export_view_leaves。
+    """
+    leaves = _export_key_leaves(roots, env_dir, api_key) if api_key else _export_view_leaves(roots, env_dir)
+    for ld in leaves:
+        p = os.path.join(ld, filename)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _load_conversation_file(path: str) -> Optional[dict]:
+    """读取请求-响应合并文件，返回与「对话浏览」一致的 payload（含 _usage）。
+
+    path 为叶子内绝对路径。newapi 单文件用 build_preview_payload 拆解；
+    native 三元组则加载 -req.json 并把响应内容作为 assistant 消息追加。
+    解析失败返回 None。
+    """
+    leaf = os.path.dirname(path)
+    filename = os.path.basename(path)
+    is_newapi = _root_format(leaf) == "newapi"
+    if (filename.endswith(".json") and not filename.endswith("-req.json")
+            and "/" not in filename and "\\" not in filename and ".." not in filename):
+        if is_newapi:
+            from utils.newapi_format import build_preview_payload
+            return build_preview_payload(Path(path))
+        return None
+    if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    res_path = Path(path).with_name(filename.replace("-req.json", "-res.json"))
+    res_content = _extract_anthropic_res_content(res_path)
+    if res_content is not None and isinstance(data.get("messages"), list):
+        data["messages"].append({"role": "assistant", "content": res_content, "_from_res": True})
+    elif isinstance(data.get("messages"), list):
+        openai_content = _extract_openai_res_content(res_path)
+        if openai_content is not None:
+            data["messages"].append({**openai_content, "_from_res": True})
+    res_data = _load_json(res_path)
+    usage = extract_res_usage(res_data) if res_data else None
+    if usage:
+        data["_usage"] = usage
+    return data
+
+
 def _find_file_in_all_dirs(env_dir: str, filename: str) -> Optional[str]:
     env_path = Path(env_dir)
     if not env_path.is_dir():

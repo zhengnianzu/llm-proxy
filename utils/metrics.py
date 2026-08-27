@@ -28,7 +28,9 @@ _metrics_buckets: deque = deque(maxlen=_METRICS_WINDOW)
 _RATE_WINDOW = max(int(os.getenv("RATE_WINDOW_MINUTES", str(_DEFAULT_WINDOW))), _DEFAULT_WINDOW)
 _rate_buckets: deque = deque(maxlen=_RATE_WINDOW)
 
-_SERVICE_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), get_service_log_dir())
+_SERVICE_LOG_DIR = get_service_log_dir()
+if not os.path.isabs(_SERVICE_LOG_DIR):
+    _SERVICE_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), _SERVICE_LOG_DIR)
 _RPM_LOG = os.path.join(_SERVICE_LOG_DIR, "rpm.log")
 _RATE_LOG = os.path.join(_SERVICE_LOG_DIR, "rate.log")
 _SCANNER_STATE_PATH = os.path.join(_SERVICE_LOG_DIR, "scanner_state.json")

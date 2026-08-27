@@ -27,9 +27,14 @@ _DEFAULT_ID = "default"
 
 
 def get_active_base() -> str:
-    """进程写入的 base 名：env LOGS_DIR 优先，否则 logs_all。"""
+    """进程写入的 base 名：env LOGS_DIR 优先，其次 env DATA_DIR（绝对路径），否则 logs_all。"""
     env_base = (os.getenv("LOGS_DIR") or "").strip()
-    return env_base or _DEFAULT_BASE
+    if env_base:
+        return env_base
+    data_dir = (os.getenv("DATA_DIR") or "").strip()
+    if data_dir:
+        return data_dir
+    return _DEFAULT_BASE
 
 
 def get_root_id(path: str, active_env_dir: Optional[str] = None) -> str:

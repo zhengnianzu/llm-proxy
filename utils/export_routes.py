@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
@@ -30,6 +30,7 @@ from utils.export_store import (
     list_records_all_slim,
     list_records_by_key,
     save_leaves_cache,
+    set_manage_name,
     update_status,
 )
 from utils.export_jobs import persist_params, persist_upload_retry
@@ -140,6 +141,114 @@ def _is_cancelled(record_id: int) -> bool:
     except Exception:
         pass
     return False
+
+
+def verify_access_key(access_key: str) -> bool:
+    """公开导出浏览/提交的鉴权 key（URL 参数 access-key）校验。
+
+    值取自 .env 的 ACCESS_KEY，**无默认值**：未配置时恒拒，不回退到 "shared"。
+    （对比 /history/shared 与 /api/shared/export 用的 SHARED_CODE，那个仍默认 "shared"。）
+
+    用 hmac.compare_digest 做常数时间比较，防时序侧信道。
+    """
+    expected = (os.getenv("ACCESS_KEY") or "").strip()
+    if not expected:
+        return False
+    import hmac as _hmac
+    return _hmac.compare_digest((access_key or "").strip(), expected)
+
+
+# 共享 key 命名空间缓存的 TTL（秒）。resolve_export_key 在 /export/view 及其子 API 里
+# 每个请求都会调用一次 _collect_log_keys（跨 root 扫盘）；日志 key 集近期稳定，
+# 短 TTL 缓存可避免同一页面的 page/view/api/... 串行请求各自重扫。负缓存也缓存
+# （空集是合法结果——该环境确实可能没有任何已落库 key）。
+_EXPORT_KEY_CACHE: dict = {"ts": 0.0, "data": None}
+# build_stats_multi 要 refresh_index 扫盘，比读 DB 慢一档，TTL 放宽些（默认 30s）。
+_EXPORT_KEY_TTL = float(os.getenv("EXPORT_KEY_TTL", "30"))
+
+
+def _collect_log_keys(roots: list, env_dir: str, *, limit: int = 200000) -> set:
+    """汇总「日志命名空间」里出现过的全部 api_key —— 以 build_stats_multi 扫盘结果为真相。
+
+    这是 key 校验应参照的真相源：列表（/api/export/keys）与导出数据过滤
+    （backend.list_sessions 的 `api_key = ?` 精确匹配）都消费日志 api_key，
+    而 keys.db（api_keys 表）只记录 Web 端**签发**的少量 key，二者是不同命名空间。
+    用 build_stats_multi 而非读 DB 的原因：newapi 叶子大多**未构建 index.db**
+    （get_known_keys 返回空），其 key 只出现在原始日志里，DB 聚合读不到；只有
+    build_stats_multi 的 refresh_index 扫盘（从 index.jsonl / 原始 req 文件聚合）
+    能覆盖到全量 key。这正是过去「完整 key 明明在日志里却报 Key not found」的根因。
+
+    roots 传 None/空时直接返回空集（调用方自行兜底）。
+
+    返回 set[str]。带 limit 防御极端数量下误爆内存。
+    """
+    if not roots:
+        return set()
+    import time as _t
+    _now = _t.monotonic()
+    if _EXPORT_KEY_CACHE["data"] is not None and (_now - _EXPORT_KEY_CACHE["ts"] < _EXPORT_KEY_TTL):
+        return _EXPORT_KEY_CACHE["data"]
+    all_keys: set = set()
+    # 与 build_stats_multi 同源：它内部先 refresh_index（扫盘/增量）+ 按 api_key 归并，
+    # rows[].api_key 即跨 root 去重后的完整 key 集。force=False 走 TTL/增量，避免每请求全量扫。
+    try:
+        import utils.stats_index as _si
+        stats = _si.build_stats_multi(list(roots), active_env_dir=str(env_dir))
+        for row in stats.get("rows", []):
+            k = row.get("api_key")
+            if not k:
+                continue
+            all_keys.add(k)
+            if len(all_keys) >= limit:
+                _EXPORT_KEY_CACHE["ts"] = _now
+                _EXPORT_KEY_CACHE["data"] = all_keys
+                return all_keys
+    except Exception:
+        pass
+    _EXPORT_KEY_CACHE["ts"] = _now
+    _EXPORT_KEY_CACHE["data"] = all_keys
+    return all_keys
+
+
+def resolve_export_key(key: str, roots: list, env_dir: str) -> "Optional[str] | int":
+    """把用户经 /export/* 传入的 key 解析成**日志命名空间**里的完整 api_key。
+
+    传入 key 可以是完整串（`sk-...mQOk`）、后四位后缀（`mQOk`）、
+    或带 `key-` 前缀的 slot 形式（`key-mQOk`，即「导出概览」里显示的 key_slot）。规则：
+      - 归一化：去掉 `key-` 前缀；空串 → None。
+      - 传入值非空且是某日志 api_key 的完整值 → 返回该值本身。
+      - 否则若作为后四位后缀唯一命中一个日志 api_key → 返回该完整 key。
+      - 命中多个 → 返回 -1（调用方返回「key 不唯一」错误）。
+      - 一个都命中不了 → 返回 None（调用方返回 404 Key not found）。
+    从 keys.db 的 api_keys 表（Web 签发命名空间）里找不到不再视为失败——因为
+    列表中绝大多数 key 从未被签发（见 _collect_log_keys 注释）。完整 key 若不在日志里
+    （如只在 keys.db 里、从未产生会话）也会返回 None，行为与「日志命名空间」一致。
+
+    注意：纯数字串（如 "1234"）会被误当作后四位后缀参与匹配——这没问题，按后缀语义
+    匹配即可；旧 find_key 的 `isdigit()` 走 id 分支现在是明确的非目标。
+
+    返回：完整 api_key / None / -1。
+    """
+    key = (key or "").strip()
+    if key.startswith("key-"):
+        key = key[len("key-"):].strip()
+    if not key:
+        return None
+    log_keys = _collect_log_keys(roots, env_dir)
+    if not log_keys:
+        return None
+    # 1) 完整命中优先（区分大小写精确）。
+    if key in log_keys:
+        return key
+    # 2) 后四位后缀匹配（含 slot 形式剥除 key- 前缀后的值）。
+    if len(key) <= 4:
+        hits = [k for k in log_keys if k.endswith(key)]
+        if not hits:
+            return None
+        if len(hits) > 1:
+            return -1  # 不唯一
+        return hits[0]
+    return None
 
 
 def _queue_runner():
@@ -827,6 +936,23 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.get("/keys/export/browse")
+    def export_browse_page(request: Request):
+        # 导出浏览落地页：内部鉴权（走 ("/keys/export","export") 权限前缀）。
+        # 列出所有 key，点选后带 key+model+access-key 跳转公开 /export/view。
+        # access_key 服务端注入模板（取 .env 的 ACCESS_KEY），不出现在侧栏 href。
+        return templates.TemplateResponse(
+            request, "export_browse.html",
+            context={
+                "active_page": "export_browse",
+                "user_role": request.session.get("monitor_role", "user"),
+                "user_name": request.session.get("monitor_user", ""),
+                "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()],
+                "access_key": os.getenv("ACCESS_KEY", ""),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.get("/keys/export/report/{record_id}")
     def export_report_page(request: Request, record_id: int):
         return templates.TemplateResponse(request, "export_report.html", context={"active_page": "export", "user_role": request.session.get("monitor_role", "user"), "user_name": request.session.get("monitor_user", ""), "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()]})
@@ -1025,6 +1151,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         mode = body.get("mode")
         if mode not in ("export", "eval", "reformat", "reconstruct", "full_reformat"):
             mode = "eval" if body.get("auto_eval", False) else "export"
+        # 用户自定义的名字（可选），建任务时存进 manage_name，列表里显示。
+        export_name = (body.get("export_name") or body.get("name") or "").strip()
 
         if not mtime_dirs:
             return JSONResponse({"detail": "mtime_dirs is required"}, status_code=400)
@@ -1051,6 +1179,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             workers=workers,
             dir_workers=dir_workers,
         )
+
+        # 有名字就写入 manage_name；无名字保持默认空串。
+        if export_name:
+            set_manage_name(record_id, export_name)
 
         if not start:
             # 草稿：只登记不入队，等待用户手动「启动」。
@@ -1579,6 +1711,135 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
             "session_path": rec.get("obs_dst", ""),
             "total_sessions": rec.get("total_sessions", 0),
             "error_message": rec.get("error_message", ""),
+        })
+
+    # --- 公开导出提交/状态路由（access-key 验证） ---
+
+    def _check_public_export(key: str, access_key: str):
+        """access-key 验证身份（.env 的 ACCESS_KEY）；key 解析到日志 api_key。
+
+        返回 (err, resolved_key)：err 为 JSONResponse 错误或 None；resolved_key 为
+        解析后的完整日志 api_key，err 非 None 时置 None。
+        """
+        if not verify_access_key(access_key):
+            return JSONResponse({"detail": "Invalid access-key"}, status_code=403), None
+        if not key:
+            return JSONResponse({"detail": "Key not found"}, status_code=404), None
+        roots = [r for r in _all_roots() if Path(r).is_dir()]
+        resolved = resolve_export_key(key, roots, str(env_dir))
+        if resolved is None:
+            return JSONResponse({"detail": "Key not found"}, status_code=404), None
+        if resolved == -1:
+            return JSONResponse({"detail": "Key not unique (ambiguous suffix)"}, status_code=404), None
+        return None, resolved
+
+    # 公开 submit 里各 mode 落到 OBS 的子目录，与 _run_task_inner 的 obs_sub 分支一致
+    _PUBLIC_MODE_OBS_SUB = {
+        "export": "session",
+        "reformat": "session_analysis",
+        "eval": "session_analysis",
+        "reconstruct": "session_reconstruct",
+        "full_reformat": "session_analysis_full",
+    }
+    _PUBLIC_MODES = tuple(_PUBLIC_MODE_OBS_SUB.keys())
+
+    @app.get("/export/submit")
+    def public_export_submit(key: str = "", model: str = "", export_name: str = "",
+                             mode: str = "export",
+                             access_key: str = Query(default="", alias="access-key")):
+        """按给定 key 正式导出：创建真实导出任务（export_records），显示名用 export_name。
+
+        与「对话浏览」保持一致：找 build_stats_multi 里该 key 的全部 mtime 目录导出。
+        model 参数仅为兼容 URL 语义保留——导出任务按现有 mtime_dirs 全量执行，
+        不做按 model 的会话过滤（与既有「导出」页行为一致）。
+
+        mode 指定导出类型（export/reformat/eval/reconstruct/full_reformat），默认 export
+        即现有行为。full_reformat（全量导出）与内部 /api/export/run 一致：只允许单个
+        mtime 目录，多目录时拒绝（提示，不静默取第一个）。
+        """
+        err, api_key = _check_public_export(key, access_key)
+        if err:
+            return err
+
+        if mode not in _PUBLIC_MODES:
+            return JSONResponse(
+                {"detail": f"Invalid mode '{mode}' (allowed: {', '.join(_PUBLIC_MODES)})"},
+                status_code=400,
+            )
+
+        roots = [r for r in _all_roots() if Path(r).is_dir()]
+        stats = build_stats_multi(roots, active_env_dir=str(env_dir)) if roots else {"rows": []}
+        mtime_dirs = []
+        for row in stats.get("rows", []):
+            if row["api_key"] == api_key:
+                mtime_dirs = sorted(row.get("mtime_cells", {}).keys(), reverse=True)
+                break
+        if not mtime_dirs:
+            return JSONResponse({"detail": "No session data found for this key"}, status_code=404)
+
+        if mode == "full_reformat" and len(mtime_dirs) != 1:
+            return JSONResponse(
+                {"detail": f"全量导出(full_reformat)仅支持单个 mtime 目录，该 key 落到 {len(mtime_dirs)} 个目录"},
+                status_code=400,
+            )
+
+        slot = _key_slot(api_key)
+        obs_prefix = load_obs_base()
+        now_tag = datetime.now().strftime("%y%m%d%H%M%S")
+        obs_sub = _PUBLIC_MODE_OBS_SUB[mode]
+
+        record_id = create_record(
+            api_key=api_key, key_slot=slot,
+            mtime_dirs=json.dumps(mtime_dirs),
+            mode=mode,
+            key_name=_key_name_snapshot(api_key),
+        )
+        if export_name:
+            set_manage_name(record_id, export_name)
+
+        obs_dst = f"{obs_prefix}/{obs_sub}/{env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
+        persist_params(record_id, mode=mode, obs_prefix=obs_prefix, force=False, now_tag=now_tag,
+                       env_dir=str(env_dir), env_key_name=env_key_name)
+        _enqueue_task(record_id, lambda rid=record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode: _run_task(rid, ed, ek, op, nt, m))
+
+        return JSONResponse({
+            "export_id": record_id,
+            "session_path": obs_dst,
+            "status": "queued",
+            "success": True,
+            "mode": mode,
+            "export_name": export_name,
+        })
+
+    @app.get("/export/status")
+    def public_export_status(export_id: int = 0, key: str = "",
+                             access_key: str = Query(default="", alias="access-key")):
+        """按 export_id 查询导出状态；仅需 access-key（URL 无 key 也可）。"""
+        if not verify_access_key(access_key):
+            return JSONResponse({"detail": "Invalid access-key"}, status_code=403)
+
+        from utils.export_store import get_record_resolved
+        rec = get_record_resolved(export_id)  # 自动解析外部文件
+        if not rec:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+
+        # URL 若带 key，解析后校验与记录归属一致（镜像 /api/shared/export/status）。
+        # 统一走 resolve_export_key（支持后四位后缀），与提交/浏览的 key 语义一致。
+        if key:
+            roots = [r for r in _all_roots() if Path(r).is_dir()]
+            resolved_key = resolve_export_key(key, roots, str(env_dir))
+            if resolved_key is None or resolved_key == -1:
+                return JSONResponse({"detail": "Key not found"}, status_code=404)
+            if rec.get("api_key") and rec["api_key"] != resolved_key:
+                return JSONResponse({"detail": "Access denied"}, status_code=403)
+
+        return JSONResponse({
+            "export_id": rec["id"],
+            "status": rec["status"],
+            "session_path": rec.get("obs_dst", ""),
+            "total_sessions": rec.get("total_sessions", 0),
+            "error_message": rec.get("error_message", ""),
+            "mode": rec.get("mode", ""),
         })
 
     # 注意：导出执行已剥离到独立 export_worker 进程，app 启动**不再**清理

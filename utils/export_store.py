@@ -346,7 +346,7 @@ def latest_quality_record(source_export_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-_SLIM_COLS = "id, key_slot, api_key, key_name, mtime_dirs, status, mode, created_at, total_sessions, files_uploaded, obs_dst, local_copy_dir, error_message"
+_SLIM_COLS = "id, key_slot, api_key, key_name, mtime_dirs, status, mode, created_at, total_sessions, files_uploaded, obs_dst, local_copy_dir, error_message, manage_name"
 
 _DS_COLS = "id, key_slot, api_key, key_name, status, mode, created_at, total_sessions, obs_dst, error_message, local_copy_dir, in_manage, manage_name"
 

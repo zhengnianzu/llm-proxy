@@ -12,11 +12,11 @@ from urllib.parse import parse_qs, urlparse
 
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Any, Dict, List, Optional, AsyncIterator
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -40,7 +40,7 @@ from utils.logs_config import get_stats_roots
 from utils.log_routes import register_log_routes
 from utils.session_routes import register_session_routes
 from utils.key_routes import register_key_routes
-from utils.export_routes import register_export_routes
+from utils.export_routes import register_export_routes, resolve_export_key, verify_access_key
 from utils.channel_routes import register_channel_routes
 from utils.user_routes import register_user_routes
 from utils.export_store import init_db as init_export_db
@@ -129,6 +129,9 @@ MONITOR_AUTH_PUBLIC_PATHS = {
     "/register",
     "/invite",
     "/history/shared",
+    "/export/view",
+    "/export/submit",
+    "/export/status",
 }
 
 MONITOR_ADMIN_ONLY_PATHS = {"/users", "/logs-admin"}
@@ -266,7 +269,7 @@ _PASSTHROUGH_EXCLUDE_PREFIXES = (
     "query", "history", "failures", "register", "login", "logout",
     "invite", "hi", "docs", "redoc", "openapi.json", "favicon.ico",
     "static", "api", "metrics", "logs", "sessions", "keys", "channels",
-    "users", "backup", "thinking",
+    "users", "backup", "thinking", "export",
 )
 
 
@@ -1751,6 +1754,127 @@ async def chat_viewer_shared(request: Request, key: str = "", code: str = ""):
             "shared_code": code,
         },
     )
+
+
+# --- 公开导出浏览（access-key 验证，风格对齐「对话浏览」） ---
+
+
+def _check_public_view(access_key: str, key: str = ""):
+    """导出浏览身份验证：access_key 取 .env 的 ACCESS_KEY（无默认值，未配置恒拒）；key 必须是日志命名空间里能解析出的完整/后四位 key。
+    返回 (err, resolved_key)：err 非空则直接返回；否则 resolved_key 为完整 key。"""
+    if not verify_access_key(access_key):
+        return JSONResponse({"detail": "Invalid access-key"}, status_code=403), None
+    if not key:
+        return JSONResponse({"detail": "Key not found"}, status_code=404), None
+    roots = [r for r in _stats_roots() if Path(r).is_dir()]
+    resolved = resolve_export_key(key, roots, str(ENV_DIR))
+    if resolved is None:
+        return JSONResponse({"detail": "Key not found"}, status_code=404), None
+    if resolved == -1:
+        return JSONResponse({"detail": "Key not unique (ambiguous suffix)"}, status_code=404), None
+    return None, resolved
+
+
+@app.get("/export/view")
+async def export_view_page(request: Request, key: str = "", model: str = "",
+                           access_key: str = Query(default="", alias="access-key")):
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    return templates.TemplateResponse(
+        request,
+        "chat-viewer.html",
+        context={
+            "active_page": "history",
+            "user_role": "shared",
+            "user_name": "",
+            "user_permissions": [],
+            "shared_mode": True,
+            "shared_api_key": resolved_key,
+            "shared_code": access_key,
+            "export_view_mode": True,
+            "export_key": resolved_key,
+            "export_model": model,
+        },
+    )
+
+
+@app.get("/export/view/api/aggregate")
+def export_view_api_aggregate(key: str = "", model: str = "", min_messages: int = 1,
+                              offset: int = 0, limit: int = 50, refresh: bool = False,
+                              search: str = "", q1search: str = "",
+                              access_key: str = Query(default="", alias="access-key")):
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import export_view_aggregate_payload
+    return JSONResponse(export_view_aggregate_payload(
+        _stats_roots(), ENV_DIR, min_messages, offset, limit, resolved_key, model, search, q1search, refresh))
+
+
+@app.get("/export/view/api/list")
+def export_view_api_list(key: str = "", model: str = "", min_messages: int = 1,
+                         offset: int = 0, limit: int = 50, refresh: bool = False,
+                         search: str = "", q1search: str = "",
+                         access_key: str = Query(default="", alias="access-key")):
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import export_view_list_payload
+    return JSONResponse(export_view_list_payload(
+        _stats_roots(), ENV_DIR, min_messages, offset, limit, resolved_key, model, search, q1search, refresh))
+
+
+@app.get("/export/view/api/dirs")
+def export_view_api_dirs(key: str = "", access_key: str = Query(default="", alias="access-key")):
+    err, _ = _check_public_view(access_key, key)
+    if err:
+        return err
+    return JSONResponse({"dirs": [], "current": ""})
+
+
+@app.get("/export/view/api/file")
+def export_view_api_file(key: str = "", filename: str = "", log_dir: str = "",
+                         access_key: str = Query(default="", alias="access-key")):
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import _export_view_find_file, _load_conversation_file
+    path = _export_view_find_file(_stats_roots(), ENV_DIR, filename, api_key=resolved_key)
+    if not path:
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    data = _load_conversation_file(path)
+    if data is None:
+        return JSONResponse({"error": "parse failed or invalid filename"}, status_code=500)
+    return JSONResponse(data)
+
+
+@app.get("/export/view/api/file/download")
+def export_view_api_file_download(key: str = "", filename: str = "", log_dir: str = "",
+                                  access_key: str = Query(default="", alias="access-key")):
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import _export_view_find_file
+    path = _export_view_find_file(_stats_roots(), ENV_DIR, filename, api_key=resolved_key)
+    if not path:
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    return FileResponse(path, filename=filename, media_type="application/json")
+
+
+@app.get("/export/view/api/file/raw")
+def export_view_api_file_raw(key: str = "", filename: str = "", log_dir: str = "",
+                             access_key: str = Query(default="", alias="access-key")):
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import _export_view_find_file
+    path = _export_view_find_file(_stats_roots(), ENV_DIR, filename, api_key=resolved_key)
+    if not path:
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return JSONResponse(data)
 
 
 @app.get("/failures")

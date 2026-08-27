@@ -1,0 +1,131 @@
+{% extends "_layout.html" %}
+
+{% block title %}Session 导出浏览{% endblock %}
+{% block mobile_title %}导出浏览{% endblock %}
+
+{% block head_extra %}
+<script src="/static/js/vue.min.js"></script>
+{% endblock %}
+
+{% block page_styles %}
+.browse-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.browse-head .hint { color: var(--muted-foreground); font-size: .85rem; }
+.filter-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.filter-bar input { max-width: 340px; }
+
+.key-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.key-card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-lg);
+            padding: 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 10px; }
+.key-card .kc-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.key-card .kc-name { font-weight: 700; color: var(--foreground); font-size: .95rem; word-break: break-all; }
+.key-card .kc-key { font-family: var(--font-mono); font-size: .76rem; color: var(--muted-foreground); word-break: break-all; }
+.key-card .kc-count { font-size: .8rem; color: var(--muted-foreground); white-space: nowrap; }
+.key-card .kc-count b { color: var(--primary); font-size: 1.05rem; }
+.kc-models { display: flex; gap: 6px; flex-wrap: wrap; }
+.kc-model-btn { cursor: pointer; font-size: .78rem; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+                border: 1px solid var(--border); background: var(--background); color: var(--foreground); }
+.kc-model-btn:hover { border-color: var(--primary); color: var(--primary); }
+.kc-model-btn.all { background: color-mix(in srgb, var(--primary) 12%, transparent); border-color: transparent; color: var(--primary); }
+.kc-model-cnt { color: var(--muted-foreground); font-weight: 500; margin-left: 4px; }
+
+.browse-empty { text-align: center; color: var(--muted-foreground); padding: 48px 0; }
+.browse-loading { text-align: center; color: var(--muted-foreground); padding: 48px 0; }
+{% endblock %}
+
+{% block content %}
+{% raw %}
+<div id="app">
+    <div class="browse-head">
+        <div>
+            <h5 style="font-weight:700;margin:0 0 4px;">导出浏览</h5>
+            <div class="hint">选择一个 Key（可按模型）进入导出浏览页，跨全部叶子聚合会话，支持分页与深度搜索。</div>
+        </div>
+        <button class="btn btn-primary btn-sm" @click="fetchKeys(true)" :disabled="loading">
+            {{ loading ? '刷新中…' : '刷新列表' }}
+        </button>
+    </div>
+
+    <div class="filter-bar">
+        <input type="text" class="input input-sm" v-model="keyFilter"
+               placeholder="筛选 Key（名称 / api_key 尾部）">
+    </div>
+
+    <div v-if="loading && !keysLoaded" class="browse-loading">加载中…（首次或高峰时需扫盘，稍候）</div>
+    <div v-else-if="error" class="browse-empty" style="color:var(--destructive)">{{ error }}</div>
+    <div v-else-if="!filteredKeys.length" class="browse-empty">暂无可浏览的 Key</div>
+
+    <div v-else class="key-grid">
+        <div class="key-card" v-for="k in filteredKeys" :key="k.api_key">
+            <div class="kc-top">
+                <div>
+                    <div class="kc-name">{{ k.key_name || '(未命名)' }}</div>
+                    <div class="kc-key">{{ k.api_key }}</div>
+                </div>
+                <div class="kc-count"><b>{{ k.total_sessions }}</b><br>会话</div>
+            </div>
+            <div class="kc-models">
+                <span class="kc-model-btn all" @click="go(k.api_key, '')">全部模型</span>
+                <span class="kc-model-btn" v-for="(cnt, m) in k.model_distribution" :key="m"
+                      @click="go(k.api_key, m)">
+                    {{ m }}<span class="kc-model-cnt">{{ cnt }}</span>
+                </span>
+            </div>
+        </div>
+    </div>
+</div>
+{% endraw %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+var ACCESS_KEY = {{ access_key|tojson }};
+new Vue({
+    el: '#app',
+    data: {
+        keys: [],
+        loading: false,
+        keysLoaded: false,
+        keyFilter: '',
+        error: '',
+    },
+    computed: {
+        filteredKeys: function() {
+            var q = (this.keyFilter || '').trim().toLowerCase();
+            if (!q) return this.keys;
+            return this.keys.filter(function(k) {
+                return (k.key_name || '').toLowerCase().indexOf(q) !== -1
+                    || (k.api_key || '').toLowerCase().indexOf(q) !== -1;
+            });
+        }
+    },
+    methods: {
+        fetchKeys: function(force) {
+            var self = this;
+            self.loading = true;
+            self.error = '';
+            var url = '/api/export/keys' + (force ? '?force=1' : '');
+            fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                .then(function(r) {
+                    if (!r.ok) throw new Error('加载失败 (' + r.status + ')');
+                    return r.json();
+                })
+                .then(function(data) {
+                    self.keys = (data.keys || []).filter(function(k) {
+                        return k.api_key && k.api_key !== '(empty)';
+                    });
+                    self.keysLoaded = true;
+                })
+                .catch(function(e) { self.error = e.message || '加载失败'; })
+                .finally(function() { self.loading = false; });
+        },
+        go: function(apiKey, model) {
+            var u = '/export/view?key=' + encodeURIComponent(apiKey)
+                  + '&model=' + encodeURIComponent(model || '')
+                  + '&access-key=' + encodeURIComponent(ACCESS_KEY);
+            window.location.href = u;
+        }
+    },
+    mounted: function() { this.fetchKeys(false); }
+});
+</script>
+{% endblock %}

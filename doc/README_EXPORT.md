@@ -1,10 +1,16 @@
 # Session 导出与质检 — 设计文档
 
+> ⚠️ 本文档为**设计文档**，部分内容已落后于当前实现。实际代码自 2026-08 起重构：
+> 任务执行剥离到独立 `export_worker` 进程、模式从 2 种扩到 5 种、OBS 上传改为
+> 收尾统一上传。带「当前实现」标注的段落是已核实的最新行为，其余段落为设计初衷，
+> 以代码为准。公开 URL 导出见 [README_export_public.md](README_export_public.md)。
+
 ## 概览
 
-Session 导出/质检模块提供 Web 界面，用于将 LLM 代理日志从本地 mtime 目录导出到结构化的 session 文件，并可选地进行质量检测（reformat + 分析 + 报告）。两种模式共享统一的后端任务引擎和前端轮询机制。
+Session 导出/质检模块提供 Web 界面，用于将 LLM 代理日志从本地 mtime 目录导出到结构化的 session 文件，并可选地进行质量检测（reformat + 分析 + 报告）。**当前实现**支持 5 种模式（export / eval / reformat / reconstruct / full_reformat），共享统一的后端任务引擎和前端轮询机制。
 
-**入口**: `/keys/export` （与 Key 管理共享认证）
+**入口（内部）**: `/keys/export` （与 Key 管理共享认证）
+**入口（公开 URL）**: `/export/view` `/export/submit` `/export/status`（`acesskey` 认证，见 [README_export_public.md](README_export_public.md)）
 
 ## 架构
 
@@ -22,21 +28,32 @@ Session 导出/质检模块提供 Web 界面，用于将 LLM 代理日志从本�
 └────────┼──────────────┼──────────────┼──────────────┼────────┘
          ▼              ▼              ▼              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  后端 (utils/export_routes.py)                               │
+│  后端 (utils/export_routes.py) —— 只负责建记录 + 入队          │
 │                                                             │
 │  register_export_routes(app, logs_dir)                      │
 │    ├─ GET  /api/export/config        服务配置                │
 │    ├─ GET  /api/export/keys          Key列表 + 历史记录       │
-│    ├─ POST /api/export/run           创建任务(导出/质检)      │
+│    ├─ POST /api/export/run           创建任务(导出/质检/…)     │
+│    ├─ POST /api/export/start         启动草稿(draft)记录       │
 │    ├─ POST /api/export/eval          手动质检(基于已有导出)    │
+│    ├─ POST /api/export/retry         重试失败/取消任务         │
+│    ├─ POST /api/export/upload_retry  仅重试 OBS 上传          │
 │    ├─ GET  /api/export/status/:id    任务状态 + 日志          │
 │    ├─ GET  /api/export/records       记录列表                │
 │    ├─ GET  /api/export/obs/ls        OBS 目录浏览             │
 │    └─ GET  /api/export/eval/report/:id  质检报告(Markdown)    │
 │                                                             │
-│  _run_task(record_id, env_dir, env_key_name,                │
-│            obs_prefix, now_tag, mode)                        │
-│    → 统一任务执行引擎，mode="export" | "eval"                │
+│  _enqueue_task(record_id) → status=queued 入队              │
+└─────────────────────────────────────────────────────────────┘
+         │  队列 (export_session_record.db, status='queued')
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  独立 worker 进程 (utils/export_worker.py)                    │
+│  python -m utils.export_worker  —— 长驻，轮询 DB 领任务        │
+│                                                             │
+│  _init_env(): init_db(svc_dir) + cancel_interrupted()        │
+│  主循环: 抢槽位锁(slot.lock) → claim_next_queued() →          │
+│         _run_one(rec) 按 task_json 重建参数执行              │
 └─────────────────────────────────────────────────────────────┘
          │                          │
          ▼                          ▼
@@ -48,60 +65,87 @@ Session 导出/质检模块提供 Web 界面，用于将 LLM 代理日志从本�
 └─────────────────┘    └──────────────────────┘
 ```
 
-## 两种模式
+## 任务模式
 
-导出和质检是 **互斥** 的两种操作模式（OR 关系），由 DB 记录的 `mode` 字段区分：
+> **当前实现**：以下为已核实的 5 种模式（由 DB 记录的 `mode` 字段区分），
+> 比早期设计的 2 种（export/eval）扩展了 3 种合并类模式。前端在「新建导出任务」Modal
+> 里选「导出方式」，不再只是勾选「质检模式」。旧 `auto_eval` 布尔已降级为兼容参数
+> （仅当显式 `mode` 非法时兜底 `eval` / `export`）。
 
 ### 导出模式 (mode="export")
 
 用途：将原始 session 三元组文件（request/response/trace）复制到本地目录并同步到 OBS。
 
 ```
-用户选 Key + mtime目录 → POST /api/export/run (auto_eval=false)
+用户选 Key + mtime目录 → POST /api/export/run (mode="export")
   → 创建 record (mode="export")
-  → _run_task 在后台线程执行:
+  → _enqueue_task 入队（status=queued）
+  → export_worker 领取执行:
       for each mtime_dir:
         1. export_session_index()  — 生成 session_index.jsonl
-        2. sync_session_index()    — 按 key 过滤，本地复制 + OBS 上传
+        2. sync_session_index()    — 按 key 过滤，复制三元组到共享 local_base
+      → 收尾（循环外）统一上传整个 local_base 到 OBS
       → 更新 status = success/failed
 ```
 
 本地输出: `logs_session/{env_key}/{slot}/ex-{now_tag}/`
 OBS 路径: `{obs_prefix}/session/{env_key}/{slot}/ex-{now_tag}/`
 
-**关键**: OBS 上传发生在 `sync_session_index()` 内部，逐 mtime 目录上传。
+**当前实现（关键变更）**: OBS 上传**不再**在 `sync_session_index()` 内部逐 mtime 目录上传，
+而是把全部 mtime 目录复制到共享 `local_base` 后**收尾统一上传一次**（避免多目录并行时
+重复上传 + 写入中上传的竞态）。
 
 ### 质检模式 (mode="eval")
 
 用途：将三元组合并为完整对话，分析消息/工具/质量指标，生成 Markdown 报告。
 
 ```
-触发方式 A: 勾选"质检模式" → POST /api/export/run (auto_eval=true)
+触发方式 A: 新建任务选「质检」→ POST /api/export/run (mode="eval")
 触发方式 B: 在已有导出记录上点 [质检] → POST /api/export/eval
-  → 创建 record (mode="eval")
-  → _run_task 在后台线程执行:
+  → 创建 record (mode="eval", source_export_id=原记录)
+  → _enqueue_task 入队
+  → export_worker 领取执行:
       for each mtime_dir:
         1. _load_session_index()     — 读取已有索引
-        2. reformat_and_analyze()    — 合并三元组 + 分析 (多进程)
+        2. reformat_and_analyze()    — 合并三元组 + 分析 (analyze=True)
       post-loop:
         3. evaluate_sessions()       — 聚合统计 + 生成 session_report.md
-        4. _run_upload_cmd()         — 一次性上传整个目录到 OBS
-      → 更新 status = success/failed
+        4. 统一上传整个分析目录到 OBS
+      → 更新 status
 ```
 
 本地输出: `logs_session_analysis/{env_key}/{slot}/ex-{now_tag}/`
 OBS 路径: `{obs_prefix}/session_analysis/{env_key}/{slot}/ex-{now_tag}/`
 
-**关键**: OBS 上传在循环外统一做一次（因为报告需要所有 session 数据汇总后才能生成）。
+**关键**: OBS 上传在循环外统一做一次（报告需所有 session 数据汇总后才能生成）。
+
+### 合并导出 (mode="reformat")
+
+`reformat_and_analyze(analyze=False)`，不跑质检，把每个 session 的 `latest_file` 合并为
+单个 session JSON（无分析步骤），落 `logs_session_analysis/`，OBS `session_analysis/`。
+
+### 重构导出 (mode="reconstruct")
+
+hermes 重构聚合：`reconstruct_and_export` 逐 session 聚合**多个** trace 文件（去重 +
+保留分支 + 回填 reasoning），落 `logs_session_reconstruct/`，OBS `session_reconstruct/`。
+**仅支持 new-api 目录**（native 三元组叶子无合并文件实物，生成 session_index 前即跳过）。
+
+### 全量导出 (mode="full_reformat")
+
+`full_reformat_export` 把每个 session 的 `trace_list` 全部文件合并落盘（无 analyze），
+落 `logs_session_analysis_full/`，OBS `session_analysis_full/`。
+**单次只导一个 mtime 目录**（海量文件，限制避免放大资源占用）。
 
 ### 手动质检 (POST /api/export/eval)
 
-从已有的导出记录创建 **新的** eval 记录，复制 `api_key`、`key_slot`、`mtime_dirs`：
+从已有的导出记录创建 **新的** eval 记录，复制 `api_key`、`key_slot`、`mtime_dirs`，
+并在 `source_export_id` 里记下原记录 id 以便溯源：
 
 ```python
 new_record_id = create_record(
     api_key=rec["api_key"], key_slot=rec["key_slot"],
     mtime_dirs=rec["mtime_dirs"], mode="eval",
+    source_export_id=src_record_id,
 )
 ```
 
@@ -109,26 +153,42 @@ new_record_id = create_record(
 
 ## 统一任务引擎 (_run_task)
 
-`_run_task` 是导出和质检的统一入口，替代了之前独立的 `_do_export` + `_run_eval` 两个函数：
+`_run_task` 是全部模式的统一执行入口。**当前实现**：它不再在 app 进程的
+后台线程里运行，而是由独立的 `utils/export_worker.py` 进程执行。app 只负责
+建记录 + `_enqueue_task` 入队（`status=queued`）；worker 用
+`claim_next_queued()` 领取后调用 `_run_task_from_record()`，从 DB 记录 +
+`task_json` 参数重建执行上下文并跑 `_run_task()`。
+
+**为什么 task_json 必须持久化**：`env_dir` / `env_key_name` 是传给
+`register_export_routes(app, logs_dir)` 的绝对路径，无法由
+`SERVICE_LOG_DIR`（`logs/port<P>/<seg>`）反推——app 侧日志根是
+`get_log_dir("logs_all")`（`logs_all/<env>`），base 与日期段都不同。
+worker 是独立进程，拿不到 app 的内存闭包，故这些参数必须随任务落库
+（旧记录缺 `env_dir` 时兜底用 `get_log_dir("logs_all").parent`）。
 
 ```
 _run_task(record_id, env_dir, env_key_name, obs_prefix, now_tag, mode, force=False)
   │
-  ├─ 根据 mode 计算 local_base 和 obs_dst
-  │    export → logs_session/...      + session/...
-  │    eval   → logs_session_analysis/... + session_analysis/...
+  ├─ 按 mode 选择 processor 并注入 _run_task_inner
+  │    export / eval / reformat → reformat_and_analyze
+  │    reconstruct             → reconstruct_and_export  (逐 session 聚合多个 trace)
+  │    full_reformat           → full_reformat_export    (trace_list 全部文件合并)
   │
-  ├─ 遍历 mtime_dirs（唯一分歧点）:
-  │    export: export_session_index() + sync_session_index()
-  │    eval:   _load_session_index() + reformat_and_analyze()
-  │
-  ├─ 后处理（仅 eval）:
-  │    写 session_index.jsonl
-  │    evaluate_sessions() → 生成 session_report.md
-  │    _run_upload_cmd() → 上传到 OBS
+  ├─ _run_task_inner(..., processor, evaluate_sessions, _run_upload_cmd, _log)
+  │    ├─ 根据 mode 计算 local_base + obs_dst
+  │    │    export       → logs_session/            + session/
+  │    │    eval/reformat→ logs_session_analysis/   + session_analysis/
+  │    │    reconstruct  → logs_session_reconstruct/ + session_reconstruct/
+  │    │    full_reformat→ logs_session_analysis_full/ + session_analysis_full/
+  │    ├─ 设置协作式取消回调 _should_cancel()（每 ~2s 节流查一次 DB，取消后永久缓存）
+  │    ├─ 并发：workers（每目录线程数）× dir_workers（并行 mtime 目录数），
+  │    │    记录未设时回退全局 sync 配置默认（workers=8, dir_workers=8）
+  │    ├─ 遍历 mtime_dirs 执行 processor
+  │    ├─ post-loop: evaluate_sessions() → 写 session_report.md
+  │    └─ _run_upload_cmd() → 循环外统一上传整个产物目录到 OBS（全部模式）
   │
   └─ 统一状态更新:
-       update_status(record_id, "success"/"failed", ...)
+       update_status(record_id, "success"/"failed"/"cancelled", ...)
 ```
 
 ## 数据库 (export_store.py)
@@ -141,21 +201,50 @@ SQLite, 路径: `{service_log_dir}/export_session_record.db`
 |------|------|------|
 | id | INTEGER PK | 自增 |
 | api_key | TEXT | 筛选的 API key（空=全量） |
-| key_slot | TEXT | `"all"` 或 `"key-xxxx"` |
+| key_slot | TEXT | `"all"` 或 `"key-xxxx"`（`"key-" + api_key[-4:]`） |
 | mtime_dirs | TEXT (JSON) | `["26061500", "26061415"]` |
-| mode | TEXT | `"export"` 或 `"eval"` |
-| status | TEXT | `pending` → `running` → `success`/`failed` |
+| status | TEXT | 见下方**状态机** |
+| mode | TEXT | `"export"`/`"eval"`/`"reformat"`/`"reconstruct"`/`"full_reformat"`（默认 `"export"`） |
 | error_message | TEXT | 失败原因 |
 | total_sessions | INTEGER | 匹配/处理的 session 数 |
 | files_uploaded | INTEGER | 上传文件数（export 模式） |
 | files_skipped | INTEGER | 跳过文件数（export 模式） |
-| eval_report_path | TEXT | 报告文件路径（eval 模式） |
+| obs_dst | TEXT | 云端目标路径 |
+| local_copy_dir | TEXT | 本地产物目录 |
 | progress_log | TEXT (JSON) | 实时日志 `[{"ts":"...", "msg":"..."}]` |
+| eval_report_path | TEXT | 报告文件路径（eval 模式） |
+| eval_status | TEXT | **旧字段**，兼容旧记录，新代码不写 |
+| analysis_json | TEXT | 分析结果 JSON |
+| source_export_id | INTEGER | 手动质检溯源（eval 记录指向原导出记录） |
+| in_manage | INTEGER | 是否在管理列表 |
+| manage_name | TEXT | 管理列表自定义显示名（空=回退 key_slot） |
+| key_name | TEXT | key 显示名 |
+| workers | INTEGER | 每目录线程数（0=回退全局默认 8） |
+| dir_workers | INTEGER | 并行 mtime 目录数（0=回退默认 8） |
+| leaves_cache | TEXT | 匹配叶子缓存 |
+| task_json | TEXT (JSON) | **执行参数**，供独立 worker 进程重建上下文（env_dir/env_key_name/obs_prefix/now_tag/mode/force） |
+| is_delete | INTEGER | 软删除标记（1=已删，列表默认过滤；行与产物元数据保留，可 restore） |
 | created_at | TEXT | 创建时间 |
 | started_at | TEXT | 开始执行时间 |
 | finished_at | TEXT | 完成时间 |
 
-旧字段 `eval_status` 保留用于兼容旧记录，新代码不再写入。
+### 状态机 (status)
+
+```
+queued   → pending → running → success
+                        ↑         └→ failed
+                        └─(取消)→ cancelled
+draft    → (前端点「启动」) → 同一链路 queued→pending→running→...
+
+说明：
+- queued:   app 已入队，等 worker 领取
+- pending:  worker 已 claim（原子置为 pending），开始执行前的中态
+- running:  执行中（写 started_at）
+- success / failed / cancelled: 终态（写 finished_at）
+- draft:    草稿（start=False 建记录时置），由前端手动「启动」后才入队；重启不取消
+- 软删除: delete → is_delete=1（仅允许 draft/success/failed/cancelled 终态或草稿）
+- 重启: cancel_interrupted() 把遗留 running→failed("服务重启中断")、queued→cancelled("服务重启取消")
+```
 
 ## 质检报告 (Markdown)
 
@@ -217,13 +306,20 @@ running          → 显示 "导出中" 或 "质检中"（根据 mode）
 ### 操作流
 
 ```
-[导出] 按钮 → 打开 Modal → 选 mtime + 是否勾选质检 → POST /run
-  ├─ 不勾选 → mode=export → 轮询 → 完成后显示 [质检] 按钮
-  └─ 勾选   → mode=eval   → 轮询 → 完成后显示 [报告] 按钮
+[导出] 按钮 → 打开 Modal → 选 mtime + 选「导出方式」→ POST /run
+  ├─ 导出       → mode=export   → 轮询 → 完成后显示 [质检] 按钮
+  ├─ 质检       → mode=eval     → 轮询 → 完成后显示 [报告] 按钮
+  ├─ 合并导出   → mode=reformat → 轮询 → 完成后显示 [报告] 按钮
+  ├─ 重构导出   → mode=reconstruct → 轮询 → 完成后显示 [报告] 按钮
+  └─ 全量导出   → mode=full_reformat → 轮询 → 完成后显示 [报告] 按钮
 
-[质检] 按钮 → POST /eval → 创建新 eval 记录 → 轮询 → [报告]
+Modal 里可选「保存为草稿」（start=False）→ 只建 draft 记录，点 [启动] 才入队。
+
+[质检] 按钮（在已有导出记录上）→ POST /eval → 创建新 eval 记录（source_export_id 溯源）→ 轮询 → [报告]
 [报告] 按钮 → fetch /report → 报告面板内联显示 Markdown
 [详情] 按钮 → fetch /status → 日志面板显示进度
+[重试] 按钮 → POST /retry（失败/取消记录重新入队）;POST /upload_retry 仅重试 OBS 上传
+[删除] 按钮 → POST 删除接口（默认软删除 is_delete=1，可 restore 恢复）
 ```
 
 ## 认证
@@ -241,24 +337,69 @@ running          → 显示 "导出中" 或 "质检中"（根据 mode）
 - 不使用 `-flat`，利用 obsutil 递归上传自动携带本地目录名的特性
 - `obs_dst` 保持完整路径（含 `ex-{now_tag}/`），用于 DB 存储和前端 OBS 浏览
 - 上传时将 `obs_dst` 去掉最后一层，本地路径不带尾 `/`，obsutil 自动附加目录名还原完整路径
-- 导出模式: 在 `sync_session_index()` 内部逐 mtime 上传
-- 质检模式: 在循环外统一上传整个分析目录
+- **当前实现**: OBS 上传在 `_run_task_inner` 的 post-loop（循环外）**统一做一次**，
+  覆盖全部 5 种模式——`_run_upload_cmd()` 把整个产物目录（local_base）递归上传，
+  不再逐 mtime 目录上传。`/api/export/upload_retry` 可单独重试 OBS 上传失败。
 
 ## 文件清单
 
 | 文件 | 职责 |
 |------|------|
-| `utils/export_routes.py` | 路由注册 + _run_task 统一引擎 |
-| `utils/export_store.py` | SQLite CRUD（export_records 表） |
+| `utils/export_routes.py` | 路由注册 + 建记录/入队 + _run_task 统一引擎 |
+| `utils/export_store.py` | SQLite CRUD（export_records 表，状态机/软删除） |
+| `utils/export_worker.py` | **独立 worker 进程**：轮询 DB 领任务（claim_next_queued）并执行 |
+| `utils/export_jobs.py` | task_json 任务参数重建（供 worker 进程恢复执行上下文） |
 | `utils/export_sync.py` | session_index 生成 + 文件同步 |
 | `utils/eval/reformat.py` | 三元组合并 + 单 session 分析（多进程） |
+| `utils/eval/reconstruct.py` | 重构聚合（多 trace 去重/保留分支/回填 reasoning） |
+| `utils/eval/reformat_full.py` | 全量导出（trace_list 全部文件合并） |
 | `utils/eval/eval.py` | 统计聚合 + Markdown 报告生成 |
 | `utils/eval/quality_rules.py` | 质量检测规则 |
 | `utils/obs_sync.py` | OBS 上传工具函数 |
 | `tools/obs_upload.sh` | obsutil cp 包装脚本 |
 | `templates/export.html` | 前端页面（Vue 2 单文件） |
 
+## key 命名空间与匹配规则
+
+导出模块涉及**两套互不相同的 key 命名空间**，这是历史 bug 的根源，必须先分清：
+
+| 来源 | 内容 | 谁消费 |
+|------|------|--------|
+| **`api_keys` 表**（keys.db） | Web 端**签发/管理**的 key（本环境仅 2 个） | key 管理页、旧 `_find_key` |
+| **日志 api_key**（`session_cache.db` / newapi `index.db`） | 调用方**实际发来的**上游 key（本环境 169 个） | 「导出概览」列表、`/export/*` 校验、`/export/submit` 匹配 |
+
+「导出概览」「导出浏览」页列出的 key 来自**日志统计**（`build_stats_multi` / `_collect_log_keys`），
+显示为 `key_slot = "key-" + api_key[-4:]`（如 `key-1114`）。这些 key 大多**从未被签发**，
+`api_keys` 表里没有，所以旧逻辑用 `find_key` 校验时必然 404——这就是「浏览页列出的 key
+到 view 页走不通」的根因。
+
+### resolve_export_key（公开 URL 的统一 key 解析）
+
+`utils/export_routes.py` 的 `resolve_export_key(key, roots, env_dir)` 在**日志命名空间**里
+把传入的 key 解析成完整 api_key，接受三种形态：
+
+1. **全量 key**：`sk-...mQOk`（区分大小写精确命中）。
+2. **后四位后缀**：`mQOk`（唯一命中即返回完整 key）。
+3. **slot 形式**：`key-mQOk`（即概览/浏览页显示的 `key_slot`，剥掉 `key-` 前缀再按后缀匹配）。
+
+规则：去掉 `/` `key-` 前缀 → 空串返回 `None`；先精确命中，否则按后四位后缀匹配；后缀命中
+多个 → `-1`（`Key not unique`）；零个 → `None`（`Key not found`）。键集来自
+`_collect_log_keys`（native DISTINCT + newapi known_keys），带 5s TTL 缓存。
+
+三处口径统一消费该解析后的完整 key：
+- `/export/view` 系列：`app.py` `_check_public_view` → 传 `resolved_key` 下推聚合过滤。
+- `/export/submit`：`_check_public_export` → 用完整 key 匹配 `build_stats_multi` 的 `row["api_key"]`。
+- `/export/status`：URL 带 `key` 时校验与 `rec["api_key"]` 一致。
+
+> 旧 `/history/shared` 走 `_find_key`（`api_keys` 表）仍保持原行为，不受影响。
+
 ## 公开访问（无需登录）
+
+> 当前同时存在两代公开入口：
+> 1. **旧（本页）**：`/history/shared` 查历史 + `/api/shared/export` 发起导出 / `/api/shared/export/status/{id}` 查状态，`key + code` 认证。
+> 2. **新（公开 URL）**：`/export/view` `/export/submit` `/export/status`（`acesskey` 认证），字段/流程见 [README_export_public.md](README_export_public.md)。
+>
+> 两者都还可用；新入口增加 `acesskey` 校验与更细的 key 匹配（见下文「key 匹配规则」）。
 
 通过 `key + code` 参数可无需登录访问对话历史和导出功能。`code` 由 `.env` 中的 `SHARED_CODE` 配置，默认值为 `shared`。
 

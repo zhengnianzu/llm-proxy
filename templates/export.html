@@ -192,6 +192,8 @@
         <div class="filter-bar">
             <input type="text" class="input input-sm" v-model="keyFilter"
                    placeholder="筛选 Key（名称 / slot / api_key）" style="max-width:300px">
+            <input type="text" class="input input-sm" v-model="nameFilter"
+                   placeholder="筛选名字" style="max-width:160px">
             <select class="input input-sm" v-model="logDirFilter" v-if="config.mtimes && config.mtimes.length" style="max-width:220px">
                 <option value="">全部文件目录</option>
                 <option v-for="mt in config.mtimes" :key="mt" :value="mt">{{ mt }}</option>
@@ -220,6 +222,7 @@
             <thead>
                 <tr>
                     <th>ID</th>
+                    <th>名字</th>
                     <th>Key</th>
                     <th>导出方式</th>
                     <th>状态</th>
@@ -234,6 +237,9 @@
             <tbody>
                 <tr v-for="t in filteredTasks" :key="t.id">
                     <td style="white-space:nowrap;font-family:var(--font-mono);font-weight:600;">#{{ t.id }}</td>
+                    <td>
+                        <span v-if="t.manage_name" class="task-key-name" style="font-weight:600;">{{ t.manage_name }}</span>
+                    </td>
                     <td>
                         <span class="task-key-name">{{ t.key_slot }}</span>
                         <!-- 错误/跳过详情不在表格内展示，避免长文案刷屏；点「[日志]」查看完整原因 -->
@@ -390,6 +396,10 @@
                     <strong style="margin-left:8px;">{{ modalKey.key_name || modalKey.api_key }}</strong>
                 </div>
                 <div class="mb-3">
+                    <label class="form-label small">任务名字（可选）</label>
+                    <input type="text" class="input input-sm" v-model="taskName" placeholder="给这次导出起个名字，便于在列表里识别">
+                </div>
+                <div class="mb-3">
                     <label class="form-label small">OBS 路径前缀</label>
                     <input type="text" class="input input-sm" v-model="obsPrefix" placeholder="obs://bucket/path（可选，留空仅本地复制）">
                 </div>
@@ -541,6 +551,7 @@ new Vue({
         config: { port: '', env_key: '', env_dir: '', obs_base: '', workers: 0, interval: 0, mtimes: [], roots: [] },
         hasMultiRoot: false,
         obsPrefix: '',
+        taskName: '',
         keys: [],
         tasks: [],
         loading: false,
@@ -551,6 +562,7 @@ new Vue({
         error: '',
 
         keyFilter: '',
+        nameFilter: '',
         models: [],
         modelFilter: '',
         modelKw: '',
@@ -635,12 +647,13 @@ new Vue({
             return r.length;
         },
         hasTaskFilters: function() {
-            return !!(this.keyFilter || this.logDirFilter || this.statusFilter || this.modeFilter);
+            return !!(this.keyFilter || this.nameFilter || this.logDirFilter || this.statusFilter || this.modeFilter);
         },
         // 记录级筛选：直接对任务记录（export_records）用其自身字段匹配，
         // 不再经过 keys 统计中转（避免「建了任务却因 key 统计里没有而看不到」）。
         filteredTasks: function() {
             var q = (this.keyFilter || '').toLowerCase();
+            var nq = (this.nameFilter || '').toLowerCase();
             var ld = this.logDirFilter;
             var sf = this.statusFilter;
             var mdf = this.modeFilter;
@@ -648,12 +661,15 @@ new Vue({
                 var textOk = !q ||
                        (t.key_slot || '').toLowerCase().indexOf(q) !== -1 ||
                        (t.key_name || '').toLowerCase().indexOf(q) !== -1 ||
+                       (t.manage_name || '').toLowerCase().indexOf(q) !== -1 ||
                        (t.api_key || '').toLowerCase().indexOf(q) !== -1;
+                // 名字过滤：只匹配用户自定义的名字（manage_name）
+                var nameOk = !nq || (t.manage_name || '').toLowerCase().indexOf(nq) !== -1;
                 // 文件目录：匹配任务自身的 mtime_dirs（JSON 字符串数组）
                 var logDirOk = !ld || (t.mtime_dirs || '').indexOf(ld) !== -1;
                 var statusOk = !sf || t.status === sf || (sf === 'queued' && t.status === 'pending');
                 var modeOk = !mdf || t.mode === mdf;
-                return textOk && logDirOk && statusOk && modeOk;
+                return textOk && nameOk && logDirOk && statusOk && modeOk;
             });
         },
         // 新建任务第一步的 key 列表（用 Modal 独立的一套筛选变量，与主列表不联动）
@@ -961,6 +977,7 @@ new Vue({
             this.exportMode = 'reformat';
             this.taskWorkers = 8;
             this.taskDirWorkers = 8;
+            this.taskName = '';
             // 每次打开重置 Modal 自己的筛选，避免残留上次的条件
             this.mKeyFilter = '';
             this.mModelFilter = '';
@@ -995,6 +1012,7 @@ new Vue({
             this.exporting = true;
             var body = {
                 api_key: this.modalKey.api_key,
+                export_name: this.taskName,
                 mtime_dirs: this.selectedMtimes,
                 obs_prefix: this.obsPrefix,
                 force: this.forceExport,
