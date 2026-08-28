@@ -1812,6 +1812,35 @@ def export_view_api_aggregate(key: str = "", model: str = "", min_messages: int 
         _stats_roots(), ENV_DIR, min_messages, offset, limit, resolved_key, model, search, q1search, refresh))
 
 
+@app.get("/export/view/api/aggregate/stream/start")
+def export_view_api_aggregate_stream_start(key: str = "", model: str = "", min_messages: int = 1,
+                                           refresh: bool = False,
+                                           access_key: str = Query(default="", alias="access-key")):
+    """开启聚合流式任务：后台逐叶收集，前端轮询 /aggregate/stream/{task_id} 拿增量。"""
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import export_view_aggregate_stream_start
+    tid = export_view_aggregate_stream_start(
+        _stats_roots(), ENV_DIR, min_messages, resolved_key, model, refresh=refresh)
+    return JSONResponse({"task_id": tid})
+
+
+@app.get("/export/view/api/aggregate/stream/{task_id}")
+def export_view_api_aggregate_stream_poll(task_id: str,
+                                          access_key: str = Query(default="", alias="access-key")):
+    """取流式任务自上次轮询以来的增量 items；status=done 时前端停止轮询。
+
+    任务已在 start 时与 key 绑定并校验过 access-key，这里只验 access-key 有效，
+    不再对 key 做解析（task_id 本身即可定位任务）。
+    """
+    from utils.export_routes import verify_access_key
+    if not verify_access_key(access_key):
+        return JSONResponse({"detail": "Invalid access-key"}, status_code=403)
+    from utils.log_routes import export_view_aggregate_stream_poll
+    return JSONResponse(export_view_aggregate_stream_poll(task_id))
+
+
 @app.get("/export/view/api/list")
 def export_view_api_list(key: str = "", model: str = "", min_messages: int = 1,
                          offset: int = 0, limit: int = 50, refresh: bool = False,

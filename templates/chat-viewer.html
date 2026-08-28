@@ -562,6 +562,7 @@ const sidebarTitle = document.getElementById('sidebarTitle');
 let activeItem = null;
 let aggChains = [];
 let offset = 0;
+let renderedCount = 0;  // 已渲染进 DOM 的 aggChains 条数（流式收集全在内存，DOM 只保留 50 的倍数窗口）
 let totalItems = 0;
 let isLoadingMore = false;
 let knownKeys = new Set();
@@ -748,7 +749,11 @@ function updateModelDropdown() {
     const sel = document.getElementById('filterModel');
     const current = sel.value;
     sel.innerHTML = '<option value="">全部</option>';
-    [...knownModels].sort().forEach(m => {
+    const models = [...knownModels];
+    // 当前选中的模型（如来自 URL 的 _exportModel）可能还没出现在 knownModels 里，
+    // 补进去，否则 innerHTML 重建后 sel.value=current 会落空、下拉显示成「全部」。
+    if (current && !models.includes(current)) models.push(current);
+    models.sort().forEach(m => {
         const opt = document.createElement('option');
         opt.value = m;
         opt.textContent = m;
@@ -807,6 +812,7 @@ function resetAndLoad() {
     offset = 0;
     totalItems = 0;
     aggChains = [];
+    renderedCount = 0;
     knownKeys = new Set();
     knownModels = new Set();
     _searchQuery = '';
@@ -828,6 +834,7 @@ function reloadWithKey() {
     offset = 0;
     totalItems = 0;
     aggChains = [];
+    renderedCount = 0;
     _searchQuery = '';
     _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
@@ -840,6 +847,7 @@ function reloadWithModel() {
     offset = 0;
     totalItems = 0;
     aggChains = [];
+    renderedCount = 0;
     _searchQuery = '';
     _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
@@ -867,7 +875,16 @@ async function loadFileList(refresh = false) {
 
     if (folder === 'anthropic_agg' || folder === 'openai_agg' || folder === 'agg') {
         sidebarTitle.textContent = `对话聚合 (≥${min} 条)`;
+        const hasFilter = !!(params.includes('search=') || params.includes('q1search='));
+        // 流式：只在「无搜索 + 首页」时用。搜索需要全量收集才能正确过滤，首页之外的
+        // 翻页（loadMore）走内存窗口：内容已由流式/全量收集进 aggChains，DOM 只保留
+        // PAGE_SIZE 的倍数，滚动到底从内存补下一段，不发网络请求。
+        const useStream = _exportViewMode && !hasFilter;
         try {
+            if (useStream && offset === 0) {
+                await _loadAggStream(min, params);
+                return;
+            }
             const res = await fetch(`${_apiPrefix()}/aggregate${params}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
@@ -888,43 +905,7 @@ async function loadFileList(refresh = false) {
                 return;
             }
 
-            items.forEach((chain, idx) => {
-                const globalIdx = offset + idx;
-                const el = document.createElement('div');
-                el.className = 'file-item';
-
-                let rawText = '';
-                const q1 = chain.messages?.[0];
-                if (q1) {
-                    const c = q1.content;
-                    if (typeof c === 'string') rawText = c;
-                    else if (Array.isArray(c)) {
-                        const tb = c.find(b => b.type === 'text');
-                        rawText = tb?.text || '';
-                    }
-                }
-
-                let timestamp = '';
-                let taskText = chain.q1_preview || rawText;
-                if (!chain.q1_preview && chain.chain_key) {
-                    taskText = chain.chain_key;
-                }
-                const tsMatch = rawText.match(/\[([^\]]+GMT[^\]]*)\]\s*/);
-                if (tsMatch) {
-                    timestamp = tsMatch[1];
-                    taskText = rawText.slice(tsMatch.index + tsMatch[0].length)
-                        .replace(/^\[Subagent Context\]\s*/i, '').trim();
-                }
-                const preview = taskText.slice(0, 80) || rawText.slice(0, 80);
-
-                el.innerHTML = `
-                    <div class="file-item-name">${esc(preview || '(空)')}</div>
-                    <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${(chain.models || [chain.model]).filter(Boolean).join(', ') || '?'}</div>
-                    <div class="file-item-meta" style="font-size:10px;color:var(--muted-foreground)">${esc(timestamp || chain.first_time || '')}</div>
-                `;
-                el.addEventListener('click', () => selectAggChain(globalIdx, el));
-                fileListEl.appendChild(el);
-            });
+            items.forEach((chain, idx) => _appendAggItem(chain, offset + idx));
             updateLoadStatus();
             _updateRefreshTime(data.last_refresh_ts);
             isLoadingMore = false;
@@ -971,14 +952,178 @@ async function loadFileList(refresh = false) {
     }
 }
 
+function _appendAggItem(chain, globalIdx) {
+    const el = document.createElement('div');
+    el.className = 'file-item';
+
+    let rawText = '';
+    const q1 = chain.messages?.[0];
+    if (q1) {
+        const c = q1.content;
+        if (typeof c === 'string') rawText = c;
+        else if (Array.isArray(c)) {
+            const tb = c.find(b => b.type === 'text');
+            rawText = tb?.text || '';
+        }
+    }
+
+    let timestamp = '';
+    let taskText = chain.q1_preview || rawText;
+    if (!chain.q1_preview && chain.chain_key) {
+        taskText = chain.chain_key;
+    }
+    const tsMatch = rawText.match(/\[([^\]]+GMT[^\]]*)\]\s*/);
+    if (tsMatch) {
+        timestamp = tsMatch[1];
+        taskText = rawText.slice(tsMatch.index + tsMatch[0].length)
+            .replace(/^\[Subagent Context\]\s*/i, '').trim();
+    }
+    const preview = taskText.slice(0, 80) || rawText.slice(0, 80);
+
+    el.innerHTML = `
+        <div class="file-item-name">${esc(preview || '(空)')}</div>
+        <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${(chain.models || [chain.model]).filter(Boolean).join(', ') || '?'}</div>
+        <div class="file-item-meta" style="font-size:10px;color:var(--muted-foreground)">${esc(timestamp || chain.first_time || '')}</div>
+    `;
+    el.addEventListener('click', () => selectAggChain(globalIdx, el));
+    fileListEl.appendChild(el);
+}
+
+// 流式聚合：/export/view/api/aggregate 按叶子串行收齐（约 25s）才返回，前端要等全部
+// 读完才能渲染。这里改成「后台任务 + 增量队列」：先 start() 拿 task_id，再每 300ms
+// poll() 一次。收到的新条目**只进内存 aggChains**，DOM 只渲染前 PAGE_SIZE(50) 条，
+// 其余靠滚动 loadMore 从内存分页补出来（前端不把数万条全塞进 DOM）。mtime 新的叶子
+// 在前，所以最新对话秒显。轮询期间在状态栏展示收集进度（叶子 x/y、已收集 N 条）。
+async function _loadAggStream(min, params) {
+    // start 带上 model，让后台只收集该模型的会话（否则会收集全部模型，量级差很多）。
+    const _model = document.getElementById('filterModel').value;
+    const modelParam = _model ? `&model=${encodeURIComponent(_model)}` : '';
+    const startUrl = `${_apiPrefix()}/aggregate/stream/start?min_messages=${min}${modelParam}${_sharedParams()}`;
+    const startRes = await fetch(startUrl);
+    if (!startRes.ok) throw new Error(`HTTP ${startRes.status}`);
+    const { task_id } = await startRes.json();
+    if (!task_id) throw new Error('未拿到任务 id');
+
+    // 首页首帧：清空内存与 DOM，进入「加载中…」态。流式运行期间保持 isLoadingMore=true，
+    // 挡住滚动触发的 loadMore（收集期由本函数自己按需渲染窗口）。
+    aggChains = [];
+    totalItems = 0;
+    renderedCount = 0;
+    fileListEl.innerHTML = '<div class="cv-sidebar-tip"><span class="spinner"></span>加载中…</div>';
+    isLoadingMore = true;
+
+    let polls = 0, done = false, failed = false, lastLen = 0;
+    while (!done) {
+        const pollParams = `?${_sharedParams().replace(/^&/, '')}`;
+        const r = await fetch(`${_apiPrefix()}/aggregate/stream/${encodeURIComponent(task_id)}${pollParams}`);
+        if (!r.ok) {
+            failed = true;
+            if (offset === 0) fileListEl.innerHTML = `<div class="cv-sidebar-tip">加载失败：HTTP ${r.status}</div>`;
+            break;
+        }
+        const data = await r.json();
+        if (data.status === 'gone') {
+            // 任务已被清理（TTL 或服务重启），兜底：退回一次全量聚合。
+            failed = true;
+            await _loadAggFallback(min, params);
+            break;
+        }
+        const newItems = data.items || [];
+        if (newItems.length) {
+            // 只进内存；不逐条塞 DOM。首屏一旦收够 PAGE_SIZE 就渲染第一页窗口。
+            for (const chain of newItems) aggChains.push(chain);
+            collectKeys(data);
+            if (renderedCount === 0 && aggChains.length > 0) {
+                _renderAggWindow(true);  // 首页：清空 tip 并渲染前 PAGE_SIZE 条
+            }
+        } else if (data.known_keys || data.known_models) {
+            collectKeys(data);
+        }
+        if (data.total !== undefined && data.total !== null) totalItems = data.total;
+        _updateStreamProgress(data);
+        if (data.status === 'done') {
+            done = true;
+            break;
+        }
+        // 防无限转圈：最多轮询约 3 分钟（600 次 × 300ms）。超大 key 需跨 90+ 个叶子
+        // 串行收集，可超 1 分钟；若进度在推进就不打断，仅当长时间没新条目时才提前停。
+        if (++polls > 600) {
+            // 连续多次无增量仍 running → 视为卡住，停止等待（避免永久 loading）。
+            if (aggChains.length === lastLen) break;
+        }
+        lastLen = aggChains.length;
+        await new Promise(r2 => setTimeout(r2, 300));
+    }
+    if (!failed && !aggChains.length) {
+        fileListEl.innerHTML = '<div class="cv-sidebar-tip">没有满足条件的对话</div>';
+    }
+    isLoadingMore = false;
+    // 收集结束后刷新一次状态（切换到「已加载 x / 共 y」文案）与窗口。
+    if (!failed) {
+        if (renderedCount === 0 && aggChains.length) _renderAggWindow(true);
+        updateLoadStatus();
+    }
+}
+
+// 从内存 aggChains 渲染 [renderedCount, renderedCount+PAGE_SIZE) 这一页到 DOM。
+// reset=true 时先清空 DOM 并从 0 开始（首页）。
+function _renderAggWindow(reset) {
+    if (reset) {
+        fileListEl.innerHTML = '';
+        renderedCount = 0;
+    }
+    const end = Math.min(renderedCount + PAGE_SIZE, aggChains.length);
+    for (let i = renderedCount; i < end; i++) {
+        _appendAggItem(aggChains[i], i);
+    }
+    renderedCount = end;
+    updateLoadStatus();
+}
+
+// 流式兜底：任务丢失时退回到一次全量聚合（原逻辑）。
+async function _loadAggFallback(min, params) {
+    const res = await fetch(`${_apiPrefix()}/aggregate${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const items = data.items || [];
+    totalItems = data.total || items.length;
+    aggChains = items;
+    renderedCount = 0;
+    fileListEl.innerHTML = '';
+    collectKeys(data);
+    if (!aggChains.length) {
+        if (offset === 0 && _maybeShowBackfilling(data)) return;
+        fileListEl.innerHTML = '<div class="cv-sidebar-tip">没有满足条件的对话</div>';
+        return;
+    }
+    _renderAggWindow(true);  // 只渲染前 PAGE_SIZE 条；其余靠滚动 loadMore 从内存补
+    _updateRefreshTime(data.last_refresh_ts);
+}
+
 function updateLoadStatus() {
-    const loaded = fileListEl.querySelectorAll('.file-item').length;
+    // 显示态用 renderedCount（DOM 中实际渲染的条数），内存里 aggChains 可能远多于此。
+    const shown = renderedCount || fileListEl.querySelectorAll('.file-item').length;
     if (_deepSearchActive) {
         document.getElementById('loadStatus').textContent = `深度搜索: ${totalItems} 条匹配`;
     } else if (_q1Query) {
-        document.getElementById('loadStatus').textContent = `搜索到 ${totalItems} 条（已加载 ${loaded}）`;
+        document.getElementById('loadStatus').textContent = `搜索到 ${totalItems} 条（已显示 ${shown}）`;
     } else {
-        document.getElementById('loadStatus').textContent = `已加载 ${loaded} / 共 ${totalItems} 条`;
+        document.getElementById('loadStatus').textContent = `已显示 ${shown} / 共 ${totalItems} 条`;
+    }
+}
+
+// 流式收集进行中的进度文案：叶子 x/y + 已收集 N 条；done 时切回 updateLoadStatus。
+function _updateStreamProgress(data) {
+    const el = document.getElementById('loadStatus');
+    if (!el) return;
+    if (data.status === 'running') {
+        const lt = data.leaves_total || 0, ld = data.leaves_done || 0;
+        const collected = (data.total !== undefined && data.total !== null) ? data.total : aggChains.length;
+        let msg = `加载中… 已收集 ${collected} 条`;
+        if (lt > 0) msg += `（目录 ${ld}/${lt}）`;
+        el.textContent = msg;
+    } else {
+        updateLoadStatus();
     }
 }
 
@@ -996,8 +1141,17 @@ function _updateRefreshTime(ts) {
 
 function loadMore() {
     if (_searchQuery && !_deepSearchActive) return;
+    if (isLoadingMore) return;
+    // 流式/兜底聚合：全部内容已在内存 aggChains 里，翻页只需从内存渲染下一个 50 窗口，
+    // 不发网络请求。仅当内存里还有没渲染的条目时才动作。
+    const isAggMemory = _exportViewMode && aggChains.length > 0 && !_deepSearchActive && !_q1Query;
+    if (isAggMemory) {
+        if (renderedCount >= aggChains.length) return;
+        _renderAggWindow(false);
+        return;
+    }
     const loaded = fileListEl.querySelectorAll('.file-item').length;
-    if (isLoadingMore || loaded >= totalItems) return;
+    if (loaded >= totalItems) return;
     isLoadingMore = true;
     offset += PAGE_SIZE;
     loadFileList();
@@ -1625,6 +1779,17 @@ document.addEventListener('click', function(e) {
 if (_exportViewMode) {
     _logDirsLoaded = true;  // 导出浏览跨全部叶子，无来源/时间目录下拉
     _allDirs = [];
+    // URL 里带的 model：注入下拉并选中，使「模型」显示该模型，且首帧流式 start 就带上它
+    // 只收集该模型的会话。updateModelDropdown 会在后续刷新时保留当前 sel.value，不会被冲掉。
+    if (_exportModel) {
+        const _mSel = document.getElementById('filterModel');
+        if (_mSel && ![..._mSel.options].some(o => o.value === _exportModel)) {
+            const _o = document.createElement('option');
+            _o.value = _exportModel; _o.textContent = _exportModel;
+            _mSel.appendChild(_o);
+        }
+        if (_mSel) _mSel.value = _exportModel;
+    }
     resetAndLoad();
     const _params = new URLSearchParams(window.location.search);
     const _urlFile = _params.get('file');

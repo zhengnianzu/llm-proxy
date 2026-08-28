@@ -86,6 +86,36 @@ http://<host>:<port>/export/status?export_id=<id>&access-key=<ak>
 - `known_keys` 语义：由于叶子集被限定到目标 key，聚合/列表的 `known_keys` 只含当前 key
   （导出浏览页本就锁定单个 key，前端仅用它填充下拉，正确）；`known_models` 仍覆盖该 key 会话涉及的所有模型。
 
+### 聚合流式加载（大 key 优化）
+
+当 key 的会话散布在**大量** mtime 叶子（如 90+ 个）时，`/aggregate` 一次性收齐要数十秒，
+前端会长时间白屏。导出浏览页改为「后台任务 + 增量 poll」：
+
+- **`GET /export/view/api/aggregate/stream/start`**（`app.py:1815` → `export_view_aggregate_stream_start`，
+  `log_routes.py:1064`）— 立即返回 `{"task_id":"agg-<pid>-<seq>"}`，后台 daemon 线程
+  `_run()` 逐叶收集（mtime 倒序，最新会话先推）。
+- **`GET /export/view/api/aggregate/stream/{task_id}`**（`app.py:1829` → `export_view_aggregate_stream_poll`，
+  `log_routes.py:1174`）— 返回自上次 poll 以来的**增量** `items`，外加：
+  - `status`：`running` / `done` / `gone`
+  - `total`：已收集到的 item 数（累计即精确总数，不再另发 COUNT）
+  - `leaves_total` / `leaves_done`：叶子进度（前端展示「目录 x/y」）
+  - `cached`：本次是否为缓存命中
+  - `known_keys` / `known_models`：用于填充下拉
+- **轮询接口只验 access-key**（`verify_access_key`），不再对 key 做解析——任务在 start 时已与
+  key 绑定并校验过。**必须带 `?access-key=...` 且带 `?` 前缀**：poll 的 task_id 是路径段，
+  access-key 是查询参数，若拼成 `.../{task_id}&access-key=...` 会让 `&access-key=...` 落进路径，
+  导致 403。
+- **结果缓存**（`_AGG_CACHE`，`log_routes.py:1046`）：同 `(api_key, model, min_messages)` 收集完成
+  后写入缓存（TTL 900s）。再次打开同 key+model 时 start 直接命中缓存、立刻返回一个
+  `status=done, cached=true` 的任务，跳过对 tens of thousands 会话的重复收集。
+  `refresh=true` / 带 `search` / `q1search` 时**不**缓存、**不**查缓存（保证强制刷新与搜索词新鲜）。
+- 前端只把收集到的条目放进内存 `aggChains`，**DOM 只保留 PAGE_SIZE(50) 的倍数窗口**；
+  滚动到底 `loadMore()` 从内存补下一段（`_renderAggWindow`），不发网络请求。状态栏在
+  running 时显示「加载中… 已收集 N 条（目录 x/y）」，done 后切回「已显示 x / 共 y 条」。
+  URL 的 `model` 参数会被注入「模型」下拉并选中，且随 start 传给后台（只收集该模型会话）。
+- 任务 TTL 300s（`_AGG_STREAM_TTL`）：超时未被 poll 即清理；poll 到 `gone` 时前端退回一次
+  全量 `/aggregate`。
+
 ## 2. `/export/submit` — 正式导出提交
 
 `export_routes.py:1741`。等价于在「导出」页手工建一个正式导出任务：
