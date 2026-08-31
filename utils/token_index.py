@@ -29,6 +29,13 @@ _MEM_TTL = 10
 _mem_cache: Dict[str, dict] = {}      # root_str -> index dict
 _mem_cache_ts: Dict[str, float] = {}  # root_str -> 最后刷新时间
 
+# B：合并结果缓存——/query 三个端点并发（Promise.all）共享同一次刷新。
+# 窗口比 _MEM_TTL 长，一次构建可服务后续端点；「刷新」按钮 force 绕过。
+_COMBINED_TTL = 30
+_combined_cache: Dict[tuple, dict] = {}     # root 签名(归一化 tuple) -> merged dirs
+_combined_ts: Dict[tuple, float] = {}       # root 签名 -> 构建时间
+_combined_lock = threading.Lock()
+
 # 项目内缓存目录（当 root 不可写，如只读挂载的 new-api 目录时使用）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _FALLBACK_CACHE_DIR = _PROJECT_ROOT / "logs" / ".token_index_cache"
@@ -215,6 +222,23 @@ def _scan_index_file(index_file: Path, offset: int = 0,
     }
 
 
+def _leaf_subs(env_path: Path):
+    """免扫盘枚举叶子：已同步 root 走 leaf_status DB（镜像 stats_index），
+    未同步/本地 root 回退 iter_index_dirs 全盘 walk。
+
+    返回 (rid, [(sub: Path, row: dict|None), ...])。rid 供写回 leaf_status
+    （token 聚合落 token_stats_json）；未同步 root 时 rid 为 None 且不写回。
+    row 供签名判活；token 聚合产物经 set_leaf_token_stats 落 leaf_status。
+    """
+    import utils.logdir_store as _lds
+    from utils.stats_index import _resolve_rid, _leaf_status_subs
+
+    rid = _resolve_rid(env_path)
+    if rid and _lds.has_any(rid):
+        return rid, _leaf_status_subs(env_path, rid)
+    return None, [(sub, None) for sub in iter_index_dirs(env_path)]
+
+
 def refresh_token_index(env_dir: str, force: bool = False) -> dict:
     """增量刷新单个 root 的 token 索引。
 
@@ -241,14 +265,23 @@ def refresh_token_index(env_dir: str, force: bool = False) -> dict:
         dirs_cache = index.get("dirs", {})
         changed = False
 
+        rid, leaf_iter = _leaf_subs(env_path)
+        use_leaf_db = rid is not None
+        # dir_key → (sub, leaf_row)：供循环后按签名回写 leaf_status token 缓存。
+        sub_by_dir: Dict[str, tuple] = {}
+
         current_dirs = set()
-        for leaf in iter_index_dirs(env_path):
+        for leaf, leaf_row in leaf_iter:
             dir_key = dir_key_for(env_path, leaf)
             current_dirs.add(dir_key)
+            sub_by_dir[dir_key] = (leaf, leaf_row)
 
             prev = dirs_cache.get(dir_key)
 
-            if not force and prev and prev.get("frozen"):
+            # 未同步 root（全盘 walk，无 leaf_status DB 缓存）：沿用 frozen 快路径
+            # 先跳过，避免每次刷新对每个叶子重复 stat/重扫。已同步 root 走下方 DB
+            # 签名短路（同样跳过，且 force 也命中），无需此预检。
+            if not use_leaf_db and not force and prev and prev.get("frozen"):
                 continue
 
             index_file = leaf / "index.jsonl"
@@ -259,7 +292,29 @@ def refresh_token_index(env_dir: str, force: bool = False) -> dict:
             except OSError:
                 continue
 
-            if (not force and prev
+            # ── leaf_status token 缓存签名短路 ──────────────────────────────
+            # 一次 stat index.jsonl：签名未变且该叶 DB 已有 token_stats_json →
+            # 命中，直接用 DB 聚合结果组装 dir_info，跳过下方磁盘重扫。force
+            # 也命中（用户要求统计过没变化就不要重复统计）。
+            if (use_leaf_db and leaf_row is not None
+                    and leaf_row.get("token_stats_json")
+                    and leaf_row.get("idx_size") == f_size
+                    and leaf_row.get("idx_mtime") == f_mtime):
+                try:
+                    db_info = json.loads(leaf_row["token_stats_json"])
+                except (ValueError, TypeError):
+                    db_info = None
+                if db_info is not None:
+                    entry = dict(prev) if prev else {}
+                    entry.update(db_info)
+                    entry["index_mtime"] = f_mtime
+                    entry["index_size"] = f_size
+                    entry["frozen"] = True  # 签名命中即视为稳定（活跃叶 row=None 走不到这）
+                    dirs_cache[dir_key] = entry
+                    continue
+
+            # ── 文件/内存缓存签名命中（未同步 root 的持久来源，或迁库前旧数据）──
+            if (prev
                     and prev.get("index_mtime") == f_mtime
                     and prev.get("index_size") == f_size):
                 if not prev.get("frozen"):
@@ -268,9 +323,10 @@ def refresh_token_index(env_dir: str, force: bool = False) -> dict:
                 continue
 
             prev_offset = prev.get("scan_offset", 0) if prev else 0
-            if (not force and prev
+            if (prev
                     and prev_offset > 0
                     and f_size > prev.get("index_size", 0)):
+                # 文件增长、且已记录上次扫描偏移 → 增量读新追加部分
                 scan_result = _scan_index_file(index_file, offset=prev_offset, prev=prev)
             else:
                 scan_result = _scan_index_file(index_file)
@@ -294,6 +350,42 @@ def refresh_token_index(env_dir: str, force: bool = False) -> dict:
             index["dirs"] = dirs_cache
             index["updated_at"] = time.time()
             _save_index(env_path, index)
+
+        # ── 回写 leaf_status token 缓存 ──────────────────────────────────────
+        # 只在走 leaf_db 枚举（已同步 root）时回写。只回写已在表里的叶子；
+        # 活跃小时叶子（leaf_row is None）还没进表、每请求重算、永不冻结，
+        # 不落库污染叶子管理计数。签名相符且已有 token_stats_json → 跳过
+        # （签名短路命中那批）；只有真正重算/首建或旧文件迁过来的叶子才写。
+        if use_leaf_db:
+            import utils.logdir_store as _lds
+            for dir_key, (leaf, leaf_row) in sub_by_dir.items():
+                if leaf_row is None:
+                    continue
+                entry = dirs_cache.get(dir_key)
+                if not entry:
+                    continue
+                payload = {k: entry[k] for k in (
+                    "scan_offset", "entry_count", "models", "keys", "channels",
+                    "channel_keys_set", "api_keys_set", "dates") if k in entry}
+                if not payload:
+                    continue
+                idx_size = entry.get("index_size")
+                idx_mtime = entry.get("index_mtime")
+                if idx_size is None or idx_mtime is None:
+                    continue
+                # 与库中记录一致（签名相符且已有 token_stats_json）→ 无需重复写
+                if (leaf_row.get("idx_size") == idx_size
+                        and leaf_row.get("idx_mtime") == idx_mtime
+                        and leaf_row.get("token_stats_json")):
+                    continue
+                try:
+                    _lds.set_leaf_token_stats(
+                        rid, dir_key, leaf_path=str(leaf),
+                        idx_size=idx_size, idx_mtime=idx_mtime,
+                        token_stats_json=json.dumps(payload, ensure_ascii=False),
+                    )
+                except Exception:
+                    pass
 
         _mem_cache[env_dir_str] = index
         _mem_cache_ts[env_dir_str] = time.time()
@@ -321,15 +413,35 @@ def _as_roots(env_dir) -> List[str]:
 
 
 def _combined_index(env_dir, force: bool = False) -> dict:
-    """刷新一个或多个 root，合并为一个 index（dir_key 加 root 前缀防冲突）。"""
+    """刷新一个或多个 root，合并为一个 index（dir_key 加 root 前缀防冲突）。
+
+    B：按 root 签名做窗口内合并缓存——前端 3 个端点并发到达时只构建一次，
+    force（页面「刷新」按钮）绕过缓存强制重建。
+    """
     roots = _as_roots(env_dir)
-    merged: Dict[str, Any] = {}
-    for root in roots:
-        idx = refresh_token_index(root, force=force)
-        prefix = os.path.normpath(root)
-        for dir_key, dir_info in idx.get("dirs", {}).items():
-            merged[f"{prefix}::{dir_key}"] = dir_info
-    return {"dirs": merged}
+    sig = tuple(os.path.normpath(r) for r in roots)
+    now = time.time()
+
+    cached = _combined_cache.get(sig)
+    if (not force and cached is not None
+            and (now - _combined_ts.get(sig, 0)) < _COMBINED_TTL):
+        return {"dirs": cached}
+
+    with _combined_lock:
+        cached = _combined_cache.get(sig)
+        if (not force and cached is not None
+                and (time.time() - _combined_ts.get(sig, 0)) < _COMBINED_TTL):
+            return {"dirs": cached}
+
+        merged: Dict[str, Any] = {}
+        for root in roots:
+            idx = refresh_token_index(root, force=force)
+            prefix = os.path.normpath(root)
+            for dir_key, dir_info in idx.get("dirs", {}).items():
+                merged[f"{prefix}::{dir_key}"] = dir_info
+        _combined_cache[sig] = merged
+        _combined_ts[sig] = time.time()
+        return {"dirs": merged}
 
 
 def query_token_stats(env_dir, model: str = '', date_start: str = '2000-01-01',

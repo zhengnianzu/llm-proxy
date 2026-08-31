@@ -124,6 +124,14 @@ def init_db(db_dir: str):
             _conn.execute(
                 "ALTER TABLE leaf_status ADD COLUMN stats_built_at TEXT NOT NULL DEFAULT ''"
             )
+        # 迁移：把 leaf_status 当成 /query token 统计的持久缓存。与 stats_json
+        # 同款：记录每叶 index.jsonl 签名（idx_size/idx_mtime 共用）+ 该叶 token 聚合
+        # 结果 JSON。让 /query 与 /sessions 一样从 DB 免扫盘读，数据源统一（看板用）。
+        # 旧文件 .token_index.jsonl 保留但不更新；新数据一律落本列。
+        if "token_stats_json" not in cols:
+            _conn.execute(
+                "ALTER TABLE leaf_status ADD COLUMN token_stats_json TEXT NOT NULL DEFAULT ''"
+            )
         _conn.commit()
 
 
@@ -142,13 +150,16 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
                 state: Optional[str] = None, last_error: str = "",
                 idx_size: Optional[int] = None, idx_mtime: Optional[float] = None,
                 stats_json: Optional[str] = None, stats_threshold: Optional[int] = None,
-                stats_built_at: Optional[str] = None) -> str:
+                stats_built_at: Optional[str] = None,
+                token_stats_json: Optional[str] = None) -> str:
     """新增或更新一个叶子。返回 'added' | 'updated'。仅传入的字段被更新。
 
     leaf_path: 折叠层已补回的真实叶子绝对路径（含 index.jsonl 的那一层）。传入非空
         才更新，供 resolve_leaf_path 直接查表，取代 mtime→叶子的反复扫盘兜底。
     idx_size/idx_mtime/stats_json/stats_threshold/stats_built_at: /sessions 统计缓存，
         由 stats_index 写入（见 set_leaf_stats）。仅传入非 None 才更新。
+    token_stats_json: /query token 统计缓存，由 token_index 写入（见
+        set_leaf_token_stats）。仅传入非 None 才更新。共享 idx_size/idx_mtime 签名。
     """
     if not _ready():
         return "skipped"
@@ -184,6 +195,8 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
                 fields.append("stats_threshold = ?"); params.append(stats_threshold)
             if stats_built_at is not None:
                 fields.append("stats_built_at = ?"); params.append(stats_built_at)
+            if token_stats_json is not None:
+                fields.append("token_stats_json = ?"); params.append(token_stats_json)
             fields.append("last_error = ?"); params.append(last_error)
             params.extend([root_id, dir_key])
             _conn.execute(
@@ -197,8 +210,9 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
                 INSERT INTO leaf_status
                     (root_id, dir_key, root_path, leaf_path, built, ingested, pending, sessions,
                      state, last_error, synced_at, created_at,
-                     idx_size, idx_mtime, stats_json, stats_threshold, stats_built_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     idx_size, idx_mtime, stats_json, stats_threshold, stats_built_at,
+                     token_stats_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (root_id, dir_key, root_path, leaf_path, int(bool(built)),
                   ingested or 0, pending or 0, sessions or 0,
                   state or "pending", last_error, _now(), _now(),
@@ -206,7 +220,8 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
                   0 if idx_mtime is None else idx_mtime,
                   stats_json or "",
                   stats_threshold or 0,
-                  stats_built_at or ""))
+                  stats_built_at or "",
+                  token_stats_json or ""))
             _conn.commit()
             return "added"
 
@@ -297,14 +312,14 @@ def bulk_get_stats(root_id: str) -> List[dict]:
     """取该 root 全部叶子的统计缓存字段（供 /sessions 免扫盘枚举 + 签名判活）。
 
     只选统计需要的列，不走 bulk_get 的 SELECT *（省序列化）。返回每行 dict：
-    dir_key, leaf_path, idx_size, idx_mtime, stats_json, stats_threshold。
+    dir_key, leaf_path, idx_size, idx_mtime, stats_json, stats_threshold, token_stats_json。
     """
     if not _ready():
         return []
     with _lock:
         rows = _conn.execute(
-            "SELECT dir_key, leaf_path, idx_size, idx_mtime, stats_json, stats_threshold "
-            "FROM leaf_status WHERE root_id = ? ORDER BY dir_key", (root_id,)
+            "SELECT dir_key, leaf_path, idx_size, idx_mtime, stats_json, stats_threshold, "
+            "token_stats_json FROM leaf_status WHERE root_id = ? ORDER BY dir_key", (root_id,)
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -323,6 +338,22 @@ def set_leaf_stats(root_id: str, dir_key: str, *, leaf_path: str = "",
                 idx_size=idx_size, idx_mtime=idx_mtime,
                 stats_json=stats_json, stats_threshold=stats_threshold,
                 stats_built_at=_now())
+
+
+def set_leaf_token_stats(root_id: str, dir_key: str, *, leaf_path: str = "",
+                         idx_size: int, idx_mtime: float,
+                         token_stats_json: str) -> None:
+    """写单叶 /query token 统计缓存：index.jsonl 签名 + 该叶 token 聚合结果。
+
+    薄封装 upsert_leaf（叶子不存在则插入）。只写 token_stats_json 及共用签名
+    idx_size/idx_mtime；不触碰 stats_json/stats_threshold（/sessions 缓存列）与
+    built/state/sessions 等叶子管理字段。
+    """
+    if not _ready():
+        return
+    upsert_leaf(root_id, dir_key, leaf_path=leaf_path,
+                idx_size=idx_size, idx_mtime=idx_mtime,
+                token_stats_json=token_stats_json)
 
 
 # ── 数据源表（「数据管理」表 1）───────────────────────────────────────────
