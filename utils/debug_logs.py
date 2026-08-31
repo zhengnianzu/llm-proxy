@@ -264,10 +264,12 @@ def _load_debug_cache(env_filter: str = "", keyword: str = "", limit: int = 50, 
     roots = _collect_debug_roots()
 
     if env_filter:
-        target = Path("logs") / env_filter
+        # env_filter 可能是相对路径(logs/...)或绝对路径(LOG_DIR 为绝对路径时)。
+        # 统一 resolve 后再比较,避免绝对/相对 Path 相等性判断失配导致 matched 永远为 False。
+        target = Path(env_filter).resolve()
         matched = False
         for root in roots:
-            if target == root or target.parent == root:
+            if target == root.resolve() or target.parent == root.resolve():
                 hour_map, models = _rebuild_debug_cache(root)
                 all_models.update(models)
                 if target != root:

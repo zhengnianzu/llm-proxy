@@ -2,7 +2,7 @@
 utils/token_index.py — Token 用量增量索引
 
 持久化文件: {env_dir}/.token_index.jsonl (JSONL, 第一行 meta)
-进程级内存缓存: 10s TTL
+进程级内存缓存: 10 分钟 TTL
 frozen 机制: index.jsonl 文件 mtime/size 不变时标记 frozen，下次跳过
 
 扫描 {env_dir}/{mtime}/index.jsonl，按 (model|date, status) / (api_key|date) /
@@ -24,14 +24,14 @@ _INDEX_FILE = ".token_index.jsonl"
 _VERSION = 4  # v4: 多格式归一化（new-api usage.token_in / 无 success 字段）
 _lock = threading.Lock()
 
-_MEM_TTL = 10
+_MEM_TTL = 600  # 10 分钟：与前端「10 分钟刷新」对齐，避免打开页面短时间内重复重扫
 # 按 root 缓存，避免多目录轮询时单槽缓存互相驱逐
 _mem_cache: Dict[str, dict] = {}      # root_str -> index dict
 _mem_cache_ts: Dict[str, float] = {}  # root_str -> 最后刷新时间
 
 # B：合并结果缓存——/query 三个端点并发（Promise.all）共享同一次刷新。
 # 窗口比 _MEM_TTL 长，一次构建可服务后续端点；「刷新」按钮 force 绕过。
-_COMBINED_TTL = 30
+_COMBINED_TTL = 600  # 10 分钟：单个 3 端点并发窗口，与前端刷新节奏对齐
 _combined_cache: Dict[tuple, dict] = {}     # root 签名(归一化 tuple) -> merged dirs
 _combined_ts: Dict[tuple, float] = {}       # root 签名 -> 构建时间
 _combined_lock = threading.Lock()

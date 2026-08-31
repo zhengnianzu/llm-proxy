@@ -1720,6 +1720,11 @@ async def index_statistic(request: Request):
     return templates.TemplateResponse(request, "dashboard.html", context=_ctx(request, "dashboard"))
 
 
+@app.get("/overview")
+async def overview_stat_page(request: Request):
+    return templates.TemplateResponse(request, "overview_stat.html", context=_ctx(request, "overview"))
+
+
 @app.get("/query")
 async def query_page(request: Request):
     return templates.TemplateResponse(request, "query.html", context=_ctx(request, "query"))
@@ -1908,7 +1913,14 @@ def export_view_api_file_raw(key: str = "", filename: str = "", log_dir: str = "
 
 @app.get("/failures")
 async def failure_viewer(request: Request):
-    debug_env = str(Path(LOGS_DEBUG).relative_to(Path("logs"))) if LOGS_DEBUG else ""
+    if LOGS_DEBUG:
+        try:
+            debug_env = str(Path(LOGS_DEBUG).relative_to(Path("logs")))
+        except ValueError:
+            # LOG_DIR 可为绝对路径,此时不在相对 logs/ 子路径下——直接用绝对路径作为 env 标识
+            debug_env = LOGS_DEBUG
+    else:
+        debug_env = ""
     return templates.TemplateResponse(request, "failures.html", context=_ctx(request, "failures", default_env=debug_env))
 
 
