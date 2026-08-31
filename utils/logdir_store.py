@@ -100,6 +100,30 @@ def init_db(db_dir: str):
             _conn.execute(
                 "ALTER TABLE leaf_status ADD COLUMN leaf_path TEXT NOT NULL DEFAULT ''"
             )
+        # 迁移：把 leaf_status 当成 /sessions 统计的持久缓存。记录上次统计时
+        # index.jsonl 的签名（size/mtime）+ 该叶聚合结果 JSON + 所用 threshold，
+        # 让统计页免扫盘枚举、未变叶子零重算（详见 stats_index.refresh_index 的
+        # leaf_status 分支）。默认值让老库补列后「首打即回填」。
+        if "idx_size" not in cols:
+            _conn.execute(
+                "ALTER TABLE leaf_status ADD COLUMN idx_size INTEGER NOT NULL DEFAULT -1"
+            )
+        if "idx_mtime" not in cols:
+            _conn.execute(
+                "ALTER TABLE leaf_status ADD COLUMN idx_mtime REAL NOT NULL DEFAULT 0"
+            )
+        if "stats_json" not in cols:
+            _conn.execute(
+                "ALTER TABLE leaf_status ADD COLUMN stats_json TEXT NOT NULL DEFAULT ''"
+            )
+        if "stats_threshold" not in cols:
+            _conn.execute(
+                "ALTER TABLE leaf_status ADD COLUMN stats_threshold INTEGER NOT NULL DEFAULT 0"
+            )
+        if "stats_built_at" not in cols:
+            _conn.execute(
+                "ALTER TABLE leaf_status ADD COLUMN stats_built_at TEXT NOT NULL DEFAULT ''"
+            )
         _conn.commit()
 
 
@@ -115,11 +139,16 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
                 leaf_path: str = "",
                 built: Optional[bool] = None, ingested: Optional[int] = None,
                 pending: Optional[int] = None, sessions: Optional[int] = None,
-                state: Optional[str] = None, last_error: str = "") -> str:
+                state: Optional[str] = None, last_error: str = "",
+                idx_size: Optional[int] = None, idx_mtime: Optional[float] = None,
+                stats_json: Optional[str] = None, stats_threshold: Optional[int] = None,
+                stats_built_at: Optional[str] = None) -> str:
     """新增或更新一个叶子。返回 'added' | 'updated'。仅传入的字段被更新。
 
     leaf_path: 折叠层已补回的真实叶子绝对路径（含 index.jsonl 的那一层）。传入非空
         才更新，供 resolve_leaf_path 直接查表，取代 mtime→叶子的反复扫盘兜底。
+    idx_size/idx_mtime/stats_json/stats_threshold/stats_built_at: /sessions 统计缓存，
+        由 stats_index 写入（见 set_leaf_stats）。仅传入非 None 才更新。
     """
     if not _ready():
         return "skipped"
@@ -145,6 +174,16 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
                 fields.append("sessions = ?"); params.append(sessions)
             if state is not None:
                 fields.append("state = ?"); params.append(state)
+            if idx_size is not None:
+                fields.append("idx_size = ?"); params.append(idx_size)
+            if idx_mtime is not None:
+                fields.append("idx_mtime = ?"); params.append(idx_mtime)
+            if stats_json is not None:
+                fields.append("stats_json = ?"); params.append(stats_json)
+            if stats_threshold is not None:
+                fields.append("stats_threshold = ?"); params.append(stats_threshold)
+            if stats_built_at is not None:
+                fields.append("stats_built_at = ?"); params.append(stats_built_at)
             fields.append("last_error = ?"); params.append(last_error)
             params.extend([root_id, dir_key])
             _conn.execute(
@@ -157,11 +196,17 @@ def upsert_leaf(root_id: str, dir_key: str, root_path: str = "", *,
             _conn.execute("""
                 INSERT INTO leaf_status
                     (root_id, dir_key, root_path, leaf_path, built, ingested, pending, sessions,
-                     state, last_error, synced_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     state, last_error, synced_at, created_at,
+                     idx_size, idx_mtime, stats_json, stats_threshold, stats_built_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (root_id, dir_key, root_path, leaf_path, int(bool(built)),
                   ingested or 0, pending or 0, sessions or 0,
-                  state or "pending", last_error, _now(), _now()))
+                  state or "pending", last_error, _now(), _now(),
+                  -1 if idx_size is None else idx_size,
+                  0 if idx_mtime is None else idx_mtime,
+                  stats_json or "",
+                  stats_threshold or 0,
+                  stats_built_at or ""))
             _conn.commit()
             return "added"
 
@@ -246,6 +291,38 @@ def has_any(root_id: str) -> bool:
             "SELECT 1 FROM leaf_status WHERE root_id = ? LIMIT 1", (root_id,)
         ).fetchone()
     return row is not None
+
+
+def bulk_get_stats(root_id: str) -> List[dict]:
+    """取该 root 全部叶子的统计缓存字段（供 /sessions 免扫盘枚举 + 签名判活）。
+
+    只选统计需要的列，不走 bulk_get 的 SELECT *（省序列化）。返回每行 dict：
+    dir_key, leaf_path, idx_size, idx_mtime, stats_json, stats_threshold。
+    """
+    if not _ready():
+        return []
+    with _lock:
+        rows = _conn.execute(
+            "SELECT dir_key, leaf_path, idx_size, idx_mtime, stats_json, stats_threshold "
+            "FROM leaf_status WHERE root_id = ? ORDER BY dir_key", (root_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_leaf_stats(root_id: str, dir_key: str, *, leaf_path: str = "",
+                   idx_size: int, idx_mtime: float,
+                   stats_json: str, stats_threshold: int) -> None:
+    """写单叶 /sessions 统计缓存：index.jsonl 签名 + 聚合结果 + threshold。
+
+    薄封装 upsert_leaf（叶子不存在则插入），一并盖 stats_built_at=now。不触碰
+    built/state/sessions 等叶子管理字段（只写统计缓存列）。
+    """
+    if not _ready():
+        return
+    upsert_leaf(root_id, dir_key, leaf_path=leaf_path,
+                idx_size=idx_size, idx_mtime=idx_mtime,
+                stats_json=stats_json, stats_threshold=stats_threshold,
+                stats_built_at=_now())
 
 
 # ── 数据源表（「数据管理」表 1）───────────────────────────────────────────

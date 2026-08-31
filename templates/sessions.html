@@ -7,56 +7,38 @@
         .data-table th, .data-table td { font-size: .84rem; }
         .totals-row td { font-weight: 700; background: var(--muted); }
         .flex-grow-1 { flex-grow: 1; }
-        /* 让 Key 选择器卡片整体的层叠优先级高于后面的表格卡片，
-           否则暗色模式下每张 .card 的 backdrop-filter 会各自形成层叠上下文，
-           导致下拉伸进表格区域的部分被表格卡片背景遮挡 */
-        .key-select-card { position: relative; z-index: 30; }
-        .key-select { position: relative; }
-        .key-select-trigger {
-            display: flex; align-items: center; justify-content: space-between;
-            min-height: 34px; padding: 4px 8px; cursor: pointer;
-            border: 1px solid var(--input-border); border-radius: var(--radius-sm);
-            background: var(--card); color: var(--foreground); flex-wrap: wrap; gap: 4px;
+        /* 热力图 */
+        .heatmap-wrap { width: 100%; overflow-x: auto; }
+        .heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(var(--n-days, 1), 1fr);
+            gap: 1px;
+            min-width: 100%;
         }
-        .key-select-trigger:hover { border-color: var(--primary); }
-        .key-select-tag {
-            display: inline-flex; align-items: center; gap: 2px;
-            padding: 1px 6px; font-size: .78rem; border-radius: 3px;
-            background: var(--primary); color: var(--primary-foreground);
+        .heatmap-cell {
+            aspect-ratio: 1 / 1; min-height: 0; border-radius: 2px;
+            border: 1px solid transparent; cursor: pointer;
         }
-        .key-select-tag-remove {
-            cursor: pointer; margin-left: 2px; font-size: .7rem; opacity: .8;
+        .heatmap-cell:hover { border-color: var(--primary); }
+        /* 归一化 5 档 + 0 值(用 CSS 变量,亮/暗各一组)。tier 越低颜色越浅 */
+        .tier-0 { background: color-mix(in srgb, var(--muted) 55%, var(--card)); }
+        .tier-1 { background: color-mix(in srgb, var(--primary) 22%, var(--card)); }
+        .tier-2 { background: color-mix(in srgb, var(--primary) 42%, var(--card)); }
+        .tier-3 { background: color-mix(in srgb, var(--primary) 65%, var(--card)); }
+        .tier-4 { background: color-mix(in srgb, var(--primary) 85%, var(--card)); }
+        .tier-5 { background: var(--primary); }
+        /* source tabs */
+        .source-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+        .source-tab {
+            padding: 5px 14px; font-size: .84rem; cursor: pointer;
+            border: 1px solid var(--border); border-radius: 999px;
+            background: var(--card); color: var(--foreground); transition: all .15s;
         }
-        .key-select-tag-remove:hover { opacity: 1; }
-        .key-select-placeholder { color: var(--muted-foreground); font-size: .84rem; }
-        .key-select-arrow { margin-left: auto; padding-left: 6px; color: var(--muted-foreground); font-size: .7rem; }
-        .key-select-dropdown {
-            position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
-            margin-top: 2px; border: 1px solid var(--border); border-radius: var(--radius-sm);
-            background: var(--card); box-shadow: 0 4px 12px rgba(0,0,0,.12);
-            max-height: 280px; display: flex; flex-direction: column;
-        }
-        .key-select-search {
-            padding: 6px 8px; border: none; border-bottom: 1px solid var(--border);
-            background: transparent; color: var(--foreground); outline: none;
-            font-size: .84rem; width: 100%;
-        }
-        .key-select-list { overflow-y: auto; padding: 4px 0; }
-        .key-select-item {
-            display: flex; align-items: center; gap: 6px; padding: 5px 10px;
-            cursor: pointer; font-size: .84rem; color: var(--foreground);
-        }
-        .key-select-item:hover { background: var(--muted); }
-        .key-select-item input[type=checkbox] { margin: 0; }
-        .key-select-item-count { margin-left: auto; color: var(--muted-foreground); font-size: .78rem; }
-        .key-select-actions {
-            display: flex; gap: 8px; padding: 6px 10px;
-            border-bottom: 1px solid var(--border); font-size: .78rem;
-        }
-        .key-select-actions a {
-            cursor: pointer; color: var(--primary); text-decoration: none;
-        }
-        .key-select-actions a:hover { text-decoration: underline; }
+        .source-tab:hover { border-color: var(--primary); }
+        .source-tab.active { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+        /* 图例 */
+        .heatmap-legend { display: flex; align-items: center; gap: 6px; font-size: .72rem; color: var(--muted-foreground); }
+        .heatmap-legend .swatch { width: 14px; height: 14px; border-radius: 3px; }
 {% endblock %}
 
 {% block content %}
@@ -104,92 +86,56 @@
         </div>
     </div>
 
-    <!-- Key 选择器 (下拉多选) -->
-    <div class="card key-select-card mb-3" v-if="allKeys.length">
-        <div class="flex items-center gap-2 mb-2" style="flex-wrap:wrap;">
-            <span class="font-semibold" style="font-size:.9rem;">选择显示的 Key</span>
-            <span class="text-muted text-sm">(最多显示 {{ maxColumns }} 列)</span>
-        </div>
-        <div class="key-select" v-click-outside="closeDropdown">
-            <div class="key-select-trigger" @click="dropdownOpen = !dropdownOpen">
-                <template v-if="selectedKeys.length">
-                    <span class="key-select-tag" v-for="k in selectedKeys" :key="k" :title="k">
-                        {{ shortKey(k) }}
-                        <span class="key-select-tag-remove" @click.stop="toggleKey(k)">&times;</span>
-                    </span>
-                </template>
-                <span v-else class="key-select-placeholder">请选择 Key…</span>
-                <span class="key-select-arrow">&#9662;</span>
-            </div>
-            <div class="key-select-dropdown" v-show="dropdownOpen">
-                <input class="key-select-search" v-model="keySearch"
-                       placeholder="搜索 Key…" ref="keySearchInput"
-                       @click.stop>
-                <div class="key-select-actions">
-                    <a @click.stop="selectTop5">默认 Top5</a>
-                    <a @click.stop="toggleAllKeys">{{ selectedKeys.length === allKeys.length ? '取消全选' : '全选' }}</a>
-                    <a @click.stop="selectedKeys = []">清空</a>
-                </div>
-                <div class="key-select-list">
-                    <label class="key-select-item" v-for="k in filteredKeys" :key="k"
-                           @click.stop>
-                        <input type="checkbox" :checked="selectedKeys.indexOf(k) !== -1"
-                               @change="toggleKey(k)"
-                               :disabled="selectedKeys.indexOf(k) === -1 && selectedKeys.length >= maxColumns">
-                        <span :title="k">{{ k }}</span>
-                        <span class="key-select-item-count">{{ keyTotal(k) }} sessions</span>
-                    </label>
-                    <div v-if="filteredKeys.length === 0" class="key-select-item" style="color:var(--muted-foreground);cursor:default;">
-                        无匹配结果
-                    </div>
-                </div>
+    <!-- 热力图(source tabs + 天 × 2小时档) -->
+    <div class="card mb-3" v-if="sources.length">
+        <div class="flex items-center gap-2 mb-3" style="flex-wrap:wrap;justify-content:space-between;">
+            <span class="font-semibold" style="font-size:.9rem;">Session 热力图</span>
+            <div class="heatmap-legend" v-if="activeSource">
+                <span style="color:var(--muted-foreground);">0</span>
+                <span class="swatch tier-0"></span>
+                <span class="swatch tier-1"></span>
+                <span class="swatch tier-2"></span>
+                <span class="swatch tier-3"></span>
+                <span class="swatch tier-4"></span>
+                <span class="swatch tier-5"></span>
+                <span style="color:var(--muted-foreground);">max {{ activeSource.max }}</span>
             </div>
         </div>
-    </div>
 
-    <!-- 日期(行) x Key(列) 表格 -->
-    <div class="card" v-if="stats && visibleRows.length && selectedKeys.length">
-        <div class="flex items-center gap-2 mb-3" style="flex-wrap:wrap;">
-            <span class="font-semibold" style="font-size:.9rem;">日期 x Key 的 Session 统计</span>
-            <span class="text-muted text-sm">(达标/总量)</span>
+        <!-- source tabs -->
+        <div class="source-tabs mb-3">
+            <span v-for="s in sources" :key="s.root_id"
+                  class="source-tab"
+                  :class="{ active: isActiveSource(s) }"
+                  @click="activeSourceId = s.root_id">
+                {{ s.name }}
+            </span>
         </div>
-        <div style="overflow-x:auto;">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>日期</th>
-                        <th v-for="k in selectedKeys" :key="k" class="text-center"
-                            :title="k">{{ shortKey(k) }}</th>
-                        <th class="text-center">合计</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr v-for="d in stats.dates" :key="d">
-                        <td>{{ d }}</td>
-                        <td v-for="k in selectedKeys" :key="k" class="text-center"
-                            :class="cellClass(getCell(k, d))">
-                            {{ formatCell(getCell(k, d)) }}
-                        </td>
-                        <td class="text-center" :class="dateQualified(d) > 0 ? 'cell-qualified' : ''">
-                            {{ dateQualified(d) }}/{{ dateTotal(d) }}
-                        </td>
-                    </tr>
-                </tbody>
-                <tfoot>
-                    <tr class="totals-row">
-                        <td>合计</td>
-                        <td v-for="k in selectedKeys" :key="k" class="text-center">
-                            {{ keyQualified(k) }}/{{ keyTotal(k) }}
-                        </td>
-                        <td class="text-center">
-                            {{ selectedQualified }}/{{ selectedTotal }}
-                        </td>
-                    </tr>
-                </tfoot>
-            </table>
+
+        <!-- 热力图本体 -->
+        <div class="heatmap-wrap" v-if="activeSource && activeSource.dates.length">
+            <div class="heatmap-grid" :style="{ '--n-days': activeSource.dates.length }">
+                <template v-for="bin in 12" :key="'b' + bin">
+                    <div v-for="d in activeSource.dates" :key="d + '-' + bin"
+                         class="heatmap-cell"
+                         :class="tierClass(cellVal(d, bin - 1), activeSource.max)"
+                         @click="selectCell(d, bin - 1)"
+                         :title="cellTitle(d, bin - 1)">
+                    </div>
+                </template>
+            </div>
+            <div v-if="selectedCell" class="text-sm mt-2" style="color:var(--muted-foreground);">
+                点击:{{ selectedCell.date }} {{ selectedCell.label }} · {{ selectedCell.val }} sessions
+            </div>
+        </div>
+        <div v-else class="text-muted text-sm p-3"
+             style="background:var(--muted);border-radius:var(--radius);">
+            该 source 暂无可统计的叶子(未同步 / 活跃叶子未落库)
         </div>
     </div>
-    <div v-else-if="!loading && stats" class="text-muted text-sm mt-3 p-3" style="background:var(--muted);border-radius:var(--radius);">暂无 Session 数据</div>
+    <div v-else-if="!loading && stats"
+         class="text-muted text-sm mt-3 p-3"
+         style="background:var(--muted);border-radius:var(--radius);">暂无 Session 热力图数据</div>
     <div v-if="loading" class="text-center text-muted mt-3 text-sm">加载中…</div>
     <div v-if="error" class="text-danger text-sm mt-3 p-3" style="background:color-mix(in srgb, var(--destructive) 10%, var(--card));border-radius:var(--radius);">{{ error }}</div>
 </div>
@@ -199,40 +145,17 @@
 {% block scripts %}
 <script src="/static/js/vue.min.js"></script>
 <script>
-Vue.directive('click-outside', {
-    bind: function(el, binding) {
-        el._clickOutside = function(e) {
-            if (!el.contains(e.target)) binding.value();
-        };
-        document.addEventListener('click', el._clickOutside);
-    },
-    unbind: function(el) {
-        document.removeEventListener('click', el._clickOutside);
-    }
-});
-
 new Vue({
     el: '#app',
     data: {
         threshold: 5,
         stats: null,
+        heatmap: null,
         loading: false,
         lastRefreshTs: 0,
         error: '',
-        selectedKeys: [],
-        maxColumns: 5,
-        dropdownOpen: false,
-        keySearch: '',
-    },
-    watch: {
-        dropdownOpen: function(val) {
-            if (val) {
-                this.keySearch = '';
-                this.$nextTick(function() {
-                    if (this.$refs.keySearchInput) this.$refs.keySearchInput.focus();
-                }.bind(this));
-            }
-        }
+        activeSourceId: '',
+        selectedCell: null,
     },
     computed: {
         lastRefreshTime: function() {
@@ -249,79 +172,54 @@ new Vue({
             if (!this.stats || !this.stats.total_sessions) return 'N/A';
             return (this.stats.qualified_sessions / this.stats.total_sessions * 100).toFixed(1) + '%';
         },
-        allKeys: function() {
-            if (!this.stats || !this.stats.rows) return [];
-            return this.stats.rows.map(function(r) { return r.api_key; });
+        sources: function() {
+            return (this.heatmap && this.heatmap.sources) ? this.heatmap.sources : [];
         },
-        filteredKeys: function() {
-            var q = this.keySearch.trim().toLowerCase();
-            if (!q) return this.allKeys;
-            return this.allKeys.filter(function(k) { return k.toLowerCase().indexOf(q) !== -1; });
-        },
-        visibleRows: function() {
-            if (!this.stats || !this.stats.rows) return [];
-            var sel = this.selectedKeys;
-            return this.stats.rows.filter(function(r) { return sel.indexOf(r.api_key) !== -1; });
-        },
-        keyMap: function() {
-            var m = {};
-            if (this.stats && this.stats.rows) {
-                this.stats.rows.forEach(function(r) { m[r.api_key] = r; });
+        activeSource: function() {
+            var id = this.activeSourceId;
+            for (var i = 0; i < this.sources.length; i++) {
+                if (this.sources[i].root_id === id) return this.sources[i];
             }
-            return m;
-        },
-        selectedQualified: function() {
-            var self = this;
-            return this.selectedKeys.reduce(function(sum, k) { return sum + self.keyQualified(k); }, 0);
-        },
-        selectedTotal: function() {
-            var self = this;
-            return this.selectedKeys.reduce(function(sum, k) { return sum + self.keyTotal(k); }, 0);
+            // 找不到(如 total 未选中)时回退到第一个 tab
+            return this.sources.length ? this.sources[0] : null;
         },
     },
     methods: {
-        shortKey: function(k) {
-            if (k.length <= 10) return k;
-            return k.slice(0, 4) + '…' + k.slice(-4);
+        isActiveSource: function(s) {
+            return s.root_id === this.activeSourceId;
         },
-        closeDropdown: function() {
-            this.dropdownOpen = false;
+        // 2小时档位 → 纵轴标签(00-02, 02-04, ...)
+        hourLabel: function(bin) {
+            var h = bin * 2;
+            return ('0' + h).slice(-2) + '-' + ('0' + (h + 2)).slice(-2);
         },
-        toggleKey: function(k) {
-            var idx = this.selectedKeys.indexOf(k);
-            if (idx === -1) {
-                if (this.selectedKeys.length >= this.maxColumns) return;
-                this.selectedKeys.push(k);
-            } else {
-                this.selectedKeys.splice(idx, 1);
-            }
+        cellVal: function(date, bin) {
+            if (!this.activeSource) return 0;
+            var d = this.activeSource.cells[date];
+            return d ? (d[bin] || 0) : 0;
         },
-        toggleAllKeys: function() {
-            if (this.selectedKeys.length === this.allKeys.length) {
-                this.selectedKeys = [];
-            } else {
-                this.selectedKeys = this.allKeys.slice(0, this.maxColumns);
-            }
+        // 按该 source 的 max 归一化为 5 档;total=0 用 tier-0
+        tierClass: function(val, max) {
+            if (!max || val <= 0) return 'tier-0';
+            var r = val / max;
+            if (r > 0.8) return 'tier-5';
+            if (r > 0.6) return 'tier-4';
+            if (r > 0.4) return 'tier-3';
+            if (r > 0.2) return 'tier-2';
+            return 'tier-1';
         },
-        selectTop5: function() {
-            this.selectedKeys = this._getDefaultKeys();
+        cellTitle: function(date, bin) {
+            var val = this.cellVal(date, bin);
+            return date + ' ' + this.hourLabel(bin) + ' · ' + val + ' sessions';
         },
-        _getDefaultKeys: function() {
-            if (!this.stats || !this.stats.rows) return [];
-            var rows = this.stats.rows.slice();
-            rows.sort(function(a, b) { return b.row_total - a.row_total; });
-            var today = new Date().toISOString().slice(0, 10);
-            var todayKeys = [];
-            var otherKeys = [];
-            rows.forEach(function(r) {
-                if (r.cells && r.cells[today] && r.cells[today].total > 0) {
-                    todayKeys.push(r.api_key);
-                } else {
-                    otherKeys.push(r.api_key);
-                }
-            });
-            var result = todayKeys.concat(otherKeys);
-            return result.slice(0, this.maxColumns);
+        // 点击 cell 在网格下方显示 日期-时间档 及其 session 数
+        selectCell: function(date, bin) {
+            this.selectedCell = {
+                date: date,
+                bin: bin,
+                label: this.hourLabel(bin),
+                val: this.cellVal(date, bin),
+            };
         },
         fetchStats: function(refresh) {
             this.loading = true;
@@ -330,59 +228,40 @@ new Vue({
             params.append('threshold', this.threshold);
             if (refresh) params.append('refresh', 'true');
 
-            fetch('/sessions/stats?' + params.toString())
+            var self = this;
+            var statP = fetch('/sessions/stats?' + params.toString())
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     if (data.error) {
-                        this.error = data.error;
-                        this.stats = null;
+                        self.error = data.error;
+                        self.stats = null;
                     } else {
-                        this.stats = data;
-                        this.selectedKeys = this._getDefaultKeys();
-                        if (data.last_refresh_ts) this.lastRefreshTs = data.last_refresh_ts;
+                        self.stats = data;
+                        if (data.last_refresh_ts) self.lastRefreshTs = data.last_refresh_ts;
                     }
-                }.bind(this))
+                }.bind(this));
+
+            var heatP = fetch('/sessions/heatmap')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) {
+                        self.error = data.error;
+                    } else {
+                        self.heatmap = data;
+                        // 默认选中第一个有数据的 source
+                        if (!self.activeSourceId && data.sources && data.sources.length) {
+                            self.activeSourceId = data.sources[0].root_id;
+                        }
+                    }
+                }.bind(this));
+
+            Promise.all([statP, heatP])
                 .catch(function(e) {
                     this.error = '请求失败: ' + e;
                 }.bind(this))
                 .finally(function() {
                     this.loading = false;
                 }.bind(this));
-        },
-        getCell: function(apiKey, date) {
-            var row = this.keyMap[apiKey];
-            return row ? (row.cells[date] || null) : null;
-        },
-        formatCell: function(cell) {
-            if (!cell) return '-';
-            return cell.qualified + '/' + cell.total;
-        },
-        cellClass: function(cell) {
-            if (!cell || cell.total === 0) return 'cell-zero';
-            if (cell.qualified > 0) return 'cell-qualified';
-            return '';
-        },
-        keyTotal: function(k) {
-            var row = this.keyMap[k];
-            return row ? row.row_total : 0;
-        },
-        keyQualified: function(k) {
-            var row = this.keyMap[k];
-            return row ? row.row_qualified : 0;
-        },
-        dateTotal: function(d) {
-            var self = this;
-            return this.selectedKeys.reduce(function(sum, k) {
-                var c = self.getCell(k, d);
-                return sum + (c ? c.total : 0);
-            }, 0);
-        },
-        dateQualified: function(d) {
-            var self = this;
-            return this.selectedKeys.reduce(function(sum, k) {
-                var c = self.getCell(k, d);
-                return sum + (c ? c.qualified : 0);
-            }, 0);
         },
     },
     mounted: function() {

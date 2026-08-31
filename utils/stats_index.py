@@ -210,6 +210,69 @@ def _get_active_tag() -> str:
         return ""
 
 
+def _resolve_rid(env_dir: Path) -> Optional[str]:
+    """解析 env_dir 对应的真实存储 root_id（镜像 log_routes._export_view_leaves）。
+
+    优先按归一化 root_path 查 sources 行的真实 root_id（活跃 env 目录的叶子挂在
+    md5 哈希 root_id 下）；查不到再退 get_root_id(norm)——**不传** active_env_dir，
+    否则活跃 env 会被折叠成 'default'，bulk_get('default') 恒空。
+    """
+    try:
+        import utils.logdir_store as _lds
+        from utils.logs_config import get_root_id
+    except Exception:
+        return None
+    norm = os.path.normpath(str(env_dir))
+    rid = None
+    try:
+        src = _lds.get_source_by_path(norm)
+        if src:
+            rid = src.get("root_id")
+    except Exception:
+        rid = None
+    if not rid:
+        try:
+            rid = get_root_id(norm)
+        except Exception:
+            rid = None
+    return rid
+
+
+def _leaf_status_subs(env_dir: Path, rid: str):
+    """从 leaf_status 免扫盘枚举叶子，返回 [(sub: Path, row: dict|None), ...]。
+
+    row 为该叶的统计缓存行（含 idx_size/idx_mtime/stats_json/stats_threshold），
+    供签名判活；活跃小时叶子（可能还没进 leaf_status）并入且 row=None。
+    去重按叶子绝对路径归一化。
+    """
+    import utils.logdir_store as _lds
+    norm = os.path.normpath(str(env_dir))
+    out = []
+    seen = set()
+    for row in _lds.bulk_get_stats(rid):
+        lp = row.get("leaf_path") or ""
+        if not lp:
+            continue
+        full = lp if os.path.isabs(lp) else os.path.join(norm, lp)
+        key = os.path.normpath(full)
+        if key in seen:
+            continue
+        p = Path(full)
+        if not p.is_dir():
+            continue
+        seen.add(key)
+        out.append((p, row))
+    # 并入活跃小时叶子（新建的小时目录可能还没同步进 leaf_status，且它永不冻结）
+    active_tag = _get_active_tag()
+    if active_tag:
+        ap = env_dir / active_tag
+        akey = os.path.normpath(str(ap))
+        if akey not in seen and ap.is_dir():
+            seen.add(akey)
+            out.append((ap, None))
+    return out
+
+
 def _diff_sessions(old_sessions: dict, new_sessions: dict, dir_name: str) -> list:
     """对比两个 sessions dict，返回 [(dir_name, bucket_key, old_counts, new_counts), ...]"""
     diffs = []
@@ -223,12 +286,14 @@ def _diff_sessions(old_sessions: dict, new_sessions: dict, dir_name: str) -> lis
 
 
 def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
-                  force: bool = False) -> dict:
+                  force: bool = False, bust_ttl: bool = False) -> dict:
     """增量刷新索引，返回最新的 index data。
 
     - TTL 内直接返回内存缓存（<1ms）
     - 过期后只 stat 活跃目录，frozen 目录跳过
     - force=True 跳过 TTL + frozen，全量检查
+    - bust_ttl=True 跳过 10s 内存 TTL 早返回（强制重扫签名），但仍走 force=False
+      的签名短路（未变叶子命中缓存、不重算）。供「刷新」按钮用。
 
     index["_changed_buckets"] 记录本次刷新中变化的 bucket 列表，
     供 build_stats_from_index 做定向增量更新。
@@ -239,14 +304,14 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
     now = time.time()
 
     cached = _mem_index_map.get(env_dir_str)
-    if (not force and cached is not None
+    if (not force and not bust_ttl and cached is not None
             and (now - _mem_index_ts_map.get(env_dir_str, 0)) < _MEM_TTL):
         cached["_changed_buckets"] = []
         return cached
 
     with _lock:
         cached = _mem_index_map.get(env_dir_str)
-        if (not force and cached is not None
+        if (not force and not bust_ttl and cached is not None
                 and (time.time() - _mem_index_ts_map.get(env_dir_str, 0)) < _MEM_TTL):
             cached["_changed_buckets"] = []
             return cached
@@ -261,10 +326,28 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
         # 界面手动执行）。未构建的叶子在下方 use_index 分支走裸计数近似（前端标「聚合中·近似」）；
         # 手动回填跑完后，下次刷新读到 sessions 即自动收敛为归并值。
 
+        # 叶子枚举来源：已同步的 root（leaf_status 有记录）走**免扫盘**枚举 +
+        # 签名判活（下方 sig 短路）；未同步/本地 root 回退 iter_index_dirs 全盘 walk。
+        rid = _resolve_rid(env_dir)
+        use_leaf_db = False
+        if rid:
+            try:
+                import utils.logdir_store as _lds
+                use_leaf_db = _lds.has_any(rid)
+            except Exception:
+                use_leaf_db = False
+        if use_leaf_db:
+            leaf_iter = _leaf_status_subs(env_dir, rid)
+        else:
+            leaf_iter = [(sub, None) for sub in iter_index_dirs(env_dir)]
+        # dir_name → (sub, leaf_row)：供循环后按签名回写 leaf_status 统计缓存。
+        sub_by_dir: Dict[str, tuple] = {}
+
         current_dirs = set()
-        for sub in iter_index_dirs(env_dir):
+        for sub, leaf_row in leaf_iter:
                 dir_name = dir_key_for(env_dir, sub)
                 current_dirs.add(dir_name)
+                sub_by_dir[dir_name] = (sub, leaf_row)
 
                 prev = dirs_cache.get(dir_name)
 
@@ -272,6 +355,39 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                         and prev.get("frozen")
                         and dir_name != active_tag):
                     continue
+
+                # ── leaf_status 统计缓存签名短路 ──────────────────────────────
+                # 一次 stat index.jsonl（不开 SQLite）：size+mtime 未变且 threshold
+                # 相符且有缓存 JSON → 命中，直接用缓存 sessions，跳过下方所有磁盘
+                # 重扫/聚合。签名变化/threshold 不符/无缓存 → 落下方原分支重算，
+                # 循环末尾再回写 leaf_status（见 _writeback）。
+                if (not force and use_leaf_db and leaf_row is not None
+                        and leaf_row.get("stats_json")
+                        and leaf_row.get("stats_threshold") == threshold):
+                    try:
+                        ist = (sub / "index.jsonl").stat()
+                    except OSError:
+                        ist = None
+                    if (ist is not None
+                            and leaf_row.get("idx_size") == ist.st_size
+                            and leaf_row.get("idx_mtime") == ist.st_mtime):
+                        try:
+                            cached_sessions = json.loads(leaf_row["stats_json"])
+                        except (ValueError, TypeError):
+                            cached_sessions = None
+                        if cached_sessions is not None:
+                            old_sessions = prev.get("sessions", {}) if prev else {}
+                            changed_buckets.extend(
+                                _diff_sessions(old_sessions, cached_sessions, dir_name))
+                            entry = dict(prev) if prev else {}
+                            entry["sessions"] = cached_sessions
+                            entry["idx_size"] = ist.st_size
+                            entry["idx_mtime"] = ist.st_mtime
+                            entry["frozen"] = dir_name != active_tag
+                            dirs_cache[dir_name] = entry
+                            changed = True
+                            continue
+                # ── 签名未命中：落原分支重算 ───────────────────────────────────
 
                 cache_file = sub / ".session_cache.jsonl"
                 if not cache_file.is_file():
@@ -403,6 +519,46 @@ def refresh_index(env_dir: Path, threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
                     "sessions": sessions,
                 }
                 changed = True
+
+        # ── 回写 leaf_status 统计缓存 ──────────────────────────────────────────
+        # 只在走 leaf_db 枚举时回写。对本次枚举到的每个叶子，若其内存 sessions 已定，
+        # 且 (签名/threshold) 与 leaf_row 里记录的不同，就 stat 一次 index.jsonl 落库。
+        # 命中签名短路的叶子其 leaf_row 已相符 → 跳过（不产生写）；只有真正重算/首建
+        # 的叶子才写，避免每次刷新对 2018 叶全表写。
+        if use_leaf_db:
+            for dir_name, (sub, leaf_row) in sub_by_dir.items():
+                # 只回写已在 leaf_status 里的叶子；活跃小时叶子（leaf_row is None）
+                # 还没进表，且它每请求都重算（永不冻结），不必落库污染叶子管理计数。
+                if leaf_row is None:
+                    continue
+                entry = dirs_cache.get(dir_name)
+                if not entry:
+                    continue
+                sessions = entry.get("sessions")
+                if sessions is None:
+                    continue
+                idx_size = entry.get("idx_size")
+                idx_mtime = entry.get("idx_mtime")
+                if idx_size is None or idx_mtime is None:
+                    try:
+                        ist = (sub / "index.jsonl").stat()
+                        idx_size, idx_mtime = ist.st_size, ist.st_mtime
+                    except OSError:
+                        continue
+                # 与库中记录一致（签名短路命中那批）→ 无需重复写
+                if (leaf_row.get("idx_size") == idx_size
+                        and leaf_row.get("idx_mtime") == idx_mtime
+                        and leaf_row.get("stats_threshold") == threshold):
+                    continue
+                try:
+                    _lds.set_leaf_stats(
+                        rid, dir_name, leaf_path=str(sub),
+                        idx_size=idx_size, idx_mtime=idx_mtime,
+                        stats_json=json.dumps(sessions, ensure_ascii=False),
+                        stats_threshold=threshold,
+                    )
+                except Exception:
+                    pass
 
         removed = set(dirs_cache.keys()) - current_dirs
         if removed:
@@ -615,11 +771,15 @@ def _build_rows(cache: dict, threshold: int) -> dict:
 
 
 def build_stats_multi(roots: List[str], threshold: int = QUALIFIED_THRESHOLD_DEFAULT,
-                      force: bool = False, active_env_dir: Optional[str] = None) -> dict:
+                      force: bool = False, active_env_dir: Optional[str] = None,
+                      bust_ttl: bool = False) -> dict:
     """跨多个 root 刷新 + 构建 session 统计，合并 rows / dates / totals。
 
     每个 root 独立走 refresh_index + build_stats_from_index（各自缓存），
     再按 api_key 合并 cells / mtime_cells / 总数。
+
+    bust_ttl=True（「刷新」按钮）跳过 10s 内存 TTL 早返回、强制重扫签名，但仍
+    force=False 享受签名短路（未变叶子命中缓存）。
     """
     merged_rows: Dict[str, dict] = {}
     all_dates: set = set()
@@ -628,7 +788,7 @@ def build_stats_multi(roots: List[str], threshold: int = QUALIFIED_THRESHOLD_DEF
 
     for root in roots:
         env_path = Path(root)
-        index = refresh_index(env_path, threshold, force=force)
+        index = refresh_index(env_path, threshold, force=force, bust_ttl=bust_ttl)
         stats = build_stats_from_index(index, threshold, env_dir=env_path)
 
         total_sessions += stats.get("total_sessions", 0)
@@ -880,11 +1040,14 @@ def get_last_refresh_ts() -> float:
     return _last_refresh_ts
 
 
-def _stats_warmer_loop(env_dir: str, threshold: int, interval: float = 30.0) -> None:
+def _stats_warmer_loop(env_dir: str, threshold: int, interval: float = 22.0) -> None:
     global _last_refresh_ts
     env_path = Path(env_dir)
     _stats_logger.info("stats-warmer: 开始预热 env_dir=%s", env_dir)
 
+    # 首轮 force=True：全量重算并把每叶统计签名落进 leaf_status（一次性成本，之后
+    # 各请求走 DB 缓存快路径）。后续轮次 force=False：DB 枚举 + 逐叶一次 stat +
+    # 命中缓存，亚秒级，只重算签名变化的活跃叶。
     index = refresh_index(env_path, threshold, force=True)
     build_stats_from_index(index, threshold, env_dir=env_path)
     _last_refresh_ts = time.time()
@@ -894,7 +1057,7 @@ def _stats_warmer_loop(env_dir: str, threshold: int, interval: float = 30.0) -> 
         _stats_warmer_stop.wait(interval)
         if _stats_warmer_stop.is_set():
             break
-        index = refresh_index(env_path, threshold, force=True)
+        index = refresh_index(env_path, threshold, force=False)
         build_stats_from_index(index, threshold, env_dir=env_path)
         _last_refresh_ts = time.time()
 
