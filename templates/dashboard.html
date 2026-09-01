@@ -24,6 +24,25 @@
             .dash-divider { border-left: none; border-top: 1px solid var(--border); }
             .main-content { min-height: auto; }
         }
+        .chart-tabs { display: flex; gap: 4px; margin-bottom: 10px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+        .chart-tab { padding: 6px 14px; font-size: .85rem; color: var(--muted-foreground); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+        .chart-tab:hover { color: var(--foreground); }
+        .chart-tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+        .log-item { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+        .log-item:hover { background: var(--muted); }
+        .log-item.active { background: var(--accent); border-left: 3px solid var(--primary); }
+        .log-meta { color: var(--muted-foreground); font-size: .82rem; margin-top: 2px; }
+        .load-more { text-align: center; padding: 10px; color: var(--muted-foreground); font-size: .85rem; }
+        .empty-box { display: flex; align-items: center; justify-content: center; border: 1px dashed var(--border); border-radius: var(--radius-lg); color: var(--muted-foreground); background: var(--muted); padding: 16px; }
+        .fail-modal-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); z-index: 998; }
+        .fail-modal { position: fixed; top: 8vh; left: 50%; transform: translateX(-50%); width: min(1100px, 94vw); height: 84vh; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); z-index: 999; display: flex; flex-direction: column; overflow: hidden; }
+        .fail-modal-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .fail-modal-body { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+        .fail-modal-list { width: 340px; min-width: 240px; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+        .fail-modal-list .fails-list { max-height: none; flex: 1; overflow-y: auto; border: 0; border-radius: 0; }
+        .fail-modal-detail { flex: 1; overflow-y: auto; padding: 16px 18px; }
+        .fail-search-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .fail-search-input { flex: 1; min-width: 140px; }
 {% endblock %}
 
 {% block content %}
@@ -107,50 +126,104 @@
         </div>
     </div>
 
-    <div class="card">
-        <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
-            <div>
-                <div class="font-semibold">实时监控</div>
-                <div class="text-muted text-sm">RPM 随时间流式刷新，默认展示最近 2 小时</div>
-            </div>
-            <div class="flex items-center gap-3 flex-wrap">
-                <label class="control-label">时间范围</label>
-                <select class="input input-sm" style="width:auto" v-model.number="selectedHours" @change="fetchRealtime">
-                    <option :value="1">最近 1 小时</option>
-                    <option :value="2">最近 2 小时</option>
-                    <option :value="4">最近 4 小时</option>
-                    <option :value="6">最近 6 小时</option>
-                    <option :value="12">最近 12 小时</option>
-                    <option :value="24">最近 24 小时</option>
-                </select>
-                <label class="control-label" style="margin-left: 8px">模型</label>
-                <div class="flex gap-3 flex-wrap">
-                    <span class="pill" :class="{ active: selectedModel === '__all__' }" @click="setModel('__all__')">全部</span>
-                    <span v-for="m in modelList" :key="m" class="pill" :class="{ active: selectedModel === m }" @click="setModel(m)">
-                        {{ m }}
-                    </span>
+    <div class="grid grid-2" style="align-items:start">
+        <div class="card">
+            <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div>
+                    <div class="font-semibold">实时监控</div>
+                    <div class="text-muted text-sm">RPM 随时间流式刷新，默认展示最近 2 小时</div>
                 </div>
-                <button class="btn btn-outline btn-sm" style="margin-left: 8px" @click="toggleAutoRefresh">
-                    {{ autoRefresh ? '暂停刷新' : '恢复刷新' }}
-                </button>
+                <div class="flex items-center gap-3 flex-wrap">
+                    <label class="control-label">时间范围</label>
+                    <select class="input input-sm" style="width:auto" v-model.number="selectedHours" @change="fetchRealtime">
+                        <option :value="1">最近 1 小时</option>
+                        <option :value="2">最近 2 小时</option>
+                        <option :value="4">最近 4 小时</option>
+                        <option :value="6">最近 6 小时</option>
+                        <option :value="12">最近 12 小时</option>
+                        <option :value="24">最近 24 小时</option>
+                    </select>
+                    <label class="control-label" style="margin-left: 8px">模型</label>
+                    <div class="flex gap-3 flex-wrap">
+                        <span class="pill" :class="{ active: selectedModel === '__all__' }" @click="setModel('__all__')">全部</span>
+                        <span v-for="m in modelList" :key="m" class="pill" :class="{ active: selectedModel === m }" @click="setModel(m)">
+                            {{ m }}
+                        </span>
+                    </div>
+                    <button class="btn btn-outline btn-sm" style="margin-left: 8px" @click="toggleAutoRefresh">
+                        {{ autoRefresh ? '暂停刷新' : '恢复刷新' }}
+                    </button>
+                </div>
             </div>
+
+            <div class="chart-tabs">
+                <div class="chart-tab" :class="{ active: chartTab === 'rpm' }" @click="switchChartTab('rpm')">RPM 每分钟请求数</div>
+                <div class="chart-tab" :class="{ active: chartTab === 'tpm' }" @click="switchChartTab('tpm')">TPM 输入 / 输出</div>
+                <div class="chart-tab" :class="{ active: chartTab === 'rate' }" @click="switchChartTab('rate')">有效率趋势</div>
+            </div>
+
+            <div class="chart-wrap" style="height: 260px"><canvas id="chartMain"></canvas></div>
         </div>
 
-        <div class="grid grid-3">
-            <div>
-                <div class="chart-wrap"><canvas id="chartRpm"></canvas></div>
-                <div class="chart-title">RPM 每分钟请求数</div>
+        <div class="card">
+            <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div>
+                    <div class="font-semibold">调用失败记录</div>
+                    <div class="text-muted text-sm">实时失败日志，按时间目录查看</div>
+                </div>
+                <div class="flex items-center gap-3 flex-wrap">
+                    <label class="control-label">时间目录</label>
+                    <select class="input input-sm" style="width:auto" v-model="failEnv" @change="failSwitchEnv">
+                        <option v-for="e in failEnvList" :key="e.name" :value="e.name">{{ e.label }} ({{ e.count }})
+                            {{ e.mtime }}{{ e.current ? ' ★' : '' }}</option>
+                    </select>
+                    <button class="btn btn-sm" @click="failOpenSearch">搜索</button>
+                </div>
             </div>
-            <div>
-                <div class="chart-wrap"><canvas id="chartTpm"></canvas></div>
-                <div class="chart-title">TPM 输入 / 输出</div>
-            </div>
-            <div>
-                <div class="chart-wrap"><canvas id="chartRate"></canvas></div>
-                <div class="chart-title">有效率趋势</div>
+            <div class="fails-list" style="max-height:320px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow-y:auto" ref="failRecentList">
+                <div v-if="!failRecentItems.length" class="empty-box" style="border:none;border-radius:0">暂无失败日志</div>
+                <div v-for="item in failRecentItems" :key="item.filename" class="log-item" @click="failBrowse(item)">
+                    <div class="font-semibold">{{ item.reason || 'unknown' }} <span style="font-weight:400;color:var(--muted-foreground);font-size:.82rem">· {{ item.model || '?' }}</span></div>
+                    <div class="log-meta">{{ item.created_at }} · <span v-if="item.attempt_count > 1" class="badge badge-warning" style="font-size:.7rem;padding:1px 6px;">{{ item.attempt_count }} 次重试</span><span v-else>attempt {{ item.attempt || '-' }}</span></div>
+                </div>
             </div>
         </div>
     </div>
+
+    <!-- 搜索弹窗：列表(左) | 浏览(右) -->
+    <div v-if="failSearchVisible" class="fail-modal-bg" @click="failCloseSearch"></div>
+    <div v-if="failSearchVisible" class="fail-modal">
+    <div class="fail-modal-head">
+        <div class="font-semibold">调用失败记录 · 搜索</div>
+        <div class="fail-search-row" style="flex:1;min-width:280px">
+            <input class="input input-sm fail-search-input" v-model.trim="failKeyword" placeholder="关键字（文件名 / 模型 / 原因）" @keyup.enter="failSearch()">
+            <select class="input input-sm" style="width:auto" v-model="failModel">
+                <option value="">全部模型</option>
+                <option v-for="m in failModelList" :key="m" :value="m">{{ m }}</option>
+            </select>
+            <button class="btn btn-sm" @click="failSearch()">查询</button>
+            <button v-if="failKeyword || failModel" class="btn btn-sm btn-ghost" @click="failResetSearch()">重置</button>
+            <button class="btn btn-sm btn-ghost" @click="failCloseSearch">关闭</button>
+        </div>
+    </div>
+    <div class="fail-modal-body">
+        <div class="fail-modal-list">
+            <div class="fails-list" ref="failList" @scroll="failOnScroll">
+                <div v-if="!failItems.length && !failLoading" class="empty-box">暂无失败日志</div>
+                <div v-for="item in failItems" :key="item.filename" class="log-item" :class="{ active: failSelected && failSelected.filename === item.filename }" @click="failSelect(item)">
+                    <div class="font-semibold">{{ item.reason || 'unknown' }} <span style="font-weight:400;color:var(--muted-foreground);font-size:.82rem">· {{ item.model || '?' }}</span></div>
+                    <div class="log-meta">{{ item.created_at }} · <span v-if="item.attempt_count > 1" class="badge badge-warning" style="font-size:.7rem;padding:1px 6px;">{{ item.attempt_count }} 次重试</span><span v-else>attempt {{ item.attempt || '-' }}</span></div>
+                </div>
+                <div v-if="failLoading" class="load-more">加载中…</div>
+                <div v-else-if="failItems.length && failItems.length >= failTotal" class="load-more">已加载全部 {{ failTotal }} 条</div>
+            </div>
+        </div>
+        <div class="fail-modal-detail">
+            <div v-if="failContent" class="code-block" style="max-height:100%;font-size:12px">{{ failContent }}</div>
+            <div v-else class="empty-box" style="height:100%">从左侧列表选择一条失败记录</div>
+        </div>
+    </div>
+</div>
 </div>
 {% endraw %}
 {% endblock %}
@@ -162,11 +235,15 @@ const app = new Vue({
     data: {
         latestRpm: 0, latestTpmIn: 0, latestTpmOut: 0, latestErrors: 0,
         autoRefresh: true, refreshInterval: 15, selectedHours: 2, _refreshTimer: null, _liveTimer: null,
-        _chartRpm: null, _chartTpm: null, _chartRate: null,
+        _chartMain: null, chartTab: 'rpm',
         _realtimeRaw: [], _rateRaw: [],
         selectedModel: '__all__', modelList: [],
         indexStats: { first_count: 0, total_count: 0, valid_count: 0, success_rate: 0 },
         live: { in_flight: 0, stages: { connecting: 0, waiting_upstream: 0, streaming: 0 }, uptime_sec: 0 },
+        failEnv: '', failEnvList: [], failItems: [], failSelected: null, failContent: '', failOffset: 0, failTotal: 0, failLoading: false,
+        failSearchVisible: false, failKeyword: '', failModel: '', failModelList: [],
+        failSearchApplied: { keyword: '', model: '' },
+        failRecentItems: [],
     },
     computed: {
         totalRetries() { return Math.max(0, this.indexStats.total_count - this.indexStats.first_count); },
@@ -196,34 +273,15 @@ const app = new Vue({
                     y: { beginAtZero: true, ticks: { font: { size: 10 } } }
                 }
             };
-            this._chartRpm = new Chart(document.getElementById('chartRpm'), {
+            this._chartMain = new Chart(document.getElementById('chartMain'), {
                 type: 'line',
-                data: { labels: [], datasets: [
-                    { label: 'RPM', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)', fill: true, tension: .3, pointRadius: 2 },
-                    { label: '错误/分', data: [], borderColor: '#dc2626', backgroundColor: 'rgba(220,38,38,.08)', fill: true, tension: .3, pointRadius: 2 },
-                ]},
+                data: { labels: [], datasets: [] },
                 options: base,
             });
-            this._chartTpm = new Chart(document.getElementById('chartTpm'), {
-                type: 'line',
-                data: { labels: [], datasets: [
-                    { label: 'TPM输入', data: [], borderColor: '#059669', backgroundColor: 'rgba(5,150,105,.08)', fill: true, tension: .3, pointRadius: 2 },
-                    { label: 'TPM输出', data: [], borderColor: '#0891b2', backgroundColor: 'rgba(8,145,178,.08)', fill: true, tension: .3, pointRadius: 2 },
-                ]},
-                options: base,
-            });
-            this._chartRate = new Chart(document.getElementById('chartRate'), {
-                type: 'line',
-                data: { labels: [], datasets: [
-                    { label: '有效率%', data: [], borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,.08)', fill: true, tension: .3, pointRadius: 2 },
-                    { label: '警戒 70%', data: [], borderColor: '#f59e0b', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
-                    { label: '正常 90%', data: [], borderColor: '#16a34a', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
-                ]},
-                options: { ...base, scales: {
-                    x: { ticks: { maxTicksLimit: 10, font: { size: 10 }, maxRotation: 0 } },
-                    y: { min: 0, max: 100, ticks: { font: { size: 10 }, callback: v => v + '%' } }
-                }},
-            });
+        },
+        switchChartTab(tab) {
+            this.chartTab = tab;
+            this.applyModelFilter();
         },
         setModel(m) {
             this.selectedModel = m;
@@ -234,32 +292,50 @@ const app = new Vue({
             const rd = this._rateRaw;
             const m = this.selectedModel;
             const all = m === '__all__';
-            const labels = rt.map(d => d.ts.slice(5).replace('T', ' '));
-            const rpm = rt.map(d => all ? d.rpm : ((d.models && d.models[m] && d.models[m].rpm) || 0));
-            const errors = rt.map(d => d.errors || 0);
-            const tpmIn = rt.map(d => all ? d.tpm_in : ((d.models && d.models[m] && d.models[m].tpm_in) || 0));
-            const tpmOut = rt.map(d => all ? d.tpm_out : ((d.models && d.models[m] && d.models[m].tpm_out) || 0));
-            this._chartRpm.data.labels = labels;
-            this._chartRpm.data.datasets[0].data = rpm;
-            this._chartRpm.data.datasets[1].data = errors;
-            this._chartRpm.update('none');
-            this._chartTpm.data.labels = labels;
-            this._chartTpm.data.datasets[0].data = tpmIn;
-            this._chartTpm.data.datasets[1].data = tpmOut;
-            this._chartTpm.update('none');
+            const chart = this._chartMain;
+            if (!chart) return;
 
-            const rateLabels = rd.map(d => d.ts.slice(5).replace('T', ' '));
-            const rates = rd.map(d => {
-                if (all) return +(d.rate * 100).toFixed(1);
-                const md = d.models && d.models[m];
-                if (!md || !md.first) return null;
-                return +((md.valid / md.first) * 100).toFixed(1);
-            });
-            this._chartRate.data.labels = rateLabels;
-            this._chartRate.data.datasets[0].data = rates;
-            this._chartRate.data.datasets[1].data = rd.map(() => 70);
-            this._chartRate.data.datasets[2].data = rd.map(() => 90);
-            this._chartRate.update('none');
+            let labels, datasets;
+            if (this.chartTab === 'tpm') {
+                labels = rt.map(d => d.ts.slice(5).replace('T', ' '));
+                datasets = [
+                    { label: 'TPM输入', data: rt.map(d => all ? d.tpm_in : ((d.models && d.models[m] && d.models[m].tpm_in) || 0)), borderColor: '#059669', backgroundColor: 'rgba(5,150,105,.08)', fill: true, tension: .3, pointRadius: 2 },
+                    { label: 'TPM输出', data: rt.map(d => all ? d.tpm_out : ((d.models && d.models[m] && d.models[m].tpm_out) || 0)), borderColor: '#0891b2', backgroundColor: 'rgba(8,145,178,.08)', fill: true, tension: .3, pointRadius: 2 },
+                ];
+            } else if (this.chartTab === 'rate') {
+                labels = rd.map(d => d.ts.slice(5).replace('T', ' '));
+                const rates = rd.map(d => {
+                    if (all) return +(d.rate * 100).toFixed(1);
+                    const md = d.models && d.models[m];
+                    if (!md || !md.first) return null;
+                    return +((md.valid / md.first) * 100).toFixed(1);
+                });
+                datasets = [
+                    { label: '有效率%', data: rates, borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,.08)', fill: true, tension: .3, pointRadius: 2 },
+                    { label: '警戒 70%', data: rd.map(() => 70), borderColor: '#f59e0b', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
+                    { label: '正常 90%', data: rd.map(() => 90), borderColor: '#16a34a', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
+                ];
+            } else {
+                labels = rt.map(d => d.ts.slice(5).replace('T', ' '));
+                datasets = [
+                    { label: 'RPM', data: rt.map(d => all ? d.rpm : ((d.models && d.models[m] && d.models[m].rpm) || 0)), borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)', fill: true, tension: .3, pointRadius: 2 },
+                    { label: '错误/分', data: rt.map(d => d.errors || 0), borderColor: '#dc2626', backgroundColor: 'rgba(220,38,38,.08)', fill: true, tension: .3, pointRadius: 2 },
+                ];
+            }
+
+            chart.data.labels = labels;
+            chart.data.datasets = datasets;
+            chart.options.scales.y.beginAtZero = true;
+            if (this.chartTab === 'rate') {
+                chart.options.scales.y.min = 0;
+                chart.options.scales.y.max = 100;
+                chart.options.scales.y.ticks.callback = v => v + '%';
+            } else {
+                chart.options.scales.y.min = undefined;
+                chart.options.scales.y.max = undefined;
+                chart.options.scales.y.ticks.callback = undefined;
+            }
+            chart.update('none');
 
             if (rt.length) {
                 const last = rt[rt.length - 1];
@@ -309,7 +385,7 @@ const app = new Vue({
         startAutoRefresh() {
             this.fetchRealtime();
             this._refreshTimer = setInterval(() => {
-                if (this.autoRefresh) this.fetchRealtime();
+                if (this.autoRefresh) { this.fetchRealtime(); this.failLoadRecent(); }
             }, this.refreshInterval * 1000);
             // 在途请求单独用更快的节奏刷新（3 秒），体现「实时」
             this.fetchLive();
@@ -321,11 +397,116 @@ const app = new Vue({
             this.autoRefresh = !this.autoRefresh;
             if (this.autoRefresh) this.fetchRealtime();
         },
+        // ---- 调用失败记录 ----
+        failOpenSearch() {
+            this.failSearchVisible = true;
+            if (!this.failEnvList.length) this.failLoadEnvs();
+            else if (!this.failItems.length) this.failLoadList();
+        },
+        failCloseSearch() {
+            this.failSearchVisible = false;
+            this.failKeyword = ''; this.failModel = '';
+            this.failSearchApplied.keyword = ''; this.failSearchApplied.model = '';
+            this.failSelected = null; this.failContent = '';
+            this.failItems = []; this.failTotal = 0; this.failOffset = 0;
+        },
+        failLoadEnvs() {
+            var self = this;
+            fetch('/logs/debug/envs')
+                .then(r => r.json())
+                .then(data => {
+                    self.failEnvList = data || [];
+                    if (self.failEnvList.length && !self.failEnvList.find(function(e) { return e.name === self.failEnv; })) {
+                        var cur = self.failEnvList.find(function(e) { return e.current; });
+                        self.failEnv = cur ? cur.name : self.failEnvList[0].name;
+                    }
+                    self.failLoadList();
+                    self.failLoadRecent();
+                })
+                .catch(function() { self.failLoadList(); self.failLoadRecent(); });
+        },
+        failSwitchEnv() { this.failLoadList(); this.failLoadRecent(); },
+        failLoadList() {
+            this.failOffset = 0; this.failItems = []; this.failTotal = 0;
+            this.failSelected = null; this.failContent = '';
+            this.failFetchMore();
+        },
+        failFetchMore() {
+            if (this.failLoading) return;
+            if (this.failOffset > 0 && this.failItems.length >= this.failTotal) return;
+            this.failLoading = true;
+            var p = new URLSearchParams({ limit: 50, offset: this.failOffset });
+            if (this.failEnv) p.append('env', this.failEnv);
+            if (this.failSearchApplied.keyword) p.append('keyword', this.failSearchApplied.keyword);
+            if (this.failSearchApplied.model) p.append('model', this.failSearchApplied.model);
+            var self = this;
+            fetch('/logs/debug/list?' + p.toString())
+                .then(r => r.json())
+                .then(data => {
+                    var newItems = data.items || [];
+                    if (data.models && data.models.length) self.failModelList = data.models;
+                    self.failItems = self.failItems.concat(newItems);
+                    self.failTotal = data.total || 0;
+                    self.failOffset += newItems.length;
+                    self.failLoading = false;
+                    if (!self.failSelected && self.failItems.length > 0) self.failSelect(self.failItems[0]);
+                })
+                .catch(function() { self.failLoading = false; });
+        },
+        failSearch() {
+            this.failSearchApplied.keyword = this.failKeyword;
+            this.failSearchApplied.model = this.failModel;
+            this.failLoadList();
+        },
+        failResetSearch() {
+            this.failKeyword = ''; this.failModel = '';
+            this.failSearchApplied.keyword = ''; this.failSearchApplied.model = '';
+            this.failLoadList();
+        },
+        failOnScroll() {
+            var el = this.$refs.failList;
+            if (!el) return;
+            if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) this.failFetchMore();
+        },
+        failSelect(item) {
+            this.failSelected = item;
+            var self = this;
+            fetch('/logs/debug/file?filename=' + encodeURIComponent(item.filename))
+                .then(r => r.json())
+                .then(data => { self.failContent = data.content || ''; })
+                .catch(function() { self.failContent = '加载失败'; });
+        },
+        failLoadRecent() {
+            var self = this;
+            var p = new URLSearchParams({ limit: 10, offset: 0 });
+            if (this.failEnv) p.append('env', this.failEnv);
+            fetch('/logs/debug/list?' + p.toString())
+                .then(r => r.json())
+                .then(data => { self.failRecentItems = (data.items || []).slice(0, 10); })
+                .catch(function() { self.failRecentItems = []; });
+        },
+        failBrowse(item) {
+            // 主界面点击条目：弹窗左侧用最近的 10 条作为列表，右侧浏览点击的那条
+            if (this.failRecentItems.length) {
+                this.failItems = this.failRecentItems.slice();
+                this.failTotal = this.failItems.length;
+                this.failOffset = this.failItems.length;
+            }
+            this.failSelected = item;
+            this.failContent = '';
+            this.failSearchVisible = true;
+            var self = this;
+            fetch('/logs/debug/file?filename=' + encodeURIComponent(item.filename))
+                .then(r => r.json())
+                .then(data => { if (self.failSelected && self.failSelected.filename === item.filename) self.failContent = data.content || ''; })
+                .catch(function() { if (self.failSelected && self.failSelected.filename === item.filename) self.failContent = '加载失败'; });
+        },
     },
     mounted() {
         this.$nextTick(() => {
             this.initCharts();
             this.startAutoRefresh();
+            this.failLoadEnvs();
         });
     },
     beforeDestroy() {

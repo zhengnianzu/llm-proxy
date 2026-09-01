@@ -93,7 +93,6 @@ MONITOR_AUTH_EXACT_PATHS = {
     "/",
     "/query",
     "/history",
-    "/failures",
     "/sessions",
     "/keys",
     "/thinking",
@@ -263,10 +262,10 @@ _HOP_BY_HOP_HEADERS = {
 }
 
 # catch-all 不该转发的「本地功能」路径前缀。已定义的具体路由本就优先于 catch-all
-# 不会落到这里；这里兜底那些「本地功能的未定义子路径」（如 /query/x、/failures/x）。
+# 不会落到这里；这里兜底那些「本地功能的未定义子路径」（如 /query/x、/export/x）。
 # 后台 /api/*、/metrics/*、/keys/* 等已被 MonitorAuthMiddleware 在更前面拦下。
 _PASSTHROUGH_EXCLUDE_PREFIXES = (
-    "query", "history", "failures", "register", "login", "logout",
+    "query", "history", "register", "login", "logout",
     "invite", "hi", "docs", "redoc", "openapi.json", "favicon.ico",
     "static", "api", "metrics", "logs", "sessions", "keys", "channels",
     "users", "backup", "thinking", "export",
@@ -1909,19 +1908,6 @@ def export_view_api_file_raw(key: str = "", filename: str = "", log_dir: str = "
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return JSONResponse(data)
-
-
-@app.get("/failures")
-async def failure_viewer(request: Request):
-    if LOGS_DEBUG:
-        try:
-            debug_env = str(Path(LOGS_DEBUG).relative_to(Path("logs")))
-        except ValueError:
-            # LOG_DIR 可为绝对路径,此时不在相对 logs/ 子路径下——直接用绝对路径作为 env 标识
-            debug_env = LOGS_DEBUG
-    else:
-        debug_env = ""
-    return templates.TemplateResponse(request, "failures.html", context=_ctx(request, "failures", default_env=debug_env))
 
 
 @app.get("/api/statistic")

@@ -241,7 +241,7 @@ def _rebuild_debug_cache(debug_root: Path) -> tuple:
     return hour_meta, models
 
 
-def _load_debug_cache(env_filter: str = "", keyword: str = "", limit: int = 50, offset: int = 0) -> tuple:
+def _load_debug_cache(env_filter: str = "", keyword: str = "", model: str = "", limit: int = 50, offset: int = 0) -> tuple:
     """返回 (paged_items, models, total)。"""
     global _debug_mem_cache
 
@@ -257,6 +257,8 @@ def _load_debug_cache(env_filter: str = "", keyword: str = "", limit: int = 50, 
                 items = [i for i in items if keyword in i.get("filename", "").lower()
                          or keyword in i.get("model", "").lower()
                          or keyword in i.get("reason", "").lower()]
+            if model:
+                items = [i for i in items if model in i.get("model", "").lower()]
             return items[offset:offset + limit], models, len(items)
 
     all_items: list[dict] = []
@@ -300,6 +302,8 @@ def _load_debug_cache(env_filter: str = "", keyword: str = "", limit: int = 50, 
         all_items = [i for i in all_items if keyword in i.get("filename", "").lower()
                      or keyword in i.get("model", "").lower()
                      or keyword in i.get("reason", "").lower()]
+    if model:
+        all_items = [i for i in all_items if model in i.get("model", "").lower()]
     return all_items[offset:offset + limit], merged_models, len(all_items)
 
 
@@ -366,9 +370,7 @@ def register_debug_routes(app: FastAPI, logs_debug: str, startup_date_tag: str):
         safe_offset = max(0, offset)
         keyword_lower = keyword.strip().lower()
         model_lower = model.strip().lower()
-        items, models, total = _load_debug_cache(env_filter=env, keyword=keyword_lower, limit=safe_limit, offset=safe_offset)
-        if model_lower:
-            items = [i for i in items if model_lower in i.get("model", "").lower()]
+        items, models, total = _load_debug_cache(env_filter=env, keyword=keyword_lower, model=model_lower, limit=safe_limit, offset=safe_offset)
         return JSONResponse({"items": items, "models": models, "total": total})
 
     @app.get("/logs/debug/file")
