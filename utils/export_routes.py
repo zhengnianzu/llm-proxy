@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, Query
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from utils.export_store import (
@@ -938,20 +938,9 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/keys/export/browse")
     def export_browse_page(request: Request):
-        # 导出浏览落地页：内部鉴权（走 ("/keys/export","export") 权限前缀）。
-        # 列出所有 key，点选后带 key+model+access-key 跳转公开 /export/view。
-        # access_key 服务端注入模板（取 .env 的 ACCESS_KEY），不出现在侧栏 href。
-        return templates.TemplateResponse(
-            request, "export_browse.html",
-            context={
-                "active_page": "export_browse",
-                "user_role": request.session.get("monitor_role", "user"),
-                "user_name": request.session.get("monitor_user", ""),
-                "user_permissions": [p.strip() for p in (request.session.get("monitor_permissions") or "").split(",") if p.strip()],
-                "access_key": os.getenv("ACCESS_KEY", ""),
-            },
-            headers={"Cache-Control": "no-store"},
-        )
+        # 导出浏览已下线：浏览功能并入「对话浏览」（/history 与公开 /export/view 均渲染 chat-viewer.html）。
+        # 保留路由仅为避免直接访问旧链接时 404 未定义（跳回导出页）。
+        return RedirectResponse(url="/keys/export", status_code=302)
 
     @app.get("/keys/export/report/{record_id}")
     def export_report_page(request: Request, record_id: int):

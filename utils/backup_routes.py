@@ -243,6 +243,38 @@ def _disk_usage(path: Path) -> dict:
         return {}
 
 
+def _mount_point(path) -> str:
+    """返回 path 所在挂载点（st_dev 向上爬取，找到 dev 变化处的顶层目录）。
+
+    同盘多个数据根共享同一 mount_point（df 值相同），供前端「按挂载盘归并统计」。
+    路径不存在时沿父级向上找存在的最近祖先；失败时原样返回 path。
+    """
+    p = Path(os.path.realpath(path))
+    while not p.exists():
+        parent = p.parent
+        if str(parent) == str(p):
+            break
+        p = parent
+    try:
+        dev = p.stat().st_dev
+    except OSError:
+        return str(path)
+    top = p
+    cur = p
+    while True:
+        parent = cur.parent
+        if str(parent) == str(cur):
+            break
+        try:
+            if parent.stat().st_dev != dev:
+                break
+        except OSError:
+            break
+        cur = parent
+        top = cur
+    return str(top)
+
+
 def _du_size(path: Path) -> int:
     """递归统计目录字节数（du）。大目录可能较慢。"""
     total = 0
@@ -1203,6 +1235,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         for r in roots:
             p = Path(r["path"])
             info = {"name": r["name"], "path": r["path"], "active": r["active"],
+                    "mount": _mount_point(p),
                     "disk": _disk_usage(p)}
             if with_size and p.is_dir():
                 with _du_lock:

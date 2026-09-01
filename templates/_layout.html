@@ -34,10 +34,6 @@
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
                     <span>监控总览</span>
                 </a>
-                <a href="/overview" class="sidebar-item {% if active_page == 'overview' %}active{% endif %}" title="统计总览">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                    <span>统计总览</span>
-                </a>
             </div>
 
             <!-- Data Section -->
@@ -76,10 +72,6 @@
                 <a href="/keys/export" class="sidebar-item {% if active_page == 'export' %}active{% endif %}" title="导出">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                     <span>导出</span>
-                </a>
-                <a href="/keys/export/browse" class="sidebar-item {% if active_page == 'export_browse' %}active{% endif %}" title="导出浏览">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
-                    <span>导出浏览</span>
                 </a>
                 {% endif %}
                 {% if show_sess_manage %}

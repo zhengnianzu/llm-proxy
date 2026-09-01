@@ -57,6 +57,17 @@
 .obs-path { font-family: var(--font-mono); font-size: .76rem; color: var(--muted-foreground); word-break: break-all; cursor: pointer; }
 .obs-path:hover { color: var(--primary); }
 
+/* 导出记录分页 */
+.task-pager { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.task-pager-info { font-size: .8rem; color: var(--muted-foreground); margin-right: 8px; }
+.task-pager-num { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 30px;
+                  padding: 0 6px; border: 1px solid var(--border); border-radius: 6px; font-size: .82rem;
+                  cursor: pointer; user-select: none; color: var(--foreground); }
+.task-pager-num:hover { border-color: var(--primary); }
+.task-pager-num.active { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.task-pager-num.gap { border: none; cursor: default; color: var(--muted-foreground); }
+.task-pager-num.gap:hover { border: none; }
+
 /* 任务状态徽标（独立「状态」列） */
 .task-status { font-size: .74rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; background: color-mix(in srgb, var(--muted-foreground) 14%, transparent); color: var(--muted-foreground); }
 .task-status-running, .task-status-pending, .task-status-queued { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
@@ -215,7 +226,7 @@
                 <option value="full_reformat">全量导出</option>
                 <option value="eval">质检</option>
             </select>
-            <small class="text-muted" v-if="hasTaskFilters">匹配 {{ filteredTasks.length }} / {{ tasks.length }}</small>
+            <small class="text-muted" v-if="hasTaskFilters">匹配 {{ filteredTotal }} / {{ tasks.length }}</small>
         </div>
 
         <table class="task-table">
@@ -235,7 +246,7 @@
                 </tr>
             </thead>
             <tbody>
-                <tr v-for="t in filteredTasks" :key="t.id">
+                <tr v-for="t in pagedTasks" :key="t.id">
                     <td style="white-space:nowrap;font-family:var(--font-mono);font-weight:600;">#{{ t.id }}</td>
                     <td>
                         <span v-if="t.manage_name" class="task-key-name" style="font-weight:600;">{{ t.manage_name }}</span>
@@ -332,6 +343,18 @@
                 </tr>
             </tbody>
         </table>
+
+        <!-- 分页控件：每页 20 条 -->
+        <div class="task-pager" v-if="filteredTotal > pageSize">
+            <span class="task-pager-info">第 {{ taskPage }} / {{ taskPages }} 页 · 共 {{ filteredTotal }} 条</span>
+            <button class="btn btn-sm" :disabled="taskPage <= 1" @click="taskPage = 1">首页</button>
+            <button class="btn btn-sm" :disabled="taskPage <= 1" @click="taskPage--">上一页</button>
+            <span v-for="p in pagerRange" :key="p"
+                  class="task-pager-num" :class="{ 'active': p === taskPage, 'gap': p === '…' }"
+                  @click="p !== '…' ? taskPage = p : null">{{ p }}</span>
+            <button class="btn btn-sm" :disabled="taskPage >= taskPages" @click="taskPage++">下一页</button>
+            <button class="btn btn-sm" :disabled="taskPage >= taskPages" @click="taskPage = taskPages">末页</button>
+        </div>
     </div>
 
     <div v-else-if="recordsLoaded && !tasks.length" class="card no-data">
@@ -569,6 +592,9 @@ new Vue({
         logDirFilter: '',
         statusFilter: '',
         modeFilter: '',
+        // 导出记录分页：每页 20 条，筛选变化时回第 1 页
+        taskPage: 1,
+        pageSize: 20,
         // 操作列「更多」下拉：记录当前展开哪一行的菜单（null = 全部收起）
         opsOpen: null,
 
@@ -672,6 +698,35 @@ new Vue({
                 return textOk && nameOk && logDirOk && statusOk && modeOk;
             });
         },
+        // 分页：把 filteredTasks 切成当前页
+        pagedTasks: function() {
+            var start = (this.taskPage - 1) * this.pageSize;
+            return this.filteredTasks.slice(start, start + this.pageSize);
+        },
+        filteredTotal: function() {
+            return this.filteredTasks.length;
+        },
+        taskPages: function() {
+            var t = this.filteredTotal;
+            if (!t) return 1;
+            return Math.ceil(t / this.pageSize);
+        },
+        // 页号窗口：当前页 ±2，首尾保留，中间溢出处用「…」折叠
+        pagerRange: function() {
+            var n = this.taskPages;
+            var cur = this.taskPage;
+            var out = [];
+            var window = 2;
+            var i, last = 0;
+            for (i = 1; i <= n; i++) {
+                if (i === 1 || i === n || Math.abs(i - cur) <= window) {
+                    if (last && i - last > 1) out.push('…');
+                    out.push(i);
+                    last = i;
+                }
+            }
+            return out;
+        },
         // 新建任务第一步的 key 列表（用 Modal 独立的一套筛选变量，与主列表不联动）
         pickKeys: function() {
             var q = (this.mKeyFilter || '').toLowerCase();
@@ -735,6 +790,21 @@ new Vue({
                 circumference: circumference,
                 dashOffset: circumference * (1 - pct / 100),
             };
+        },
+    },
+    watch: {
+        keyFilter:   function() { this.taskPage = 1; },
+        nameFilter:  function() { this.taskPage = 1; },
+        logDirFilter: function() { this.taskPage = 1; },
+        statusFilter: function() { this.taskPage = 1; },
+        modeFilter:  function() { this.taskPage = 1; },
+        // 任务表轮询/删除后总数可能缩小，把当前页夹回到合法范围
+        taskPages: function() {
+            if (this.taskPage > this.taskPages) this.taskPage = this.taskPages;
+        },
+        taskPage: function() {
+            if (this.taskPage < 1) this.taskPage = 1;
+            if (this.taskPages && this.taskPage > this.taskPages) this.taskPage = this.taskPages;
         },
     },
     mounted: function() {

@@ -128,20 +128,28 @@
             </button>
         </h6>
         <div style="display:flex;flex-direction:column;gap:10px;">
-            <div v-for="s in storage" :key="s.path" style="font-size:.84rem;">
-                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                    <span class="mono" style="font-weight:600;">{{ s.name }}</span>
-                    <span v-if="s.active" style="font-size:.7rem;background:var(--success);color:#fff;padding:1px 6px;border-radius:99px;">当前</span>
-                    <span class="mono" style="color:var(--muted-foreground);font-size:.78rem;">{{ s.path }}</span>
-                    <span v-if="s.size_h" style="color:var(--primary);">目录占用 {{ s.size_h }}</span>
-                    <span v-else-if="s.size_pending" style="color:var(--muted-foreground);">目录占用统计中…</span>
-                </div>
-                <div v-if="s.disk && s.disk.total" style="margin-top:4px;">
-                    <div style="height:8px;background:var(--muted);border-radius:99px;overflow:hidden;max-width:420px;">
-                        <div :style="{width: s.disk.percent + '%', height:'100%', background: s.disk.percent > 90 ? 'var(--danger)' : 'var(--success)'}"></div>
+            <!-- 按挂载盘归组：每个挂载点一条磁盘条（df 同盘相同），下方列该盘下各数据源目录 -->
+            <div v-for="g in storageGroups()" :key="g.key" style="font-size:.84rem;">
+                <div v-if="g.disk && g.disk.total" style="margin-top:4px;">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        <span class="mono" style="font-weight:600;">{{ g.mount || '磁盘' }}</span>
+                        <span v-if="g._size_h" style="color:var(--primary);">源目录合计 {{ g._size_h }}</span>
+                        <span v-else-if="g._pending" style="color:var(--muted-foreground);">目录合计统计中…</span>
+                    </div>
+                    <div style="height:8px;background:var(--muted);border-radius:99px;overflow:hidden;max-width:420px;margin-top:2px;">
+                        <div :style="{width: g.disk.percent + '%', height:'100%', background: g.disk.percent > 90 ? 'var(--danger)' : 'var(--success)'}"></div>
                     </div>
                     <div style="color:var(--muted-foreground);font-size:.78rem;margin-top:2px;">
-                        磁盘 已用 {{ s.disk.used_h }} / 共 {{ s.disk.total_h }}（剩余 {{ s.disk.free_h }}，{{ s.disk.percent }}%）
+                        磁盘 已用 {{ g.disk.used_h }} / 共 {{ g.disk.total_h }}（剩余 {{ g.disk.free_h }}，{{ g.disk.percent }}%）
+                    </div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-left:6px;border-left:2px solid var(--border);">
+                    <div v-for="s in g.items" :key="s.path" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        <span class="mono" style="font-weight:600;">{{ s.name }}</span>
+                        <span v-if="s.active" style="font-size:.7rem;background:var(--success);color:#fff;padding:1px 6px;border-radius:99px;">当前</span>
+                        <span class="mono" style="color:var(--muted-foreground);font-size:.78rem;">{{ s.path }}</span>
+                        <span v-if="s.size_h" style="color:var(--primary);">目录占用 {{ s.size_h }}</span>
+                        <span v-else-if="s.size_pending" style="color:var(--muted-foreground);">目录占用统计中…</span>
                     </div>
                 </div>
             </div>
@@ -411,6 +419,44 @@ new Vue({
         statusLabel(s) {
             var m = { pending: '待同步', syncing: '同步中', live_syncing: '在线同步', done: '已同步', error: '失败', partial: '部分失败', deleted: '已删除', backed_up: '已备份', pending_delete: '待删除' };
             return m[s] || s;
+        },
+        // 归组键：优先用后端给的真实挂载点（mount），否则回退到「磁盘签名」，
+        // 这样即便后端未升级重启，同盘根也会因为 df 值相同而聚到一组。
+        storageGroupKey(s) {
+            if (s.mount) return 'mount:' + s.mount;
+            if (s.disk && s.disk.total) return 'disk:' + s.disk.total + ':' + s.disk.used;
+            return 'path:' + s.path;
+        },
+        storageGroups() {
+            var groups = {};
+            (this.storage || []).forEach(function(s) {
+                var k = this.storageGroupKey(s);
+                if (!groups[k]) groups[k] = { key: k, mount: s.mount || null, disk: s.disk || null, items: [] };
+                var g = groups[k];
+                g.items.push(s);
+                // 同一挂载点下的目录占用合计（仅统计已算出的）
+                if (s.size_bytes) g.size_bytes = (g.size_bytes || 0) + s.size_bytes;
+                if (s.size_h) g.size_h = null; // 合计用 size_bytes 精确算，避免丢失
+            }.bind(this));
+            var out = [];
+            Object.keys(groups).forEach(function(k) {
+                var g = groups[k];
+                // 若组内尚有 pending，则不显示合计，避免误导
+                var anyPending = g.items.some(function(s) { return s.size_pending; });
+                g._pending = anyPending;
+                g._size_h = anyPending ? null : (g.size_bytes ? this.fmtSize(g.size_bytes) : null);
+                out.push(g);
+            }.bind(this));
+            return out;
+        },
+        fmtSize(n) {
+            if (n == null) return '';
+            var val = Number(n);
+            if (!isFinite(val)) return '';
+            var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            var i = 0;
+            while (val >= 1024 && i < units.length - 1) { val /= 1024; i++; }
+            return (i === 0 ? val : val.toFixed(1)) + units[i];
         },
         loadQueue() {
             fetch('/api/backup/queue-status', { headers: { 'x-requested-with': 'XMLHttpRequest' } })

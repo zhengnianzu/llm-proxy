@@ -20,6 +20,14 @@
         .text-good { color: var(--success); }
         .text-warn { color: var(--warning); }
         .text-danger { color: var(--destructive); }
+        /* 紧凑数字列表 */
+        .stat-panel { padding: 14px 16px; margin-bottom: 14px; }
+        .stat-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+        .stat-list { display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: baseline; }
+        .stat-item { display: flex; align-items: baseline; gap: 6px; }
+        .stat-label { font-size: .74rem; color: var(--muted-foreground); white-space: nowrap; }
+        .stat-num { font-size: 1.15rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+        .stat-note { font-size: .72rem; color: var(--muted-foreground); }
         @media (max-width: 768px) {
             .dash-divider { border-left: none; border-top: 1px solid var(--border); }
             .main-content { min-height: auto; }
@@ -43,90 +51,381 @@
         .fail-modal-detail { flex: 1; overflow-y: auto; padding: 16px 18px; }
         .fail-search-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
         .fail-search-input { flex: 1; min-width: 140px; }
+
+
+    <!-- ===== 统计总览 (merged from overview_stat.html) ===== -->
+        /* query.html 复用 */
+        .arrow { font-size: .8rem; margin-left: 4px; }
+        .summary-total { background: var(--muted); border-radius: var(--radius); padding: 14px 16px; }
+        .text-end { text-align: right; }
+        .data-table th, .data-table td { font-size: .84rem; }
+        .totals-row td { font-weight: 700; background: var(--muted); }
+        .flex-grow-1 { flex-grow: 1; }
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .summary-cards .summary-card { margin: 0; }
+        .summary-cards .stat-val { font-size: 1.6rem; font-weight: 600; line-height: 1.2; }
+        .summary-cards .stat-label { font-size: .8rem; color: var(--muted-foreground); margin-top: 4px; }
+        /* 双列卡片网格(参考 agentsview) */
+        .chart-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .chart-grid .card { margin-bottom: 0; }
+
+        /* 热力图(由 sessions.html 移植) */
+        .heatmap-wrap { width: 100%; overflow-x: auto; }
+        .heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(var(--n-days, 1), 1fr);
+            gap: 1px;
+            min-width: 100%;
+        }
+        .heatmap-cell {
+            aspect-ratio: 1 / 1; min-height: 0; border-radius: 2px;
+            border: 1px solid transparent; cursor: pointer;
+        }
+        .heatmap-cell:hover { border-color: var(--primary); }
+        /* 归一化 5 档 + 0 值(用 CSS 变量,亮/暗各一组)。tier 越低颜色越浅 */
+        .tier-0 { background: color-mix(in srgb, var(--muted) 55%, var(--card)); }
+        .tier-1 { background: color-mix(in srgb, var(--primary) 22%, var(--card)); }
+        .tier-2 { background: color-mix(in srgb, var(--primary) 42%, var(--card)); }
+        .tier-3 { background: color-mix(in srgb, var(--primary) 65%, var(--card)); }
+        .tier-4 { background: color-mix(in srgb, var(--primary) 85%, var(--card)); }
+        .tier-5 { background: var(--primary); }
+        /* source tabs */
+        .source-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+        .source-tab {
+            padding: 5px 14px; font-size: .84rem; cursor: pointer;
+            border: 1px solid var(--border); border-radius: 999px;
+            background: var(--card); color: var(--foreground); transition: all .15s;
+        }
+        .source-tab:hover { border-color: var(--primary); }
+        .source-tab.active { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+        /* 图例 */
+        .heatmap-legend { display: flex; align-items: center; gap: 6px; font-size: .72rem; color: var(--muted-foreground); }
+        .heatmap-legend .swatch { width: 14px; height: 14px; border-radius: 3px; }
+
+        /* 分页器 */
+        .pager { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; font-size: .84rem; }
+        .pager .page-info { color: var(--muted-foreground); margin-right: auto; }
+        .pager .page-btn {
+            min-width: 28px; height: 28px; padding: 0 8px;
+            display: inline-flex; align-items: center; justify-content: center;
+            border: 1px solid var(--border); border-radius: 6px;
+            background: var(--card); color: var(--foreground);
+            cursor: pointer; transition: all .15s; user-select: none;
+        }
+        .pager .page-btn:hover:not(:disabled):not(.active) { border-color: var(--primary); }
+        .pager .page-btn.active { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+        .pager .page-btn:disabled { opacity: .45; cursor: not-allowed; }
+        .pager .page-btn.dots { border: none; background: transparent; cursor: default; }
+
+        /* 指标 tab(柱状图切换) */
+        .metric-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+        .metric-tab {
+            padding: 4px 12px; font-size: .8rem; cursor: pointer;
+            border: 1px solid var(--border); border-radius: 999px;
+            background: var(--card); color: var(--muted-foreground); transition: all .15s;
+        }
+        .metric-tab:hover { border-color: var(--primary); color: var(--foreground); }
+        .metric-tab.active { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+
+        /* 横向柱状图 */
+        .bar-chart { display: flex; flex-direction: column; gap: 7px; }
+        .bar-row { display: flex; align-items: center; gap: 8px; }
+        .bar-label {
+            width: 104px; flex-shrink: 0; font-size: .76rem; color: var(--muted-foreground);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right;
+        }
+        .bar-track { flex: 1; height: 18px; background: var(--muted); border-radius: 4px; overflow: hidden; }
+        .bar-fill {
+            height: 100%; min-width: 3px; border-radius: 4px;
+            background: linear-gradient(90deg, color-mix(in srgb, var(--primary) 55%, var(--card)), var(--primary));
+            transition: width .3s;
+        }
+        .bar-val { min-width: 56px; font-size: .78rem; font-weight: 600; color: var(--foreground); }
+
+        /* 卡片头:标题 + 更多 */
+        .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 8px; }
+
+        /* 更多弹窗:分页表格 + 搜索 */
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,.5);
+            display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px;
+        }
+        .modal {
+            background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+            max-width: 760px; width: 100%; max-height: 82vh; display: flex; flex-direction: column; padding: 18px;
+        }
+        .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        .modal-head h6 { margin: 0; }
+        .modal-close {
+            background: none; border: none; font-size: 1.5rem; line-height: 1;
+            cursor: pointer; color: var(--muted-foreground);
+        }
+        .modal-body { overflow: auto; flex: 1; min-width: 0; }
+        .modal .search-box { display: flex; gap: 8px; margin-bottom: 12px; }
+
+        /* 窄屏:双列塌缩为单列,概览卡 wrap */
+        @media (max-width: 900px) {
+            .summary-cards { grid-template-columns: repeat(3, 1fr); }
+        }
+        @media (max-width: 760px) {
+            .chart-grid { grid-template-columns: 1fr; }
+            .summary-cards { grid-template-columns: repeat(2, 1fr); }
+        }
 {% endblock %}
 
 {% block content %}
 {% raw %}
 <div id="app">
-    <div class="dashboard-panel">
-        <div class="grid grid-6 text-center">
-            <div>
-                <h5>首次请求</h5>
-                <div class="stat-value">{{ indexStats.first_count }}</div>
-                <div class="stat-sub">累计</div>
+    <div class="grid grid-2" style="align-items:stretch">
+        <div class="card stat-panel">
+            <div class="stat-panel-head">
+                <div class="font-semibold">累计指标</div>
+                <div class="text-muted text-sm">自服务启动以来</div>
             </div>
-            <div class="dash-divider">
-                <h5>有效请求</h5>
-                <div class="stat-value">{{ indexStats.valid_count }}</div>
-                <div class="stat-sub">累计</div>
+            <div class="stat-list">
+                <div class="stat-item">
+                    <span class="stat-label">首次请求</span>
+                    <span class="stat-num">{{ indexStats.first_count }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">有效请求</span>
+                    <span class="stat-num">{{ indexStats.valid_count }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">重试次数</span>
+                    <span class="stat-num">{{ totalRetries }}</span>
+                    <span class="stat-note">总上游 {{ indexStats.total_count }}</span>
+                </div>
             </div>
-            <div class="dash-divider">
-                <h5>重试次数</h5>
-                <div class="stat-value">{{ totalRetries }}</div>
-                <div class="stat-sub">总上游 {{ indexStats.total_count }}</div>
-            </div>
-            <div class="dash-divider">
-                <h5>当前 RPM</h5>
-                <div class="stat-value">{{ latestRpm }}</div>
-                <div class="stat-sub">本分钟请求数</div>
-            </div>
-            <div class="dash-divider">
-                <h5>TPM 输入</h5>
-                <div class="stat-value">{{ latestTpmIn }}</div>
-                <div class="stat-sub">本分钟 tokens</div>
-            </div>
-            <div class="dash-divider">
-                <h5>有效率</h5>
-                <div class="stat-value" :class="'text-' + rateLevel">{{ successRatePct }}%</div>
-                <div class="stat-sub">
-                    <span class="blink" :class="'text-' + rateLevel">●</span>
-                    {{ rateLevel === 'good' ? '正常' : rateLevel === 'warn' ? '偏低' : '异常' }}
+            <div class="stat-list" style="margin-top:10px">
+                <div class="stat-item">
+                    <span class="stat-label">当前 RPM</span>
+                    <span class="stat-num">{{ latestRpm }}</span>
+                    <span class="stat-note">本分钟</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">TPM 输入</span>
+                    <span class="stat-num">{{ latestTpmIn }}</span>
+                    <span class="stat-note">本分钟</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">有效率</span>
+                    <span class="stat-num" :class="'text-' + rateLevel">{{ successRatePct }}%</span>
+                    <span class="stat-note blink" :class="'text-' + rateLevel">
+                        {{ rateLevel === 'good' ? '● 正常' : rateLevel === 'warn' ? '● 偏低' : '● 异常' }}
+                    </span>
                 </div>
             </div>
         </div>
-    </div>
 
-    <div class="card">
-        <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
-            <div>
+        <div class="card stat-panel">
+            <div class="stat-panel-head">
                 <div class="font-semibold">实时在途请求</div>
-                <div class="text-muted text-sm">
-                    当前正在处理的请求及所处阶段，每 {{ refreshInterval }} 秒刷新
-                    <span v-if="live.uptime_sec">· 本进程已运行 {{ liveUptime }}</span>
+                <span class="blink text-good" title="实时">● LIVE</span>
+                <div class="text-muted text-sm">每 {{ refreshInterval }} 秒刷新<span v-if="live.uptime_sec"> · 已运行 {{ liveUptime }}</span></div>
+            </div>
+            <div class="stat-list">
+                <div class="stat-item">
+                    <span class="stat-label">在途总数</span>
+                    <span class="stat-num" :class="'text-' + inflightLevel">{{ live.in_flight }}</span>
+                    <span class="stat-note">当前并发</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">等待厂商</span>
+                    <span class="stat-num" :class="{ 'text-warn': live.stages.waiting_upstream > 0 }">{{ live.stages.waiting_upstream }}</span>
+                    <span class="stat-note">已连上</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">建连中</span>
+                    <span class="stat-num">{{ live.stages.connecting }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">回传中</span>
+                    <span class="stat-num">{{ live.stages.streaming }}</span>
+                    <span class="stat-note">透传中</span>
                 </div>
             </div>
-            <span class="blink text-good" title="实时">● LIVE</span>
-        </div>
-        <div class="grid grid-4 text-center">
-            <div>
-                <h5>在途总数</h5>
-                <div class="stat-value" :class="'text-' + inflightLevel">{{ live.in_flight }}</div>
-                <div class="stat-sub">当前并发</div>
+            <div class="text-muted text-sm" style="margin-top:10px">
+                阻塞提示：<span v-if="live.stages.waiting_upstream > live.stages.streaming && live.stages.waiting_upstream > 5" class="text-warn">大量请求卡在「等待厂商」，瓶颈在上游生成</span>
+                <span v-else-if="live.stages.streaming > 5" class="text-warn">较多请求卡在「回传」，可能客户端接收慢</span>
+                <span v-else class="text-good">链路通畅</span>
             </div>
-            <div class="dash-divider">
-                <h5>等待厂商</h5>
-                <div class="stat-value" :class="{ 'text-warn': live.stages.waiting_upstream > 0 }">{{ live.stages.waiting_upstream }}</div>
-                <div class="stat-sub">已连上·等生成</div>
-            </div>
-            <div class="dash-divider">
-                <h5>建连中</h5>
-                <div class="stat-value">{{ live.stages.connecting }}</div>
-                <div class="stat-sub">正在连厂商</div>
-            </div>
-            <div class="dash-divider">
-                <h5>回传中</h5>
-                <div class="stat-value">{{ live.stages.streaming }}</div>
-                <div class="stat-sub">透传回客户端</div>
-            </div>
-        </div>
-        <div class="text-muted text-sm" style="margin-top:8px">
-            阻塞提示：<span v-if="live.stages.waiting_upstream > live.stages.streaming && live.stages.waiting_upstream > 5" class="text-warn">大量请求卡在「等待厂商」，瓶颈在上游生成</span>
-            <span v-else-if="live.stages.streaming > 5" class="text-warn">较多请求卡在「回传」，可能客户端接收慢</span>
-            <span v-else class="text-good">链路通畅</span>
         </div>
     </div>
 
-    <div class="grid grid-2" style="align-items:start">
+        <div class="dash-divider" style="border-left:none;border-top:1px solid var(--border);"></div>
+        <div class="card stat-panel" style="margin-top:8px">
+            <div class="stat-panel-head">
+                <div class="font-semibold">统计总览</div>
+                <div class="text-muted text-sm">历史统计与分析</div>
+                <div style="flex:1"></div>
+                <span v-if="syncedAt || lastRefreshTs" class="text-muted text-sm" style="font-size:12px;">
+                    <span v-if="syncedAt">同步 {{ syncedAt }}</span>
+                    <span v-if="syncedAt && lastRefreshTs" style="margin:0 6px;">·</span>
+                    <span v-if="lastRefreshTs">会话 {{ lastRefreshTime }}</span>
+                </span>
+                <button class="page-btn" @click="filterModal = true">统计范围</button>
+            </div>
+
+            <!-- 顶部紧凑数字(累计指标样式) -->
+            <div class="stat-list" v-if="hasAnyData">
+                <div class="stat-item">
+                    <span class="stat-label">请求次数</span>
+                    <span class="stat-num">{{ totalCount }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Token 总量</span>
+                    <span class="stat-num">{{ totalTokens }}</span>
+                    <span class="stat-note">入 {{ totalInput }} / 出 {{ totalOutput }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">有效率</span>
+                    <span class="stat-num">{{ successRate }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">总 Session</span>
+                    <span class="stat-num">{{ stats ? stats.total_sessions : '—' }}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">达标 Session</span>
+                    <span class="stat-num">{{ stats ? stats.qualified_sessions : '—' }}</span>
+                    <span class="stat-note">&gt;= {{ threshold }} 轮</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">达标率</span>
+                    <span class="stat-num">{{ qualifiedRate }}</span>
+                </div>
+            </div>
+            <div v-else-if="loaded && !error && !loading" class="text-muted text-sm">暂无统计数据</div>
+
+            <!-- 统计范围弹窗:筛选 + 刷新/重置 -->
+            <div class="modal-overlay" v-if="filterModal" @click.self="filterModal = false">
+                <div class="modal" style="max-width:660px;">
+                    <div class="modal-head">
+                        <h6>统计范围</h6>
+                        <button class="modal-close" @click="filterModal = false">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div style="display:flex; flex-wrap:wrap; gap:12px;">
+                            <div style="min-width:150px; flex:1;">
+                                <label class="form-label text-sm">开始日期</label>
+                                <input type="date" class="input input-sm" v-model="startDate">
+                            </div>
+                            <div style="min-width:150px; flex:1;">
+                                <label class="form-label text-sm">结束日期</label>
+                                <input type="date" class="input input-sm" v-model="endDate">
+                            </div>
+                            <div style="min-width:150px; flex:1;">
+                                <label class="form-label text-sm">模型</label>
+                                <input type="text" class="input input-sm" v-model="histModel" placeholder="多个用 , 分隔">
+                            </div>
+                            <div style="min-width:110px; flex:1;">
+                                <label class="form-label text-sm">状态</label>
+                                <select class="input input-sm" v-model="statusFilter">
+                                    <option value="">全部</option>
+                                    <option value="success">成功</option>
+                                    <option value="error">失败</option>
+                                </select>
+                            </div>
+                            <div style="min-width:140px; flex:1;">
+                                <label class="form-label text-sm">渠道</label>
+                                <select class="input input-sm" v-model="channelKeyFilter">
+                                    <option value="">全部渠道</option>
+                                    <option v-for="ck in channelKeyList" :key="ck" :value="ck">{{ maskKey(ck) }}</option>
+                                </select>
+                            </div>
+                            <div style="min-width:140px; flex:1;">
+                                <label class="form-label text-sm">API Key</label>
+                                <select class="input input-sm" v-model="apiKeyFilter">
+                                    <option value="">全部 Key</option>
+                                    <option v-for="ak in apiKeyList" :key="ak" :value="ak">{{ maskKey(ak) }}</option>
+                                </select>
+                            </div>
+                            <div style="min-width:120px; flex:1;">
+                                <label class="form-label text-sm">达标阈值</label>
+                                <input type="number" class="input input-sm" v-model.number="threshold" min="1">
+                            </div>
+                        </div>
+                        <div class="flex gap-2" style="margin-top:14px;">
+                            <button class="btn btn-primary btn-sm flex-1" @click="filterModal = false; fetchData(false)" :disabled="loading">
+                                {{ loading ? '查询中…' : '刷新' }}
+                            </button>
+                            <button class="btn btn-outline btn-sm" @click="resetFilter(); filterModal = false" :disabled="loading">重置</button>
+                        </div>
+                        <div class="text-muted text-sm" style="margin-top:10px;font-size:12px;color:var(--muted-foreground);">
+                            数据按 10 分钟缓存复用,统计范围未变化时不重复扫描。
+                            <span v-if="syncedAt">数据同步时间：{{ syncedAt }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="dash-divider" style="border-left:none;border-top:1px solid var(--border);"></div>
+        <!-- Session 热力图(整段由 sessions.html 移植) -->
+        <div class="card" v-if="sources.length">
+            <div class="flex items-center gap-2 mb-3" style="flex-wrap:wrap;justify-content:space-between;">
+                <span class="font-semibold" style="font-size:.9rem;">Session 热力图</span>
+                <div class="heatmap-legend" v-if="activeSource">
+                    <span style="color:var(--muted-foreground);">0</span>
+                    <span class="swatch tier-0"></span>
+                    <span class="swatch tier-1"></span>
+                    <span class="swatch tier-2"></span>
+                    <span class="swatch tier-3"></span>
+                    <span class="swatch tier-4"></span>
+                    <span class="swatch tier-5"></span>
+                    <span style="color:var(--muted-foreground);">max {{ activeSource.max }}</span>
+                </div>
+            </div>
+
+            <!-- source tabs -->
+            <div class="source-tabs mb-3">
+                <span v-for="s in sources" :key="s.root_id"
+                      class="source-tab"
+                      :class="{ active: isActiveSource(s) }"
+                      @click="activeSourceId = s.root_id">
+                    {{ s.name }}
+                </span>
+            </div>
+
+            <!-- 热力图本体 -->
+            <div class="heatmap-wrap" v-if="activeSource && activeSource.dates.length">
+                <div class="heatmap-grid" :style="{ '--n-days': activeSource.dates.length }">
+                    <template v-for="bin in 12" :key="'b' + bin">
+                        <div v-for="d in activeSource.dates" :key="d + '-' + bin"
+                             class="heatmap-cell"
+                             :class="tierClass(cellVal(d, bin - 1), activeSource.max)"
+                             @click="selectCell(d, bin - 1)"
+                             :title="cellTitle(d, bin - 1)">
+                        </div>
+                    </template>
+                </div>
+                <div v-if="selectedCell" class="text-sm mt-2" style="color:var(--muted-foreground);">
+                    点击:{{ selectedCell.date }} {{ selectedCell.label }} · {{ selectedCell.val }} sessions
+                </div>
+            </div>
+            <div v-else class="text-muted text-sm p-3"
+                 style="background:var(--muted);border-radius:var(--radius);">
+                该 source 暂无可统计的叶子(未同步 / 活跃叶子未落库)
+            </div>
+        </div>
+        <div v-else-if="!loading && stats"
+             class="card text-muted text-sm p-3"
+             style="background:var(--muted);border-radius:var(--radius);">暂无 Session 热力图数据</div>
+
+        <div class="dash-divider" style="border-left:none;border-top:1px solid var(--border);"></div>
+    <div class="grid grid-2" style="align-items:start;margin-top:16px">
+        <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
         <div class="card">
             <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
                 <div>
@@ -162,9 +461,9 @@
                 <div class="chart-tab" :class="{ active: chartTab === 'rate' }" @click="switchChartTab('rate')">有效率趋势</div>
             </div>
 
-            <div class="chart-wrap" style="height: 260px"><canvas id="chartMain"></canvas></div>
+            <div class="chart-wrap" style="height: 216px"><canvas id="chartMain"></canvas></div>
         </div>
-
+            <div class="dash-divider" style="border-left:none;border-top:1px solid var(--border);margin:0;"></div>
         <div class="card">
             <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
                 <div>
@@ -180,13 +479,232 @@
                     <button class="btn btn-sm" @click="failOpenSearch">搜索</button>
                 </div>
             </div>
-            <div class="fails-list" style="max-height:320px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow-y:auto" ref="failRecentList">
+            <div class="fails-list" style="max-height:240px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow-y:auto" ref="failRecentList">
                 <div v-if="!failRecentItems.length" class="empty-box" style="border:none;border-radius:0">暂无失败日志</div>
                 <div v-for="item in failRecentItems" :key="item.filename" class="log-item" @click="failBrowse(item)">
                     <div class="font-semibold">{{ item.reason || 'unknown' }} <span style="font-weight:400;color:var(--muted-foreground);font-size:.82rem">· {{ item.model || '?' }}</span></div>
                     <div class="log-meta">{{ item.created_at }} · <span v-if="item.attempt_count > 1" class="badge badge-warning" style="font-size:.7rem;padding:1px 6px;">{{ item.attempt_count }} 次重试</span><span v-else>attempt {{ item.attempt || '-' }}</span></div>
                 </div>
             </div>
+        </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+        <!-- 使用量统计(渠道 Key / Key / 模型,同一卡片 + 上层 tab 切换) -->
+        <div class="card" v-if="hasChartData">
+            <div class="card-head">
+                <div class="chart-tabs" style="margin-bottom:0;flex:1;border-bottom:none;">
+                    <div class="chart-tab" :class="{ active: usageTab === 'channel' }" @click="usageTab = 'channel'">渠道 Key</div>
+                    <div class="chart-tab" :class="{ active: usageTab === 'key' }" @click="usageTab = 'key'">API Key</div>
+                    <div class="chart-tab" :class="{ active: usageTab === 'item' }" @click="usageTab = 'item'">模型</div>
+                </div>
+                <button class="page-btn" @click="openUsageModal">更多</button>
+            </div>
+
+            <!-- 二级指标 tab -->
+            <div class="metric-tabs mb-3">
+                <template v-if="usageTab === 'channel'">
+                    <span v-for="m in CHANNEL_METRICS" :key="m.key"
+                          class="metric-tab"
+                          :class="{ active: channelMetric === m.key }"
+                          @click="channelMetric = m.key">{{ m.label }}</span>
+                </template>
+                <template v-else-if="usageTab === 'key'">
+                    <span v-for="m in KEY_METRICS" :key="m.key"
+                          class="metric-tab"
+                          :class="{ active: keyMetric === m.key }"
+                          @click="keyMetric = m.key">{{ m.label }}</span>
+                </template>
+                <template v-else>
+                    <span v-for="m in ITEM_METRICS" :key="m.key"
+                          class="metric-tab"
+                          :class="{ active: itemMetric === m.key }"
+                          @click="itemMetric = m.key">{{ m.label }}</span>
+                </template>
+            </div>
+
+            <!-- 柱状图 -->
+            <div class="bar-chart" v-if="usageTab === 'channel'">
+                <div v-for="(c, i) in channelTop10" :key="i" class="bar-row">
+                    <span class="bar-label" :title="c.key">{{ maskKey(c.key) }}</span>
+                    <div class="bar-track">
+                        <div class="bar-fill" :style="{ width: barW(metricVal(c, channelMetric), channelMax) }"></div>
+                    </div>
+                    <span class="bar-val">{{ fmtNum(metricVal(c, channelMetric)) }}</span>
+                </div>
+            </div>
+            <div class="bar-chart" v-else-if="usageTab === 'key'">
+                <div v-for="(k, i) in keyTop10" :key="i" class="bar-row">
+                    <span class="bar-label" :title="k.key">{{ maskKey(k.key) }}</span>
+                    <div class="bar-track">
+                        <div class="bar-fill" :style="{ width: barW(metricVal(k, keyMetric), keyMax) }"></div>
+                    </div>
+                    <span class="bar-val">{{ fmtNum(metricVal(k, keyMetric)) }}</span>
+                </div>
+            </div>
+            <div class="bar-chart" v-else>
+                <div v-for="(it, i) in itemTop10" :key="i" class="bar-row">
+                    <span class="bar-label" :title="it.model">{{ it.model }}</span>
+                    <div class="bar-track">
+                        <div class="bar-fill" :style="{ width: barW(metricVal(it, itemMetric), itemMax) }"></div>
+                    </div>
+                    <span class="bar-val">{{ fmtNum(metricVal(it, itemMetric)) }}</span>
+                </div>
+            </div>
+
+            <!-- 更多弹窗:按当前 tab 显示对应表格 -->
+            <div class="modal-overlay" v-if="channelModal" @click.self="channelModal = false">
+                <div class="modal">
+                    <div class="modal-head">
+                        <h6>渠道 Key 使用量统计</h6>
+                        <button class="modal-close" @click="channelModal = false">×</button>
+                    </div>
+                    <div class="search-box">
+                        <input v-model="channelSearch" @input="channelPage = 0" class="form-control"
+                               placeholder="搜索渠道 Key…">
+                    </div>
+                    <div class="modal-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>渠道 Key</th>
+                                    <th class="text-end">请求次数</th>
+                                    <th class="text-end">会话数</th>
+                                    <th class="text-end">输入 Token</th>
+                                    <th class="text-end">输出 Token</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(c, i) in paginatedChannelAll" :key="i">
+                                    <td><code>{{ c.key }}</code></td>
+                                    <td class="text-end">{{ c.count }}</td>
+                                    <td class="text-end">{{ c.sessions }}</td>
+                                    <td class="text-end">{{ c.tok_in }}</td>
+                                    <td class="text-end">{{ c.tok_out }}</td>
+                                </tr>
+                                <tr v-if="!paginatedChannelAll.length">
+                                    <td colspan="5" class="text-center text-muted" style="padding:24px;">无匹配结果</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div v-if="channelPageCount > 1" class="pager">
+                            <span class="page-info">共 {{ filteredChannelStats.length }} 条 · 第 {{ channelPage + 1 }}/{{ channelPageCount }} 页</span>
+                            <button class="page-btn" :disabled="channelPage === 0" @click="channelPage = 0">«</button>
+                            <button class="page-btn" :disabled="channelPage === 0" @click="channelPage--">‹</button>
+                            <span v-for="pg in channelRange" :key="pg"
+                                  class="page-btn"
+                                  :class="{ active: pg === channelPage }"
+                                  @click="channelPage = pg">{{ pg + 1 }}</span>
+                            <button class="page-btn" :disabled="channelPage >= channelPageCount - 1" @click="channelPage++">›</button>
+                            <button class="page-btn" :disabled="channelPage >= channelPageCount - 1" @click="channelPage = channelPageCount - 1">»</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-overlay" v-if="keyModal" @click.self="keyModal = false">
+                <div class="modal">
+                    <div class="modal-head">
+                        <h6>API Key 使用量统计</h6>
+                        <button class="modal-close" @click="keyModal = false">×</button>
+                    </div>
+                    <div class="search-box">
+                        <input v-model="keySearch" @input="keyPage = 0" class="form-control"
+                               placeholder="搜索 API Key…">
+                    </div>
+                    <div class="modal-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>API Key</th>
+                                    <th class="text-end">请求次数</th>
+                                    <th class="text-end">会话数</th>
+                                    <th class="text-end">输入 Token</th>
+                                    <th class="text-end">输出 Token</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(k, i) in paginatedKeyAll" :key="i">
+                                    <td><code>{{ k.key }}</code></td>
+                                    <td class="text-end">{{ k.count }}</td>
+                                    <td class="text-end">{{ k.sessions }}</td>
+                                    <td class="text-end">{{ k.tok_in }}</td>
+                                    <td class="text-end">{{ k.tok_out }}</td>
+                                </tr>
+                                <tr v-if="!paginatedKeyAll.length">
+                                    <td colspan="5" class="text-center text-muted" style="padding:24px;">无匹配结果</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div v-if="keyPageCount > 1" class="pager">
+                            <span class="page-info">共 {{ filteredKeyStats.length }} 条 · 第 {{ keyPage + 1 }}/{{ keyPageCount }} 页</span>
+                            <button class="page-btn" :disabled="keyPage === 0" @click="keyPage = 0">«</button>
+                            <button class="page-btn" :disabled="keyPage === 0" @click="keyPage--">‹</button>
+                            <span v-for="pg in keyRange" :key="pg"
+                                  class="page-btn"
+                                  :class="{ active: pg === keyPage }"
+                                  @click="keyPage = pg">{{ pg + 1 }}</span>
+                            <button class="page-btn" :disabled="keyPage >= keyPageCount - 1" @click="keyPage++">›</button>
+                            <button class="page-btn" :disabled="keyPage >= keyPageCount - 1" @click="keyPage = keyPageCount - 1">»</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-overlay" v-if="itemModal" @click.self="itemModal = false">
+                <div class="modal">
+                    <div class="modal-head">
+                        <h6>模型使用量</h6>
+                        <button class="modal-close" @click="itemModal = false">×</button>
+                    </div>
+                    <div class="search-box">
+                        <input v-model="itemSearch" @input="itemPage = 0" class="form-control"
+                               placeholder="搜索模型…">
+                    </div>
+                    <div class="modal-body">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th @click="sortBy('model')" class="sortable">模型<span v-if="sortField==='model'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                                    <th @click="sortBy('date_start')" class="sortable">开始日期<span v-if="sortField==='date_start'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                                    <th @click="sortBy('date_end')" class="sortable">结束日期<span v-if="sortField==='date_end'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                                    <th @click="sortBy('status')" class="sortable">状态<span v-if="sortField==='status'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                                    <th @click="sortBy('count')" class="sortable text-end">请求次数<span v-if="sortField==='count'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                                    <th @click="sortBy('input_token_num')" class="sortable text-end">输入Token<span v-if="sortField==='input_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                                    <th @click="sortBy('output_token_num')" class="sortable text-end">输出Token<span v-if="sortField==='output_token_num'" class="arrow">{{ sortAsc ? '▲' : '▼' }}</span></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-if="!paginatedItemAll.length">
+                                    <td colspan="7" class="text-center text-muted" style="padding:24px;">无匹配结果</td>
+                                </tr>
+                                <tr v-for="(item, i) in paginatedItemAll" :key="i">
+                                    <td>{{ item.model }}</td>
+                                    <td>{{ item.date_start }}</td>
+                                    <td>{{ item.date_end }}</td>
+                                    <td><span class="badge" :class="item.status === 'success' ? 'badge-success' : 'badge-danger'">{{ item.status === 'success' ? '成功' : '失败' }}</span></td>
+                                    <td class="text-end">{{ item.count }}</td>
+                                    <td class="text-end">{{ item.input_token_num }}</td>
+                                    <td class="text-end">{{ item.output_token_num }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div v-if="itemPageCount > 1" class="pager">
+                            <span class="page-info">共 {{ filteredItems.length }} 条 · 第 {{ itemPage + 1 }}/{{ itemPageCount }} 页</span>
+                            <button class="page-btn" :disabled="itemPage === 0" @click="itemPage = 0">«</button>
+                            <button class="page-btn" :disabled="itemPage === 0" @click="itemPage--">‹</button>
+                            <span v-for="pg in itemRange" :key="pg"
+                                  class="page-btn"
+                                  :class="{ active: pg === itemPage }"
+                                  @click="itemPage = pg">{{ pg + 1 }}</span>
+                            <button class="page-btn" :disabled="itemPage >= itemPageCount - 1" @click="itemPage++">›</button>
+                            <button class="page-btn" :disabled="itemPage >= itemPageCount - 1" @click="itemPage = itemPageCount - 1">»</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div v-else-if="!loading && loaded" class="card text-muted text-sm p-3"
+             style="background:var(--muted);border-radius:var(--radius);">暂无使用量统计</div>
         </div>
     </div>
 
@@ -224,6 +742,9 @@
         </div>
     </div>
 </div>
+
+    <div v-if="loading" class="text-center text-muted mt-3 text-sm">加载中…</div>
+    <div v-if="error" class="text-danger text-sm mt-3 p-3" style="background:color-mix(in srgb, var(--destructive) 10%, var(--card));border-radius:var(--radius);">{{ error }}</div>
 </div>
 {% endraw %}
 {% endblock %}
@@ -231,288 +752,741 @@
 {% block scripts %}
 <script>
 const app = new Vue({
-    el: '#app',
-    data: {
-        latestRpm: 0, latestTpmIn: 0, latestTpmOut: 0, latestErrors: 0,
-        autoRefresh: true, refreshInterval: 15, selectedHours: 2, _refreshTimer: null, _liveTimer: null,
-        _chartMain: null, chartTab: 'rpm',
-        _realtimeRaw: [], _rateRaw: [],
-        selectedModel: '__all__', modelList: [],
-        indexStats: { first_count: 0, total_count: 0, valid_count: 0, success_rate: 0 },
-        live: { in_flight: 0, stages: { connecting: 0, waiting_upstream: 0, streaming: 0 }, uptime_sec: 0 },
-        failEnv: '', failEnvList: [], failItems: [], failSelected: null, failContent: '', failOffset: 0, failTotal: 0, failLoading: false,
-        failSearchVisible: false, failKeyword: '', failModel: '', failModelList: [],
-        failSearchApplied: { keyword: '', model: '' },
-        failRecentItems: [],
-    },
-    computed: {
-        totalRetries() { return Math.max(0, this.indexStats.total_count - this.indexStats.first_count); },
-        successRatePct() { return (this.indexStats.success_rate * 100).toFixed(1); },
-        rateLevel() {
-            const r = this.indexStats.success_rate;
-            return r >= 0.9 ? 'good' : r >= 0.7 ? 'warn' : 'danger';
+        el: '#app',
+        data: {
+    
+            latestRpm: 0, latestTpmIn: 0, latestTpmOut: 0, latestErrors: 0,
+            autoRefresh: true, refreshInterval: 15, selectedHours: 2, _refreshTimer: null, _liveTimer: null,
+            _chartMain: null, chartTab: 'rpm',
+            _realtimeRaw: [], _rateRaw: [],
+            selectedModel: '__all__', modelList: [],
+            indexStats: { first_count: 0, total_count: 0, valid_count: 0, success_rate: 0 },
+            live: { in_flight: 0, stages: { connecting: 0, waiting_upstream: 0, streaming: 0 }, uptime_sec: 0 },
+            failEnv: '', failEnvList: [], failItems: [], failSelected: null, failContent: '', failOffset: 0, failTotal: 0, failLoading: false,
+            failSearchVisible: false, failKeyword: '', failModel: '', failModelList: [],
+            failSearchApplied: { keyword: '', model: '' },
+            failRecentItems: [],
+                    // query(来自 /api/statistic*)
+                    histModel: '', startDate: '', endDate: '', statusFilter: '',
+                    channelKeyFilter: '', channelKeyList: [],
+                    apiKeyFilter: '', apiKeyList: [],
+                    items: [], summaryList: [], keyStats: [], channelStats: [],
+                    sortField: 'date_start', sortAsc: true,
+                    keyPage: 0, keyPerPage: 20,
+                    itemPage: 0, itemPerPage: 20,
+                    channelPage: 0, channelPerPage: 20,
+                    syncedAt: '',
+                    // ---- 柱状图 + 指标 tab + 更多弹窗 ----
+                    keyMetric: 'count',
+                    itemMetric: 'count',
+                    channelMetric: 'count',
+                    keyModal: false, itemModal: false, channelModal: false,
+                    keySearch: '', itemSearch: '', channelSearch: '',
+                    KEY_METRICS: [
+                        { key: 'count', label: '请求次数' },
+                        { key: 'sessions', label: '会话数' },
+                        { key: 'tok_in', label: '输入 Token' },
+                        { key: 'tok_out', label: '输出 Token' },
+                    ],
+                    CHANNEL_METRICS: [
+                        { key: 'count', label: '请求次数' },
+                        { key: 'sessions', label: '会话数' },
+                        { key: 'tok_in', label: '输入 Token' },
+                        { key: 'tok_out', label: '输出 Token' },
+                    ],
+                    // 模型 items 无 sessions 字段,故不提供该指标
+                    ITEM_METRICS: [
+                        { key: 'count', label: '请求次数' },
+                        { key: 'input_token_num', label: '输入 Token' },
+                        { key: 'output_token_num', label: '输出 Token' },
+                    ],
+                    // ---- 自动预刷新:后台静默刷新,提前于 10 分钟缓存过期,保持连续 ----
+                    autoTimer: null,
+                    AUTO_INTERVAL_MS: 570000,  // 9.5 分钟,先于 10min(600s)TTL 触发
+                    // sessions(来自 /sessions/stats + /sessions/heatmap)
+                    threshold: 5,
+                    stats: null, heatmap: null,
+                    lastRefreshTs: 0,
+                    activeSourceId: '', selectedCell: null,
+                    // 统计范围弹窗
+                    filterModal: false,
+                    // 使用量统计合并卡片:上层 tab 与二级指标
+                    usageTab: 'channel',
+                    // 统计范围缓存:签名 -> 结果,未变化时直接复用,不重复请求
+                    statCache: {},
+                    statCacheKey: '',
+                    statCacheLoading: false,
+                    // 全局
+                    loading: false, loaded: false, error: '',
+                
         },
-        inflightLevel() {
-            const n = this.live.in_flight;
-            return n >= 150 ? 'danger' : n >= 80 ? 'warn' : 'good';
+        computed: {
+    
+            totalRetries() { return Math.max(0, this.indexStats.total_count - this.indexStats.first_count); },
+            successRatePct() { return (this.indexStats.success_rate * 100).toFixed(1); },
+            rateLevel() {
+                const r = this.indexStats.success_rate;
+                return r >= 0.9 ? 'good' : r >= 0.7 ? 'warn' : 'danger';
+            },
+            inflightLevel() {
+                const n = this.live.in_flight;
+                return n >= 150 ? 'danger' : n >= 80 ? 'warn' : 'good';
+            },
+            liveUptime() {
+                let s = this.live.uptime_sec || 0;
+                const h = Math.floor(s / 3600); s %= 3600;
+                const m = Math.floor(s / 60); s %= 60;
+                return (h ? h + 'h' : '') + (m ? m + 'm' : '') + s + 's';
+            },
+                    totalCount() { return this.summaryList.reduce((a, c) => a + (c.count || 0), 0); },
+                    totalInput() { return this.summaryList.reduce((a, c) => a + (c.total_input || 0), 0); },
+                    totalOutput() { return this.summaryList.reduce((a, c) => a + (c.total_output || 0), 0); },
+                    totalTokens() { return this.totalInput + this.totalOutput; },
+                    successRate() {
+                        if (!this.totalCount) return '—';
+                        const ok = this.summaryList.reduce((a, c) => a + ((c.status === 'success') ? (c.count || 0) : 0), 0);
+                        return (ok / this.totalCount * 100).toFixed(1) + '%';
+                    },
+                    qualifiedRate: function() {
+                        if (!this.stats || !this.stats.total_sessions) return 'N/A';
+                        return (this.stats.qualified_sessions / this.stats.total_sessions * 100).toFixed(1) + '%';
+                    },
+                    lastRefreshTime: function() {
+                        if (!this.lastRefreshTs) return '';
+                        var d = new Date(this.lastRefreshTs * 1000);
+                        var y = d.getFullYear();
+                        var m = ('0' + (d.getMonth() + 1)).slice(-2);
+                        var dd = ('0' + d.getDate()).slice(-2);
+                        var hh = ('0' + d.getHours()).slice(-2);
+                        var mm = ('0' + d.getMinutes()).slice(-2);
+                        return y + '/' + m + '/' + dd + ' ' + hh + ':' + mm;
+                    },
+                    sources: function() {
+                        return (this.heatmap && this.heatmap.sources) ? this.heatmap.sources : [];
+                    },
+                    activeSource: function() {
+                        var id = this.activeSourceId;
+                        for (var i = 0; i < this.sources.length; i++) {
+                            if (this.sources[i].root_id === id) return this.sources[i];
+                        }
+                        return this.sources.length ? this.sources[0] : null;
+                    },
+                    hasAnyData() {
+                        return this.summaryList.length > 0 || this.stats !== null;
+                    },
+                    hasChartData() {
+                        return this.channelStats.length > 0 || this.keyStats.length > 0 || this.items.length > 0;
+                    },
+                    // ---- Key 柱状图 Top10 + 更多弹窗 ----
+                    keyTop10: function() {
+                        return this.keyStats.slice(0, 10);
+                    },
+                    keyMax: function() {
+                        var max = 0;
+                        for (var i = 0; i < this.keyTop10.length; i++) {
+                            var v = this.metricVal(this.keyTop10[i], this.keyMetric);
+                            if (v > max) max = v;
+                        }
+                        return max;
+                    },
+                    filteredKeyStats: function() {
+                        var q = this.keySearch.trim().toLowerCase();
+                        if (!q) return this.keyStats;
+                        return this.keyStats.filter(function(k) {
+                            return (k.key || '').toLowerCase().indexOf(q) !== -1;
+                        });
+                    },
+                    keyPageCount: function() {
+                        return Math.max(1, Math.ceil(this.filteredKeyStats.length / this.keyPerPage));
+                    },
+                    paginatedKeyAll: function() {
+                        var start = this.keyPage * this.keyPerPage;
+                        return this.filteredKeyStats.slice(start, start + this.keyPerPage);
+                    },
+                    keyRange: function() {
+                        return this.pageRange(this.keyPage, this.keyPageCount);
+                    },
+                    // ---- 渠道 Key 柱状图 Top10 + 更多弹窗 ----
+                    channelTop10: function() {
+                        return this.channelStats.slice(0, 10);
+                    },
+                    channelMax: function() {
+                        var max = 0;
+                        for (var i = 0; i < this.channelTop10.length; i++) {
+                            var v = this.metricVal(this.channelTop10[i], this.channelMetric);
+                            if (v > max) max = v;
+                        }
+                        return max;
+                    },
+                    filteredChannelStats: function() {
+                        var q = this.channelSearch.trim().toLowerCase();
+                        if (!q) return this.channelStats;
+                        return this.channelStats.filter(function(c) {
+                            return (c.key || '').toLowerCase().indexOf(q) !== -1;
+                        });
+                    },
+                    channelPageCount: function() {
+                        return Math.max(1, Math.ceil(this.filteredChannelStats.length / this.channelPerPage));
+                    },
+                    paginatedChannelAll: function() {
+                        var start = this.channelPage * this.channelPerPage;
+                        return this.filteredChannelStats.slice(start, start + this.channelPerPage);
+                    },
+                    channelRange: function() {
+                        return this.pageRange(this.channelPage, this.channelPageCount);
+                    },
+                    // ---- 模型使用量柱状图 Top10 + 更多弹窗 ----
+                    itemTop10: function() {
+                        return this.items.slice(0, 10);
+                    },
+                    itemMax: function() {
+                        var max = 0;
+                        for (var i = 0; i < this.itemTop10.length; i++) {
+                            var v = this.metricVal(this.itemTop10[i], this.itemMetric);
+                            if (v > max) max = v;
+                        }
+                        return max;
+                    },
+                    filteredItems: function() {
+                        var q = this.itemSearch.trim().toLowerCase();
+                        if (!q) return this.items;
+                        return this.items.filter(function(it) {
+                            return (it.model || '').toLowerCase().indexOf(q) !== -1;
+                        });
+                    },
+                    itemPageCount: function() {
+                        return Math.max(1, Math.ceil(this.filteredItems.length / this.itemPerPage));
+                    },
+                    paginatedItemAll: function() {
+                        var start = this.itemPage * this.itemPerPage;
+                        return this.filteredItems.slice(start, start + this.itemPerPage);
+                    },
+                    itemRange: function() {
+                        return this.pageRange(this.itemPage, this.itemPageCount);
+                    },
+                
         },
-        liveUptime() {
-            let s = this.live.uptime_sec || 0;
-            const h = Math.floor(s / 3600); s %= 3600;
-            const m = Math.floor(s / 60); s %= 60;
-            return (h ? h + 'h' : '') + (m ? m + 'm' : '') + s + 's';
-        },
-    },
-    methods: {
-        initCharts() {
-            const base = {
-                responsive: true, maintainAspectRatio: false, animation: false,
-                plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } } },
-                scales: {
-                    x: { ticks: { maxTicksLimit: 10, font: { size: 10 }, maxRotation: 0 } },
-                    y: { beginAtZero: true, ticks: { font: { size: 10 } } }
-                }
-            };
-            this._chartMain = new Chart(document.getElementById('chartMain'), {
-                type: 'line',
-                data: { labels: [], datasets: [] },
-                options: base,
-            });
-        },
-        switchChartTab(tab) {
-            this.chartTab = tab;
-            this.applyModelFilter();
-        },
-        setModel(m) {
-            this.selectedModel = m;
-            this.applyModelFilter();
-        },
-        applyModelFilter() {
-            const rt = this._realtimeRaw;
-            const rd = this._rateRaw;
-            const m = this.selectedModel;
-            const all = m === '__all__';
-            const chart = this._chartMain;
-            if (!chart) return;
-
-            let labels, datasets;
-            if (this.chartTab === 'tpm') {
-                labels = rt.map(d => d.ts.slice(5).replace('T', ' '));
-                datasets = [
-                    { label: 'TPM输入', data: rt.map(d => all ? d.tpm_in : ((d.models && d.models[m] && d.models[m].tpm_in) || 0)), borderColor: '#059669', backgroundColor: 'rgba(5,150,105,.08)', fill: true, tension: .3, pointRadius: 2 },
-                    { label: 'TPM输出', data: rt.map(d => all ? d.tpm_out : ((d.models && d.models[m] && d.models[m].tpm_out) || 0)), borderColor: '#0891b2', backgroundColor: 'rgba(8,145,178,.08)', fill: true, tension: .3, pointRadius: 2 },
-                ];
-            } else if (this.chartTab === 'rate') {
-                labels = rd.map(d => d.ts.slice(5).replace('T', ' '));
-                const rates = rd.map(d => {
-                    if (all) return +(d.rate * 100).toFixed(1);
-                    const md = d.models && d.models[m];
-                    if (!md || !md.first) return null;
-                    return +((md.valid / md.first) * 100).toFixed(1);
-                });
-                datasets = [
-                    { label: '有效率%', data: rates, borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,.08)', fill: true, tension: .3, pointRadius: 2 },
-                    { label: '警戒 70%', data: rd.map(() => 70), borderColor: '#f59e0b', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
-                    { label: '正常 90%', data: rd.map(() => 90), borderColor: '#16a34a', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
-                ];
-            } else {
-                labels = rt.map(d => d.ts.slice(5).replace('T', ' '));
-                datasets = [
-                    { label: 'RPM', data: rt.map(d => all ? d.rpm : ((d.models && d.models[m] && d.models[m].rpm) || 0)), borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)', fill: true, tension: .3, pointRadius: 2 },
-                    { label: '错误/分', data: rt.map(d => d.errors || 0), borderColor: '#dc2626', backgroundColor: 'rgba(220,38,38,.08)', fill: true, tension: .3, pointRadius: 2 },
-                ];
-            }
-
-            chart.data.labels = labels;
-            chart.data.datasets = datasets;
-            chart.options.scales.y.beginAtZero = true;
-            if (this.chartTab === 'rate') {
-                chart.options.scales.y.min = 0;
-                chart.options.scales.y.max = 100;
-                chart.options.scales.y.ticks.callback = v => v + '%';
-            } else {
-                chart.options.scales.y.min = undefined;
-                chart.options.scales.y.max = undefined;
-                chart.options.scales.y.ticks.callback = undefined;
-            }
-            chart.update('none');
-
-            if (rt.length) {
-                const last = rt[rt.length - 1];
-                this.latestRpm = all ? last.rpm : ((last.models && last.models[m] && last.models[m].rpm) || 0);
-                this.latestTpmIn = all ? last.tpm_in : ((last.models && last.models[m] && last.models[m].tpm_in) || 0);
-                this.latestTpmOut = all ? last.tpm_out : ((last.models && last.models[m] && last.models[m].tpm_out) || 0);
-                this.latestErrors = last.errors || 0;
-            }
-        },
-        fetchRealtime() {
-            const hours = this.selectedHours;
-            fetch('/metrics/realtime?hours=' + hours)
-                .then(r => r.json())
-                .then(data => {
-                    this._realtimeRaw = data;
-                    const models = new Set();
-                    data.forEach(d => Object.keys(d.models || {}).forEach(k => models.add(k)));
-                    this._rateRaw.forEach(d => Object.keys(d.models || {}).forEach(k => models.add(k)));
-                    this.modelList = [...models].sort();
-                    this.applyModelFilter();
-                }).catch(() => {});
-            fetch('/metrics/index-stats')
-                .then(r => r.json())
-                .then(d => { this.indexStats = d; }).catch(() => {});
-            fetch('/metrics/rate-history?hours=' + hours)
-                .then(r => r.json())
-                .then(data => {
-                    this._rateRaw = data;
-                    const models = new Set(this.modelList);
-                    data.forEach(d => Object.keys(d.models || {}).forEach(k => models.add(k)));
-                    this.modelList = [...models].sort();
-                    this.applyModelFilter();
-                }).catch(() => {});
-        },
-        fetchLive() {
-            fetch('/metrics/live')
-                .then(r => r.json())
-                .then(d => {
-                    // 容错：字段缺失时用默认结构，避免模板报错
-                    this.live = {
-                        in_flight: d.in_flight || 0,
-                        stages: Object.assign({ connecting: 0, waiting_upstream: 0, streaming: 0 }, d.stages || {}),
-                        uptime_sec: d.uptime_sec || 0,
-                    };
-                }).catch(() => {});
-        },
-        startAutoRefresh() {
-            this.fetchRealtime();
-            this._refreshTimer = setInterval(() => {
-                if (this.autoRefresh) { this.fetchRealtime(); this.failLoadRecent(); }
-            }, this.refreshInterval * 1000);
-            // 在途请求单独用更快的节奏刷新（3 秒），体现「实时」
-            this.fetchLive();
-            this._liveTimer = setInterval(() => {
-                if (this.autoRefresh) this.fetchLive();
-            }, 3000);
-        },
-        toggleAutoRefresh() {
-            this.autoRefresh = !this.autoRefresh;
-            if (this.autoRefresh) this.fetchRealtime();
-        },
-        // ---- 调用失败记录 ----
-        failOpenSearch() {
-            this.failSearchVisible = true;
-            if (!this.failEnvList.length) this.failLoadEnvs();
-            else if (!this.failItems.length) this.failLoadList();
-        },
-        failCloseSearch() {
-            this.failSearchVisible = false;
-            this.failKeyword = ''; this.failModel = '';
-            this.failSearchApplied.keyword = ''; this.failSearchApplied.model = '';
-            this.failSelected = null; this.failContent = '';
-            this.failItems = []; this.failTotal = 0; this.failOffset = 0;
-        },
-        failLoadEnvs() {
-            var self = this;
-            fetch('/logs/debug/envs')
-                .then(r => r.json())
-                .then(data => {
-                    self.failEnvList = data || [];
-                    if (self.failEnvList.length && !self.failEnvList.find(function(e) { return e.name === self.failEnv; })) {
-                        var cur = self.failEnvList.find(function(e) { return e.current; });
-                        self.failEnv = cur ? cur.name : self.failEnvList[0].name;
+        methods: {
+    
+            initCharts() {
+                const base = {
+                    responsive: true, maintainAspectRatio: false, animation: false,
+                    plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } } },
+                    scales: {
+                        x: { ticks: { maxTicksLimit: 10, font: { size: 10 }, maxRotation: 0 } },
+                        y: { beginAtZero: true, ticks: { font: { size: 10 } } }
                     }
-                    self.failLoadList();
-                    self.failLoadRecent();
-                })
-                .catch(function() { self.failLoadList(); self.failLoadRecent(); });
+                };
+                this._chartMain = new Chart(document.getElementById('chartMain'), {
+                    type: 'line',
+                    data: { labels: [], datasets: [] },
+                    options: base,
+                });
+            },
+            switchChartTab(tab) {
+                this.chartTab = tab;
+                this.applyModelFilter();
+            },
+            setModel(m) {
+                this.selectedModel = m;
+                this.applyModelFilter();
+            },
+            applyModelFilter() {
+                const rt = this._realtimeRaw;
+                const rd = this._rateRaw;
+                const m = this.selectedModel;
+                const all = m === '__all__';
+                const chart = this._chartMain;
+                if (!chart) return;
+    
+                let labels, datasets;
+                if (this.chartTab === 'tpm') {
+                    labels = rt.map(d => d.ts.slice(5).replace('T', ' '));
+                    datasets = [
+                        { label: 'TPM输入', data: rt.map(d => all ? d.tpm_in : ((d.models && d.models[m] && d.models[m].tpm_in) || 0)), borderColor: '#059669', backgroundColor: 'rgba(5,150,105,.08)', fill: true, tension: .3, pointRadius: 2 },
+                        { label: 'TPM输出', data: rt.map(d => all ? d.tpm_out : ((d.models && d.models[m] && d.models[m].tpm_out) || 0)), borderColor: '#0891b2', backgroundColor: 'rgba(8,145,178,.08)', fill: true, tension: .3, pointRadius: 2 },
+                    ];
+                } else if (this.chartTab === 'rate') {
+                    labels = rd.map(d => d.ts.slice(5).replace('T', ' '));
+                    const rates = rd.map(d => {
+                        if (all) return +(d.rate * 100).toFixed(1);
+                        const md = d.models && d.models[m];
+                        if (!md || !md.first) return null;
+                        return +((md.valid / md.first) * 100).toFixed(1);
+                    });
+                    datasets = [
+                        { label: '有效率%', data: rates, borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,.08)', fill: true, tension: .3, pointRadius: 2 },
+                        { label: '警戒 70%', data: rd.map(() => 70), borderColor: '#f59e0b', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
+                        { label: '正常 90%', data: rd.map(() => 90), borderColor: '#16a34a', borderDash: [4, 4], borderWidth: 1.5, pointRadius: 0, fill: false },
+                    ];
+                } else {
+                    labels = rt.map(d => d.ts.slice(5).replace('T', ' '));
+                    datasets = [
+                        { label: 'RPM', data: rt.map(d => all ? d.rpm : ((d.models && d.models[m] && d.models[m].rpm) || 0)), borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)', fill: true, tension: .3, pointRadius: 2 },
+                        { label: '错误/分', data: rt.map(d => d.errors || 0), borderColor: '#dc2626', backgroundColor: 'rgba(220,38,38,.08)', fill: true, tension: .3, pointRadius: 2 },
+                    ];
+                }
+    
+                chart.data.labels = labels;
+                chart.data.datasets = datasets;
+                chart.options.scales.y.beginAtZero = true;
+                if (this.chartTab === 'rate') {
+                    chart.options.scales.y.min = 0;
+                    chart.options.scales.y.max = 100;
+                    chart.options.scales.y.ticks.callback = v => v + '%';
+                } else {
+                    chart.options.scales.y.min = undefined;
+                    chart.options.scales.y.max = undefined;
+                    chart.options.scales.y.ticks.callback = undefined;
+                }
+                chart.update('none');
+    
+                if (rt.length) {
+                    const last = rt[rt.length - 1];
+                    this.latestRpm = all ? last.rpm : ((last.models && last.models[m] && last.models[m].rpm) || 0);
+                    this.latestTpmIn = all ? last.tpm_in : ((last.models && last.models[m] && last.models[m].tpm_in) || 0);
+                    this.latestTpmOut = all ? last.tpm_out : ((last.models && last.models[m] && last.models[m].tpm_out) || 0);
+                    this.latestErrors = last.errors || 0;
+                }
+            },
+            fetchRealtime() {
+                const hours = this.selectedHours;
+                fetch('/metrics/realtime?hours=' + hours)
+                    .then(r => r.json())
+                    .then(data => {
+                        this._realtimeRaw = data;
+                        const models = new Set();
+                        data.forEach(d => Object.keys(d.models || {}).forEach(k => models.add(k)));
+                        this._rateRaw.forEach(d => Object.keys(d.models || {}).forEach(k => models.add(k)));
+                        this.modelList = [...models].sort();
+                        this.applyModelFilter();
+                    }).catch(() => {});
+                fetch('/metrics/index-stats')
+                    .then(r => r.json())
+                    .then(d => { this.indexStats = d; }).catch(() => {});
+                fetch('/metrics/rate-history?hours=' + hours)
+                    .then(r => r.json())
+                    .then(data => {
+                        this._rateRaw = data;
+                        const models = new Set(this.modelList);
+                        data.forEach(d => Object.keys(d.models || {}).forEach(k => models.add(k)));
+                        this.modelList = [...models].sort();
+                        this.applyModelFilter();
+                    }).catch(() => {});
+            },
+            fetchLive() {
+                fetch('/metrics/live')
+                    .then(r => r.json())
+                    .then(d => {
+                        // 容错：字段缺失时用默认结构，避免模板报错
+                        this.live = {
+                            in_flight: d.in_flight || 0,
+                            stages: Object.assign({ connecting: 0, waiting_upstream: 0, streaming: 0 }, d.stages || {}),
+                            uptime_sec: d.uptime_sec || 0,
+                        };
+                    }).catch(() => {});
+            },
+            startAutoRefresh() {
+                this.fetchRealtime();
+                this._refreshTimer = setInterval(() => {
+                    if (this.autoRefresh) { this.fetchRealtime(); this.failLoadRecent(); }
+                }, this.refreshInterval * 1000);
+                // 在途请求单独用更快的节奏刷新（3 秒），体现「实时」
+                this.fetchLive();
+                this._liveTimer = setInterval(() => {
+                    if (this.autoRefresh) this.fetchLive();
+                }, 3000);
+            },
+            toggleAutoRefresh() {
+                this.autoRefresh = !this.autoRefresh;
+                if (this.autoRefresh) this.fetchRealtime();
+            },
+            // ---- 调用失败记录 ----
+            failOpenSearch() {
+                this.failSearchVisible = true;
+                if (!this.failEnvList.length) this.failLoadEnvs();
+                else if (!this.failItems.length) this.failLoadList();
+            },
+            failCloseSearch() {
+                this.failSearchVisible = false;
+                this.failKeyword = ''; this.failModel = '';
+                this.failSearchApplied.keyword = ''; this.failSearchApplied.model = '';
+                this.failSelected = null; this.failContent = '';
+                this.failItems = []; this.failTotal = 0; this.failOffset = 0;
+            },
+            failLoadEnvs() {
+                var self = this;
+                fetch('/logs/debug/envs')
+                    .then(r => r.json())
+                    .then(data => {
+                        self.failEnvList = data || [];
+                        if (self.failEnvList.length && !self.failEnvList.find(function(e) { return e.name === self.failEnv; })) {
+                            var cur = self.failEnvList.find(function(e) { return e.current; });
+                            self.failEnv = cur ? cur.name : self.failEnvList[0].name;
+                        }
+                        self.failLoadList();
+                        self.failLoadRecent();
+                    })
+                    .catch(function() { self.failLoadList(); self.failLoadRecent(); });
+            },
+            failSwitchEnv() { this.failLoadList(); this.failLoadRecent(); },
+            failLoadList() {
+                this.failOffset = 0; this.failItems = []; this.failTotal = 0;
+                this.failSelected = null; this.failContent = '';
+                this.failFetchMore();
+            },
+            failFetchMore() {
+                if (this.failLoading) return;
+                if (this.failOffset > 0 && this.failItems.length >= this.failTotal) return;
+                this.failLoading = true;
+                var p = new URLSearchParams({ limit: 50, offset: this.failOffset });
+                if (this.failEnv) p.append('env', this.failEnv);
+                if (this.failSearchApplied.keyword) p.append('keyword', this.failSearchApplied.keyword);
+                if (this.failSearchApplied.model) p.append('model', this.failSearchApplied.model);
+                var self = this;
+                fetch('/logs/debug/list?' + p.toString())
+                    .then(r => r.json())
+                    .then(data => {
+                        var newItems = data.items || [];
+                        if (data.models && data.models.length) self.failModelList = data.models;
+                        self.failItems = self.failItems.concat(newItems);
+                        self.failTotal = data.total || 0;
+                        self.failOffset += newItems.length;
+                        self.failLoading = false;
+                        if (!self.failSelected && self.failItems.length > 0) self.failSelect(self.failItems[0]);
+                    })
+                    .catch(function() { self.failLoading = false; });
+            },
+            failSearch() {
+                this.failSearchApplied.keyword = this.failKeyword;
+                this.failSearchApplied.model = this.failModel;
+                this.failLoadList();
+            },
+            failResetSearch() {
+                this.failKeyword = ''; this.failModel = '';
+                this.failSearchApplied.keyword = ''; this.failSearchApplied.model = '';
+                this.failLoadList();
+            },
+            failOnScroll() {
+                var el = this.$refs.failList;
+                if (!el) return;
+                if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) this.failFetchMore();
+            },
+            failSelect(item) {
+                this.failSelected = item;
+                var self = this;
+                fetch('/logs/debug/file?filename=' + encodeURIComponent(item.filename))
+                    .then(r => r.json())
+                    .then(data => { self.failContent = data.content || ''; })
+                    .catch(function() { self.failContent = '加载失败'; });
+            },
+            failLoadRecent() {
+                var self = this;
+                var p = new URLSearchParams({ limit: 10, offset: 0 });
+                if (this.failEnv) p.append('env', this.failEnv);
+                fetch('/logs/debug/list?' + p.toString())
+                    .then(r => r.json())
+                    .then(data => { self.failRecentItems = (data.items || []).slice(0, 10); })
+                    .catch(function() { self.failRecentItems = []; });
+            },
+            failBrowse(item) {
+                // 主界面点击条目：弹窗左侧用最近的 10 条作为列表，右侧浏览点击的那条
+                if (this.failRecentItems.length) {
+                    this.failItems = this.failRecentItems.slice();
+                    this.failTotal = this.failItems.length;
+                    this.failOffset = this.failItems.length;
+                }
+                this.failSelected = item;
+                this.failContent = '';
+                this.failSearchVisible = true;
+                var self = this;
+                fetch('/logs/debug/file?filename=' + encodeURIComponent(item.filename))
+                    .then(r => r.json())
+                    .then(data => { if (self.failSelected && self.failSelected.filename === item.filename) self.failContent = data.content || ''; })
+                    .catch(function() { if (self.failSelected && self.failSelected.filename === item.filename) self.failContent = '加载失败'; });
+            },
+                    // ---- session 热力图(由 sessions.html 移植) ----
+                    isActiveSource: function(s) {
+                        return s.root_id === this.activeSourceId;
+                    },
+                    hourLabel: function(bin) {
+                        var h = bin * 2;
+                        return ('0' + h).slice(-2) + '-' + ('0' + (h + 2)).slice(-2);
+                    },
+                    cellVal: function(date, bin) {
+                        if (!this.activeSource) return 0;
+                        var d = this.activeSource.cells[date];
+                        return d ? (d[bin] || 0) : 0;
+                    },
+                    tierClass: function(val, max) {
+                        if (!max || val <= 0) return 'tier-0';
+                        var r = val / max;
+                        if (r > 0.8) return 'tier-5';
+                        if (r > 0.6) return 'tier-4';
+                        if (r > 0.4) return 'tier-3';
+                        if (r > 0.2) return 'tier-2';
+                        return 'tier-1';
+                    },
+                    cellTitle: function(date, bin) {
+                        var val = this.cellVal(date, bin);
+                        return date + ' ' + this.hourLabel(bin) + ' · ' + val + ' sessions';
+                    },
+                    selectCell: function(date, bin) {
+                        this.selectedCell = {
+                            date: date,
+                            bin: bin,
+                            label: this.hourLabel(bin),
+                            val: this.cellVal(date, bin),
+                        };
+                    },
+                    // ---- 明细表排序(由 query.html 移植) ----
+                    applySort() {
+                        const f = this.sortField;
+                        const asc = this.sortAsc;
+                        this.items = [...this.items].sort((a, b) => {
+                            const va = a[f];
+                            const vb = b[f];
+                            if (['count', 'input_token_num', 'output_token_num'].includes(f)) return asc ? va - vb : vb - va;
+                            return asc ? (va < vb ? -1 : va > vb ? 1 : 0) : (vb < va ? -1 : vb > va ? 1 : 0);
+                        });
+                    },
+                    sortBy(f) {
+                        if (this.sortField === f) this.sortAsc = !this.sortAsc;
+                        else {
+                            this.sortField = f;
+                            this.sortAsc = true;
+                        }
+                        this.itemPage = 0;
+                        this.applySort();
+                    },
+                    // ---- 分页:围绕当前页给出最多 7 个页码窗口 ----
+                    pageRange: function(cur, total) {
+                        var win = 7;
+                        if (total <= win) {
+                            var all = [];
+                            for (var i = 0; i < total; i++) all.push(i);
+                            return all;
+                        }
+                        var half = Math.floor(win / 2);
+                        var start = Math.max(0, Math.min(cur - half, total - win));
+                        var out = [];
+                        for (var j = 0; j < win; j++) out.push(start + j);
+                        return out;
+                    },
+                    maskKey(k) {
+                        if (!k || k.length <= 8) return k || '(未知)';
+                        return k.slice(0, 4) + '...' + k.slice(-4);
+                    },
+                    // ---- 柱状图辅助 ----
+                    metricVal(row, metric) {
+                        return (row && row[metric] != null) ? row[metric] : 0;
+                    },
+                    barW(val, max) {
+                        if (!max || !val) return 0;
+                        return Math.max(2, (val / max * 100)).toFixed(1) + '%';
+                    },
+                    fmtNum(n) {
+                        if (n == null) return '0';
+                        return Number(n).toLocaleString('en-US');
+                    },
+                    // ---- 更多弹窗 ----
+                    openKeyModal() { this.keyModal = true; this.keyPage = 0; },
+                    openChannelModal() { this.channelModal = true; this.channelPage = 0; },
+                    openItemModal() { this.itemModal = true; this.itemPage = 0; },
+                    // 合并卡片:按当前上层 tab 打开对应的更多弹窗
+                    openUsageModal() {
+                        if (this.usageTab === 'channel') this.openChannelModal();
+                        else if (this.usageTab === 'key') this.openKeyModal();
+                        else this.openItemModal();
+                    },
+                    fetchChannelKeys() {
+                        fetch('/api/statistic/channel-keys').then(r => r.json()).then(d => {
+                            this.channelKeyList = d.channel_keys || [];
+                        }).catch(() => {});
+                    },
+                    fetchApiKeys() {
+                        fetch('/api/statistic/api-keys').then(r => r.json()).then(d => {
+                            this.apiKeyList = d.api_keys || [];
+                        }).catch(() => {});
+                    },
+                    // ---- 统计范围签名:任一筛选变化即视为不同范围 ----
+                    statSig() {
+                        return [this.histModel, this.startDate, this.endDate,
+                                this.statusFilter, this.channelKeyFilter, this.apiKeyFilter,
+                                this.threshold].join('|');
+                    },
+                    // 命中未过期缓存时直接复用,不发请求、不闪加载态
+                    applyCached(entry) {
+                        var p = entry.payload;
+                        if (p.token) {
+                            this.items = p.token.items;
+                            this.summaryList = p.token.summary;
+                            this.keyStats = p.token.keyStats;
+                            this.channelStats = p.token.channelStats;
+                            this.syncedAt = p.token.syncedAt;
+                            this.keyPage = 0; this.itemPage = 0; this.channelPage = 0;
+                            this.applySort();
+                        }
+                        if (p.sess) {
+                            this.stats = p.sess.stats;
+                            this.heatmap = p.sess.heatmap;
+                            if (this.stats && this.stats.last_refresh_ts) this.lastRefreshTs = this.stats.last_refresh_ts;
+                            if (this.heatmap && !this.activeSourceId && this.heatmap.sources && this.heatmap.sources.length) {
+                                this.activeSourceId = this.heatmap.sources[0].root_id;
+                            }
+                        }
+                    },
+                    // ---- 主拉取:token 家族 + session 家族并行 ----
+                    fetchData(refresh, silent) {
+                        // 统计范围未变化且缓存未过期(默认 9.5 分钟)时直接复用,不重复统计
+                        var sig = 's:' + this.statSig();
+                        this.statCacheKey = sig;
+                        if (!refresh && !silent && this.statCache[sig] &&
+                            (Date.now() - this.statCache[sig].ts) < this.AUTO_INTERVAL_MS) {
+                            this.applyCached(this.statCache[sig]);
+                            this.loading = false;
+                            this.loaded = true;
+                            return;
+                        }
+                        // silent=true 用于后台静默预刷新,不弹"加载中…",避免页面闪烁
+                        if (!silent) {
+                            this.loading = true;
+                            this.error = '';
+                            this.loaded = false;
+                        }
+
+                        // token 端点参数
+                        const p = new URLSearchParams();
+                        if (this.histModel) p.append('model', this.histModel);
+                        if (this.startDate) p.append('date_start', this.startDate);
+                        if (this.endDate) p.append('date_end', this.endDate);
+                        if (this.statusFilter) p.append('status', this.statusFilter);
+                        if (this.channelKeyFilter) p.append('channel_key', this.channelKeyFilter);
+                        if (this.apiKeyFilter) p.append('api_key', this.apiKeyFilter);
+                        if (refresh) p.append('refresh', '1');
+
+                        const pKeys = new URLSearchParams();
+                        if (this.startDate) pKeys.append('date_start', this.startDate);
+                        if (this.endDate) pKeys.append('date_end', this.endDate);
+                        if (refresh) pKeys.append('refresh', '1');
+
+                        // session 端点参数
+                        const sp = new URLSearchParams();
+                        sp.append('threshold', this.threshold);
+                        if (refresh) sp.append('refresh', 'true');
+
+                        var self = this;
+                        var tokenCache = null, sessCache = null;
+
+                        // token 家族
+                        var tokenP = Promise.all([
+                            fetch('/api/statistic?' + p.toString()).then(r => r.json()),
+                            fetch('/api/statistic/keys?' + pKeys.toString()).then(r => r.json()),
+                            fetch('/api/statistic/channels?' + pKeys.toString()).then(r => r.json()),
+                        ]).then(function([d, kd, cd]) {
+                            self.items = d.data || [];
+                            self.summaryList = d.summary || [];
+                            self.keyStats = kd.keys || [];
+                            self.channelStats = cd.channels || [];
+                            self.syncedAt = d.synced_at || kd.synced_at || '';
+                            if (!silent) {
+                                self.keyPage = 0;
+                                self.itemPage = 0;
+                                self.channelPage = 0;
+                            }
+                            self.applySort();
+                            tokenCache = {
+                                items: self.items, summary: self.summaryList,
+                                keyStats: self.keyStats, channelStats: self.channelStats,
+                                syncedAt: self.syncedAt
+                            };
+                        }).catch(function(e) {
+                            // 静默预刷新失败不打断现有展示,避免缓存过期瞬间的瞬时错误闪烁
+                            if (!silent) self.error = '统计请求失败: ' + e;
+                        });
+
+                        // session 家族
+                        var sessP = Promise.all([
+                            fetch('/sessions/stats?' + sp.toString()).then(r => r.json()),
+                            fetch('/sessions/heatmap').then(r => r.json()),
+                        ]).then(function([st, hm]) {
+                            if (st.error) {
+                                self.error = st.error;
+                                self.stats = null;
+                            } else {
+                                self.stats = st;
+                                if (st.last_refresh_ts) self.lastRefreshTs = st.last_refresh_ts;
+                            }
+                            if (hm.error) {
+                                self.error = hm.error;
+                            } else {
+                                self.heatmap = hm;
+                                if (!self.activeSourceId && hm.sources && hm.sources.length) {
+                                    self.activeSourceId = hm.sources[0].root_id;
+                                }
+                            }
+                            sessCache = { stats: self.stats, heatmap: self.heatmap };
+                        }).catch(function(e) {
+                            // 静默预刷新失败不打断现有展示
+                            if (!silent) self.error = '会话统计请求失败: ' + e;
+                        });
+
+                        Promise.all([tokenP, sessP])
+                            .then(function() {
+                                // 任一成功即可写入缓存,供下次同范围直接复用
+                                if (tokenCache || sessCache) {
+                                    self.statCache[sig] = { ts: Date.now(), payload: { token: tokenCache, sess: sessCache } };
+                                }
+                            })
+                            .finally(function() {
+                                self.loading = false;
+                                self.loaded = true;
+                            });
+                    },
+                    resetFilter() {
+                        const now = new Date();
+                        const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+                        this.startDate = oneMonthAgo.toISOString().slice(0, 10);
+                        this.endDate = now.toISOString().slice(0, 10);
+                        this.histModel = '';
+                        this.statusFilter = '';
+                        this.channelKeyFilter = '';
+                        this.apiKeyFilter = '';
+                        this.fetchData(false);
+                    },
+                
         },
-        failSwitchEnv() { this.failLoadList(); this.failLoadRecent(); },
-        failLoadList() {
-            this.failOffset = 0; this.failItems = []; this.failTotal = 0;
-            this.failSelected = null; this.failContent = '';
-            this.failFetchMore();
+        mounted() {
+            this.$nextTick(() => {
+                        this.initCharts();
+                        this.startAutoRefresh();
+                        this.failLoadEnvs();
+                    });
+    
+            // 默认时间范围:过去一个月到今天
+                    const now = new Date();
+                    const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+                    this.startDate = oneMonthAgo.toISOString().slice(0, 10);
+                    this.endDate = now.toISOString().slice(0, 10);
+                    this.fetchChannelKeys();
+                    this.fetchApiKeys();
+                    this.fetchData(false);
+                    // 自动预刷新:每 ~9.5 分钟静默刷新一次,提前于 10min(600s)后端缓存过期,
+                    // 这样下一次打开/刷新时命中缓存,统计保持连续,不出现加载等待。
+                    var self = this;
+                    this.autoTimer = setInterval(function() {
+                        if (self.loading) return;          // 已有请求在跑,跳过本轮
+                        self.fetchData(false, true);        // 静默预取
+                    }, this.AUTO_INTERVAL_MS);
         },
-        failFetchMore() {
-            if (this.failLoading) return;
-            if (this.failOffset > 0 && this.failItems.length >= this.failTotal) return;
-            this.failLoading = true;
-            var p = new URLSearchParams({ limit: 50, offset: this.failOffset });
-            if (this.failEnv) p.append('env', this.failEnv);
-            if (this.failSearchApplied.keyword) p.append('keyword', this.failSearchApplied.keyword);
-            if (this.failSearchApplied.model) p.append('model', this.failSearchApplied.model);
-            var self = this;
-            fetch('/logs/debug/list?' + p.toString())
-                .then(r => r.json())
-                .then(data => {
-                    var newItems = data.items || [];
-                    if (data.models && data.models.length) self.failModelList = data.models;
-                    self.failItems = self.failItems.concat(newItems);
-                    self.failTotal = data.total || 0;
-                    self.failOffset += newItems.length;
-                    self.failLoading = false;
-                    if (!self.failSelected && self.failItems.length > 0) self.failSelect(self.failItems[0]);
-                })
-                .catch(function() { self.failLoading = false; });
-        },
-        failSearch() {
-            this.failSearchApplied.keyword = this.failKeyword;
-            this.failSearchApplied.model = this.failModel;
-            this.failLoadList();
-        },
-        failResetSearch() {
-            this.failKeyword = ''; this.failModel = '';
-            this.failSearchApplied.keyword = ''; this.failSearchApplied.model = '';
-            this.failLoadList();
-        },
-        failOnScroll() {
-            var el = this.$refs.failList;
-            if (!el) return;
-            if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) this.failFetchMore();
-        },
-        failSelect(item) {
-            this.failSelected = item;
-            var self = this;
-            fetch('/logs/debug/file?filename=' + encodeURIComponent(item.filename))
-                .then(r => r.json())
-                .then(data => { self.failContent = data.content || ''; })
-                .catch(function() { self.failContent = '加载失败'; });
-        },
-        failLoadRecent() {
-            var self = this;
-            var p = new URLSearchParams({ limit: 10, offset: 0 });
-            if (this.failEnv) p.append('env', this.failEnv);
-            fetch('/logs/debug/list?' + p.toString())
-                .then(r => r.json())
-                .then(data => { self.failRecentItems = (data.items || []).slice(0, 10); })
-                .catch(function() { self.failRecentItems = []; });
-        },
-        failBrowse(item) {
-            // 主界面点击条目：弹窗左侧用最近的 10 条作为列表，右侧浏览点击的那条
-            if (this.failRecentItems.length) {
-                this.failItems = this.failRecentItems.slice();
-                this.failTotal = this.failItems.length;
-                this.failOffset = this.failItems.length;
-            }
-            this.failSelected = item;
-            this.failContent = '';
-            this.failSearchVisible = true;
-            var self = this;
-            fetch('/logs/debug/file?filename=' + encodeURIComponent(item.filename))
-                .then(r => r.json())
-                .then(data => { if (self.failSelected && self.failSelected.filename === item.filename) self.failContent = data.content || ''; })
-                .catch(function() { if (self.failSelected && self.failSelected.filename === item.filename) self.failContent = '加载失败'; });
-        },
-    },
-    mounted() {
-        this.$nextTick(() => {
-            this.initCharts();
-            this.startAutoRefresh();
-            this.failLoadEnvs();
-        });
-    },
-    beforeDestroy() {
-        clearInterval(this._refreshTimer);
-        clearInterval(this._liveTimer);
-    }
-});
+        beforeDestroy() {
+            clearInterval(this._refreshTimer);
+                    clearInterval(this._liveTimer);
+            if (this.autoTimer) {
+                        clearInterval(this.autoTimer);
+                        this.autoTimer = null;
+                    }
+        }
+    });
 </script>
 {% endblock %}
