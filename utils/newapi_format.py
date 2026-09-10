@@ -65,6 +65,18 @@ def _assistant_content_from_resp(resp: str):
     # OpenAI 口径（流式 choices.delta / 非流式 choices.message）单独解析
     if _is_openai_resp(resp):
         return parse_openai_response_content(resp)
+    # Anthropic 非流式整块（new-api 透传时直接写入 resp 字段的单个 JSON 对象）
+    # 格式：{"id":"msg_...","type":"message","role":"assistant","content":[...]}
+    stripped = resp.lstrip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(resp)
+            if isinstance(obj, dict) and obj.get("role") == "assistant":
+                content = obj.get("content")
+                if isinstance(content, list) and content:
+                    return content
+        except json.JSONDecodeError:
+            pass
     chunks = split_sse_text(resp)
     if not chunks:
         return None
