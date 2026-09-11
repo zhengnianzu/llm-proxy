@@ -1567,7 +1567,25 @@ def register_log_routes(app: FastAPI) -> None:
 
     @app.get("/logs/file/download")
     def logs_file_download(filename: str, log_dir: str = ""):
-        if not filename.endswith("-req.json") or "/" in filename or "\\" in filename or ".." in filename:
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return JSONResponse({"error": "invalid filename"}, status_code=400)
+        # new-api 合并文件：文件名以 .json 结尾但非三元组后缀（同 /logs/file、/logs/file/raw 的处理）。
+        # 只在确认目标是 new-api 叶子时才放行，避免放宽普通目录下任意 .json 的下载范围。
+        if (not any(filename.endswith(s) for s in _RAW_SUFFIXES)
+                and filename.endswith(".json")):
+            if log_dir == "__ALL__":
+                found = _export_view_find_file(_all_roots(), _env_dir, filename)
+                if not found:
+                    return JSONResponse({"error": "file not found"}, status_code=404)
+                return FileResponse(found, filename=filename, media_type="application/json")
+            target_dir = resolve_log_dir(log_dir)
+            if _root_format(target_dir) == "newapi":
+                path = os.path.join(target_dir, filename)
+                if not os.path.isfile(path):
+                    return JSONResponse({"error": "file not found"}, status_code=404)
+                return FileResponse(path, filename=filename, media_type="application/json")
+            return JSONResponse({"error": "invalid filename"}, status_code=400)
+        if not filename.endswith("-req.json"):
             return JSONResponse({"error": "invalid filename"}, status_code=400)
         if log_dir == "__ALL__":
             found = _find_file_in_all_dirs(_env_dir, filename)
@@ -1662,53 +1680,5 @@ def register_log_routes(app: FastAPI) -> None:
     @app.get("/logs/openai/aggregate")
     def logs_openai_aggregate(min_messages: int = 1, offset: int = 0, limit: int = 50, api_key: str = "", refresh: bool = False, model: str = "", search: str = "", q1search: str = ""):
         return JSONResponse(_aggregate_payload("anthropic", unified_log_dir(), min_messages, offset, limit, api_key, refresh, model, search, q1search))
-
-    # --- shared 公开路由（key+code 验证） ---
-
-    def _check_shared(key: str, code: str) -> Optional[JSONResponse]:
-        import hmac as _hmac
-        from utils.key_store import find_key
-        expected = os.getenv("SHARED_CODE", "shared")
-        if not _hmac.compare_digest(code, expected):
-            return JSONResponse({"detail": "Invalid code"}, status_code=403)
-        if not key or not find_key(key):
-            return JSONResponse({"detail": "Key not found"}, status_code=404)
-        return None
-
-    @app.get("/api/shared/logs/dirs")
-    def shared_logs_dirs(key: str = "", code: str = ""):
-        err = _check_shared(key, code)
-        if err:
-            return err
-        return logs_dirs()
-
-    @app.get("/api/shared/logs/aggregate")
-    def shared_logs_aggregate(key: str = "", code: str = "", min_messages: int = 1, offset: int = 0, limit: int = 50, refresh: bool = False, model: str = "", log_dir: str = "", search: str = "", q1search: str = ""):
-        err = _check_shared(key, code)
-        if err:
-            return err
-        target_dir = resolve_log_dir(log_dir) if log_dir and log_dir != "__ALL__" else resolve_log_dir("")
-        return JSONResponse(_aggregate_payload("anthropic", target_dir, min_messages, offset, limit, key, refresh, model, search, q1search))
-
-    @app.get("/api/shared/logs/file")
-    def shared_logs_file(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
-        err = _check_shared(key, code)
-        if err:
-            return err
-        return logs_file(filename, log_dir=log_dir or "__ALL__")
-
-    @app.get("/api/shared/logs/file/download")
-    def shared_logs_file_download(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
-        err = _check_shared(key, code)
-        if err:
-            return err
-        return logs_file_download(filename, log_dir=log_dir or "__ALL__")
-
-    @app.get("/api/shared/logs/file/raw")
-    def shared_logs_file_raw(key: str = "", code: str = "", filename: str = "", log_dir: str = ""):
-        err = _check_shared(key, code)
-        if err:
-            return err
-        return logs_file_raw(filename, log_dir=log_dir or "__ALL__")
 
     # start_session_cache_warmer(_env_dir, _current_log_dir)

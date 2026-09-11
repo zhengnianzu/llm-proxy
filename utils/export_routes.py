@@ -146,8 +146,7 @@ def _is_cancelled(record_id: int) -> bool:
 def verify_access_key(access_key: str) -> bool:
     """公开导出浏览/提交的鉴权 key（URL 参数 access-key）校验。
 
-    值取自 .env 的 ACCESS_KEY，**无默认值**：未配置时恒拒，不回退到 "shared"。
-    （对比 /history/shared 与 /api/shared/export 用的 SHARED_CODE，那个仍默认 "shared"。）
+    值取自 .env 的 ACCESS_KEY，**无默认值**：未配置时恒拒。
 
     用 hmac.compare_digest 做常数时间比较，防时序侧信道。
     """
@@ -1623,85 +1622,6 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
         return JSONResponse({"detail": "报告未生成"}, status_code=404)
 
-    # --- shared 公开导出路由（key+code 验证） ---
-
-    def _check_shared_export(key: str, code: str):
-        import hmac as _hmac
-        from utils.key_store import find_key
-        expected = os.getenv("SHARED_CODE", "shared")
-        if not _hmac.compare_digest(code, expected):
-            return JSONResponse({"detail": "Invalid code"}, status_code=403)
-        if not key or not find_key(key):
-            return JSONResponse({"detail": "Key not found"}, status_code=404)
-        return None
-
-    @app.post("/api/shared/export")
-    async def shared_export(request: Request):
-        body = await request.json()
-        key_value = body.get("key", "")
-        code = body.get("code", "")
-
-        err = _check_shared_export(key_value, code)
-        if err:
-            return err
-
-        roots = [r for r in _all_roots() if Path(r).is_dir()]
-        stats = build_stats_multi(roots, active_env_dir=str(env_dir)) if roots else {"rows": []}
-        mtime_dirs = []
-        for row in stats.get("rows", []):
-            if row["api_key"] == key_value:
-                mtime_dirs = sorted(row.get("mtime_cells", {}).keys(), reverse=True)
-                break
-        if not mtime_dirs:
-            return JSONResponse({"detail": "No session data found for this key"}, status_code=404)
-
-        api_key = key_value
-        slot = _key_slot(api_key)
-        obs_prefix = body.get("obs_prefix", "").strip().rstrip("/") or load_obs_base()
-        mode = "eval"
-        now_tag = datetime.now().strftime("%y%m%d%H%M%S")
-
-        record_id = create_record(
-            api_key=api_key, key_slot=slot,
-            mtime_dirs=json.dumps(mtime_dirs),
-            mode=mode,
-            key_name=_key_name_snapshot(api_key),
-        )
-
-        obs_dst = f"{obs_prefix}/session_analysis/{env_key_name}/{slot}/ex-{now_tag}/" if obs_prefix else ""
-
-        persist_params(record_id, mode=mode, obs_prefix=obs_prefix, force=False, now_tag=now_tag,
-                       env_dir=str(env_dir), env_key_name=env_key_name)
-        _enqueue_task(record_id, lambda rid=record_id, ed=env_dir, ek=env_key_name, op=obs_prefix, nt=now_tag, m=mode: _run_task(rid, ed, ek, op, nt, m))
-
-        return JSONResponse({
-            "record_id": record_id,
-            "session_path": obs_dst,
-            "status": "queued",
-        })
-
-    @app.get("/api/shared/export/status/{record_id}")
-    def shared_export_status(record_id: int, key: str = "", code: str = ""):
-        err = _check_shared_export(key, code)
-        if err:
-            return err
-
-        from utils.export_store import get_record_resolved
-        rec = get_record_resolved(record_id)  # 自动解析外部文件
-        if not rec:
-            return JSONResponse({"detail": "Not found"}, status_code=404)
-
-        if rec.get("api_key") and rec["api_key"] != key:
-            return JSONResponse({"detail": "Access denied"}, status_code=403)
-
-        return JSONResponse({
-            "record_id": rec["id"],
-            "status": rec["status"],
-            "session_path": rec.get("obs_dst", ""),
-            "total_sessions": rec.get("total_sessions", 0),
-            "error_message": rec.get("error_message", ""),
-        })
-
     # --- 公开导出提交/状态路由（access-key 验证） ---
 
     def _check_public_export(key: str, access_key: str):
@@ -1812,7 +1732,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if not rec:
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
-        # URL 若带 key，解析后校验与记录归属一致（镜像 /api/shared/export/status）。
+        # URL 若带 key，解析后校验与记录归属一致。
         # 统一走 resolve_export_key（支持后四位后缀），与提交/浏览的 key 语义一致。
         if key:
             roots = [r for r in _all_roots() if Path(r).is_dir()]

@@ -503,7 +503,6 @@
         <input type="hidden" id="daySelect" value="" />
         <input type="hidden" id="hourSelect" value="" />
         {% endif %}
-            {% if not shared_mode %}
             <span class="min-msg-label">API Key</span>
             <div class="searchable-select" id="filterKeyWrap" data-hidden="filterKey" data-all="全部">
                 <div class="ss-display" onclick="toggleSSDropdown('filterKeyWrap')"><span id="filterKeyLabel">全部</span></div>
@@ -514,10 +513,7 @@
                     </div>
                 </div>
             </div>
-            <input type="hidden" id="filterKey" value="" />
-            {% else %}
             <input type="hidden" id="filterKey" value="{{ shared_api_key|default('') }}" />
-            {% endif %}
             <span class="min-msg-label">模型</span>
             <select class="folder-select" id="filterModel" onchange="reloadWithModel()">
                 <option value="">全部</option>
@@ -590,19 +586,16 @@ if (typeof marked !== 'undefined') {
     marked.setOptions({ breaks: true, gfm: true });
 }
 // ----------------------------------------------------------------
-// Shared mode (public key+code access)
+// 公开导出浏览（access-key 鉴权）
 // ----------------------------------------------------------------
-const _sharedMode = {{ 'true' if shared_mode is defined and shared_mode else 'false' }};
-const _sharedKey = '{{ shared_api_key|default("") }}';
-const _sharedCode = '{{ shared_code|default("") }}';
+const _accessKey = '{{ shared_code|default("") }}';
 const _exportViewMode = {{ 'true' if export_view_mode is defined and export_view_mode else 'false' }};
 const _exportKey = '{{ export_key|default("") }}';
 const _exportModel = '{{ export_model|default("") }}';
-function _apiPrefix() { return _exportViewMode ? '/export/view/api' : (_sharedMode ? '/api/shared/logs' : '/logs'); }
+function _apiPrefix() { return _exportViewMode ? '/export/view/api' : '/logs'; }
 function _sharedParams() {
-    if (_exportViewMode) return '&key=' + encodeURIComponent(_exportKey) + '&access-key=' + encodeURIComponent(_sharedCode);
-    if (!_sharedMode) return '';
-    return '&key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode);
+    if (_exportViewMode) return '&key=' + encodeURIComponent(_exportKey) + '&access-key=' + encodeURIComponent(_accessKey);
+    return '';
 }
 // ----------------------------------------------------------------
 // State
@@ -625,7 +618,6 @@ let _logDirsLoaded = false;
 let _allDirs = [];   // /logs/dirs 原始条目，供来源/时间目录两级下拉复用
 let _keyPrefRestored = false;
 let _backfillTimer = null;  // new-api 大叶子首次回填时的轮询定时器（切目录/离开时清除）
-const _adminSharedCode = '{{ shared_code|default("") }}';
 
 // 取消进行中的回填轮询（切换目录、过滤条件变化或离开时调用，避免轮询叠加）
 function _cancelBackfillPoll() {
@@ -652,39 +644,6 @@ function _maybeShowBackfilling(data) {
     _cancelBackfillPoll();
     _backfillTimer = setTimeout(() => { _backfillTimer = null; loadFileList(); }, 4000);
     return true;
-}
-
-function _buildShareUrl(filename, logDir, apiKey) {
-    const base = location.origin + '/history/shared';
-    const key = apiKey || '';
-    const code = _adminSharedCode;
-    if (!key || !code) return '';
-    let url = `${base}?key=${encodeURIComponent(key)}&code=${encodeURIComponent(code)}`;
-    if (filename) url += `#file=${encodeURIComponent(filename)}`;
-    if (logDir) url += (filename ? '&' : '#') + `log_dir=${encodeURIComponent(logDir)}`;
-    return url;
-}
-
-function _shareLink(filename, logDir, apiKey) {
-    const url = _buildShareUrl(filename, logDir, apiKey);
-    if (!url) { alert('缺少 API Key 或 shared code'); return; }
-    navigator.clipboard.writeText(url).then(
-        () => { _showToast('分享链接已复制'); },
-        () => { prompt('复制此链接:', url); }
-    );
-}
-
-function _showToast(msg) {
-    let t = document.getElementById('_shareToast');
-    if (!t) {
-        t = document.createElement('div');
-        t.id = '_shareToast';
-        t.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--success,#22c55e);color:#fff;padding:8px 20px;border-radius:6px;font-size:13px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none;';
-        document.body.appendChild(t);
-    }
-    t.textContent = msg;
-    t.style.opacity = '1';
-    setTimeout(() => { t.style.opacity = '0'; }, 2000);
 }
 
 function currentLogDir() {
@@ -872,7 +831,7 @@ function _syncLogDirFromSelects() {
 // 注意：key 是完整 API Key（服务端按 api_key = ? 精确匹配，掩码值无法恢复筛选）。
 // 该页会加载 jsdelivr CDN 资源，带 key 的 URL 会随 Referer 外发；仅适用于内部监控环境。
 function _writeUrlState() {
-    if (_exportViewMode || _sharedMode) return;
+    if (_exportViewMode) return;
     const params = new URLSearchParams(window.location.search);
     const root = _currentRootValue() || '';
     const hourEl = document.getElementById('hourSelect');
@@ -890,7 +849,7 @@ function _writeUrlState() {
 }
 
 function _restoreUrlState() {
-    if (_exportViewMode || _sharedMode) return null;
+    if (_exportViewMode) return null;
     const params = new URLSearchParams(window.location.search);
     return {
         source: params.get('source') || '',
@@ -902,7 +861,7 @@ function _restoreUrlState() {
 
 // 应用 URL 里的 key/model 过滤（须在 resetAndLoad 清空过滤之后调用）
 function _applyUrlFilters(state) {
-    if (!state || _exportViewMode || _sharedMode) return;
+    if (!state || _exportViewMode) return;
     if (state.key) {
         const hidden = document.getElementById('filterKey');
         if (hidden) hidden.value = state.key;
@@ -976,7 +935,7 @@ function _reloadForTimeChange() {
 async function loadLogDirs() {
     if (_logDirsLoaded) return;
     try {
-        const res = await fetch(_apiPrefix() + '/dirs?' + (_exportViewMode ? 'key=' + encodeURIComponent(_exportKey) + '&access-key=' + encodeURIComponent(_sharedCode) : _sharedMode ? 'key=' + encodeURIComponent(_sharedKey) + '&code=' + encodeURIComponent(_sharedCode) : ''));
+        const res = await fetch(_apiPrefix() + '/dirs?' + (_exportViewMode ? 'key=' + encodeURIComponent(_exportKey) + '&access-key=' + encodeURIComponent(_accessKey) : ''));
         const data = await res.json();
         _allDirs = data.dirs || [];
         // 去重来源，保持首次出现顺序（当前目录所在来源已被后端排在最前）
@@ -1040,7 +999,7 @@ function maskKey(key) {
 
 function updateKeyDropdown() {
     const wrap = document.getElementById('filterKeyWrap');
-    if (!wrap) return;  // hidden in shared mode
+    if (!wrap) return;  // 公开导出浏览下不渲染 key 选择器
     const hidden = document.getElementById('filterKey');
     const current = hidden.value;
     const optionsContainer = wrap.querySelector('.ss-options');
@@ -1138,7 +1097,7 @@ function resetAndLoad(skipLoad) {
     _searchQuery = '';
     _resetDeepSearchState();
     document.getElementById('q1Search').value = '';
-    if (!_sharedMode) {
+    if (!_exportViewMode) {
         document.getElementById('filterKey').value = '';
         var keyLabel = document.getElementById('filterKeyLabel');
         if (keyLabel) keyLabel.textContent = '全部';
@@ -1183,13 +1142,13 @@ async function loadFileList(refresh = false) {
     if (offset === 0) _cancelBackfillPoll();  // 新一轮加载：先停掉旧的回填轮询
     const min = parseInt(document.getElementById('minMessages').value) || 1;
     const folder = currentFolder();
-    const filterKey = _sharedMode ? _sharedKey : document.getElementById('filterKey').value;
+    const filterKey = document.getElementById('filterKey').value;
     const filterModel = document.getElementById('filterModel').value;
     const resolvedKey = filterKey === '__default__' ? '' : filterKey;
     let params = `?min_messages=${min}&offset=${offset}&limit=${PAGE_SIZE}`;
     const logDir = currentLogDir();
     if (logDir) params += `&log_dir=${encodeURIComponent(logDir)}`;
-    if (!_sharedMode && filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
+    if (filterKey) params += `&api_key=${encodeURIComponent(resolvedKey)}`;
     if (filterModel) params += `&model=${encodeURIComponent(filterModel)}`;
     if (refresh) params += '&refresh=true';
     if (_deepSearchQuery) params += `&search=${encodeURIComponent(_deepSearchQuery)}`;
@@ -1885,7 +1844,7 @@ function renderJson(data, filename) {
     header.className = 'metadata';
     header.innerHTML = `
         <div class="metadata-title">请求文件</div>
-        <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}${!_sharedMode && data._req_file && data._api_key ? ` <a href="#" onclick="_shareLink('${esc(data._req_file)}','${esc(data._log_dir||'')}','${esc(data._api_key)}');return false" style="margin-left:6px;font-size:11px">分享</a>` : ''}${_fileToggleLinks(data._req_file, data._log_dir, 'req')}</span></div>
+        <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}${_fileToggleLinks(data._req_file, data._log_dir, 'req')}</span></div>
     `;
     chatPanel.appendChild(header);
     const display = {...data};
@@ -1916,7 +1875,7 @@ function renderMessages(data, filename) {
             ${data.temperature !== undefined ? `<div class="metadata-item"><strong>Temperature</strong><span>${data.temperature}</span></div>` : ''}
             ${data.max_tokens ? `<div class="metadata-item"><strong>Max Tokens</strong><span>${data.max_tokens}</span></div>` : ''}
             <div class="metadata-item"><strong>消息数</strong><span>${messages.length} 条</span></div>
-            <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}${!_sharedMode && data._req_file && data._api_key ? ` <a href="#" onclick="_shareLink('${esc(data._req_file)}','${esc(data._log_dir||'')}','${esc(data._api_key)}');return false" style="margin-left:6px;font-size:11px">分享</a>` : ''}${_fileToggleLinks(data._req_file, data._log_dir, 'req')}</span></div>
+            <div class="metadata-item"><strong>文件</strong><span>${data._req_file || filename}${data._req_file ? ` <a href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(data._req_file)}${data._log_dir ? '&log_dir=' + encodeURIComponent(data._log_dir) : ''}${_sharedParams()}" download style="margin-left:6px;font-size:11px">下载</a>` : ''}${_fileToggleLinks(data._req_file, data._log_dir, 'req')}</span></div>
         `;
         chatPanel.appendChild(meta);
     }

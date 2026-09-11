@@ -365,7 +365,7 @@ Modal 里可选「保存为草稿」（start=False）→ 只建 draft 记录，�
 
 | 来源 | 内容 | 谁消费 |
 |------|------|--------|
-| **`api_keys` 表**（keys.db） | Web 端**签发/管理**的 key（本环境仅 2 个） | key 管理页、旧 `_find_key` |
+| **`api_keys` 表**（keys.db） | Web 端**签发/管理**的 key（本环境仅 2 个） | key 管理页 |
 | **日志 api_key**（`session_cache.db` / newapi `index.db`） | 调用方**实际发来的**上游 key（本环境 169 个） | 「导出概览」列表、`/export/*` 校验、`/export/submit` 匹配 |
 
 「导出概览」「导出浏览」页列出的 key 来自**日志统计**（`build_stats_multi` / `_collect_log_keys`），
@@ -391,74 +391,10 @@ Modal 里可选「保存为草稿」（start=False）→ 只建 draft 记录，�
 - `/export/submit`：`_check_public_export` → 用完整 key 匹配 `build_stats_multi` 的 `row["api_key"]`。
 - `/export/status`：URL 带 `key` 时校验与 `rec["api_key"]` 一致。
 
-> 旧 `/history/shared` 走 `_find_key`（`api_keys` 表）仍保持原行为，不受影响。
-
 ## 公开访问（无需登录）
 
-> 当前同时存在两代公开入口：
-> 1. **旧（本页）**：`/history/shared` 查历史 + `/api/shared/export` 发起导出 / `/api/shared/export/status/{id}` 查状态，`key + code` 认证。
-> 2. **新（公开 URL）**：`/export/view` `/export/submit` `/export/status`（`acesskey` 认证），字段/流程见 [README_export_public.md](README_export_public.md)。
->
-> 两者都还可用；新入口增加 `acesskey` 校验与更细的 key 匹配（见下文「key 匹配规则」）。
+公开入口统一为 `/export/view` `/export/submit` `/export/status`（`access-key` 鉴权），
+字段/流程见 [README_export_public.md](README_export_public.md)。
 
-通过 `key + code` 参数可无需登录访问对话历史和导出功能。`code` 由 `.env` 中的 `SHARED_CODE` 配置，默认值为 `shared`。
-
-### 查看对话历史
-
-浏览器直接访问：
-
-```
-http://<host>:<port>/history/shared?key=<完整API Key>&code=<验证码>
-```
-
-示例：
-
-```
-http://127.0.0.1:4000/history/shared?key=sk-abc123def456&code=shared
-```
-
-页面默认展示该 key 在所有时间目录下的对话记录，支持切换目录、搜索、分页滚动加载。
-
-### 导出带质检的轨迹
-
-**发起导出**（POST）：
-
-```bash
-curl -X POST http://<host>:<port>/api/shared/export \
-  -H "Content-Type: application/json" \
-  -d '{"key": "sk-abc123def456", "code": "shared"}'
-```
-
-可选指定 OBS 前缀：
-
-```bash
-curl -X POST http://<host>:<port>/api/shared/export \
-  -H "Content-Type: application/json" \
-  -d '{"key": "sk-abc123def456", "code": "shared", "obs_prefix": "obs://bucket/path"}'
-```
-
-返回：
-
-```json
-{"record_id": 1, "session_path": "obs://bucket/path/session_analysis/...", "status": "running"}
-```
-
-**查询导出状态**（GET）：
-
-```bash
-curl "http://<host>:<port>/api/shared/export/status/<record_id>?key=sk-abc123def456&code=shared"
-```
-
-返回：
-
-```json
-{"record_id": 1, "status": "success", "session_path": "obs://...", "total_sessions": 42, "error_message": ""}
-```
-
-### 配置验证码
-
-在 `.env` 文件中设置 `SHARED_CODE`（不设置则默认 `shared`）：
-
-```env
-SHARED_CODE=my_secret_code
-```
+> 旧的 share 模式（`/history/shared` + `/api/shared/logs/*` + `/api/shared/export[/status]`，
+> `key + code` 认证，依赖 `.env` 的 `SHARED_CODE`）已整体移除，相关路由不再存在（404）。

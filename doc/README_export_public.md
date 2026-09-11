@@ -1,7 +1,7 @@
 # 公开导出/浏览 — URL 驱动端点说明（README_export_public.md）
 
 一组**公开、URL 驱动**的导出/浏览端点，用 `access-key` 做身份验证，无需登录即可访问。
-风格对齐既有「对话浏览」的公开入口 `/history/shared`。
+风格对齐「对话浏览」页面（`/history`）；这是目前唯一的公开入口（旧的 share 模式已移除）。
 
 > **命名注意**：查询参数拼写为 **`access-key`**（连字符）。旧版曾用 `acesskey`（拼写错误），
 > 已全局改名为 `access-key`。改名前老链接中的 `acesskey` 会校验失败（403），需更新为 `access-key`。
@@ -27,8 +27,7 @@ http://<host>:<port>/export/status?export_id=<id>&access-key=<ak>
 ## 身份验证
 
 - `access-key` 用 `hmac.compare_digest(access_key, os.getenv("ACCESS_KEY",""))` 校验。
-  **无默认值**：`.env` 未配置 `ACCESS_KEY` 时恒拒，不回退到 `"shared"`（对比 `/history/shared`
-  与 `/api/shared/export` 用的 `SHARED_CODE`，那个仍默认 `"shared"`）。错/缺 → 403 `Invalid access-key`。
+  **无默认值**：`.env` 未配置 `ACCESS_KEY` 时恒拒。错/缺 → 403 `Invalid access-key`。
 - `key` 用 `resolve_export_key(key, roots, env_dir)` 在**日志命名空间**里解析（见「key 匹配规则」），
   不再用 `find_key` 查 `api_keys` 表；解析不到返回 404。
 - 校验顺序：先 `access-key`（错 → 403 `Invalid access-key`），再 `key`（无/解析不到 → 404 `Key not found`）。
@@ -60,7 +59,7 @@ http://<host>:<port>/export/status?export_id=<id>&access-key=<ak>
 ## 1. `/export/view` — 导出浏览页
 
 - 页面路由（`app.py:1779`）渲染 `templates/chat-viewer.html`，注入 `export_view_mode=True` 上下文
-  （`export_key` / `export_model`），复用共享浏览模式（`shared_mode`）的前端逻辑。
+  （`export_key` / `export_model`），复用「对话浏览」页的前端逻辑。
 - 与「对话浏览」的差异：跨该 key 落到的叶子聚合，隐藏来源/时间目录下拉（前端 `_exportViewMode`
   分支）；**顶栏不再显示 `key=… · model=…`**（该提示条已移除，key/model 仍作为请求参数内部使用）。
 - 后端接口（`app.py:1803` 起）落到 `utils/log_routes.py` 的模块级聚合函数：
@@ -160,7 +159,7 @@ http://<host>:<port>/export/status?export_id=<id>&access-key=<ak>
 
 1. 校验 `access-key`（错 → 403）。
 2. `get_record_resolved(export_id)` 读记录（自动解析外部文件）；无 → 404 `Not found`。
-3. URL 若带 `key` 且与 `rec["api_key"]` 不一致 → 403 `Access denied`（镜像 `/api/shared/export/status`）。
+3. URL 若带 `key` 且与 `rec["api_key"]` 不一致 → 403 `Access denied`。
 
 返回：
 ```json

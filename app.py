@@ -127,7 +127,6 @@ MONITOR_AUTH_PUBLIC_PATHS = {
     "/logout",
     "/register",
     "/invite",
-    "/history/shared",
     "/export/view",
     "/export/submit",
     "/export/status",
@@ -382,11 +381,6 @@ def _ctx(request: Request, active_page: str, **extra) -> dict:
     }
     ctx.update(extra)
     return ctx
-
-
-def _verify_shared_code(code: str) -> bool:
-    expected = os.getenv("SHARED_CODE", "shared")
-    return hmac.compare_digest(code, expected)
 
 
 def _normalize_next_path(next_path: str) -> str:
@@ -1738,28 +1732,6 @@ async def chat_viewer(request: Request):
     )
 
 
-@app.get("/history/shared")
-async def chat_viewer_shared(request: Request, key: str = "", code: str = ""):
-    if not _verify_shared_code(code):
-        return JSONResponse({"detail": "Invalid code"}, status_code=403)
-    record = _find_key(key) if key else None
-    if not record:
-        return JSONResponse({"detail": "Key not found"}, status_code=404)
-    return templates.TemplateResponse(
-        request,
-        "chat-viewer.html",
-        context={
-            "active_page": "history",
-            "user_role": "shared",
-            "user_name": record.get("name", ""),
-            "user_permissions": [],
-            "shared_mode": True,
-            "shared_api_key": key,
-            "shared_code": code,
-        },
-    )
-
-
 # --- 公开导出浏览（access-key 验证，风格对齐「对话浏览」） ---
 
 
@@ -1793,7 +1765,6 @@ async def export_view_page(request: Request, key: str = "", model: str = "",
             "user_role": "shared",
             "user_name": "",
             "user_permissions": [],
-            "shared_mode": True,
             "shared_api_key": resolved_key,
             "shared_code": access_key,
             "export_view_mode": True,
