@@ -5,6 +5,8 @@
 {% block mobile_title %}对话历史{% endblock %}
 
 {% block head_extra %}
+    {# URL 里可能带完整 API Key（用于刷新恢复筛选）；限制 Referer 只发同源，避免随 CDN 请求外泄 #}
+    <meta name="referrer" content="same-origin" />
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="/static/js/chat-render.js"></script>
 {% endblock %}
@@ -16,17 +18,41 @@
         /* ========= Header ========= */
         .cv-header {
             background: var(--card);
-            padding: 12px 20px;
+            padding: 10px 20px;
             border-bottom: 1px solid var(--border);
             box-shadow: var(--shadow-sm);
             display: flex;
             align-items: center;
             justify-content: space-between;
             flex-shrink: 0;
-            gap: 12px;
+            gap: 8px;
+            flex-wrap: nowrap;
         }
         .cv-header h1 { font-size: 17px; font-weight: 600; color: var(--foreground); white-space: nowrap; }
-        .cv-header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        /* 右侧整体：占满剩余宽度，内容靠右；真正的滚动发生在内层，避免
+           flex-end + overflow 时左侧溢出部分无法滚动到的问题。 */
+        .cv-header-right {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: flex-end;
+            flex: 1;
+            min-width: 0;
+        }
+        /* 工具栏强制单行：控件不收缩，放不下时整条横向滚动，绝不折成第二行。 */
+        .cv-toolbar-scroll {
+            display: flex;
+            flex-direction: row;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            overflow-y: hidden;
+            min-width: 0;
+            padding-bottom: 2px;
+            scrollbar-width: thin;
+        }
+        .cv-toolbar-scroll > * { flex-shrink: 0; }
         .min-msg-label { font-size: 13px; color: var(--muted-foreground); white-space: nowrap; }
         .min-msg-input {
             width: 60px; padding: 5px 8px;
@@ -394,7 +420,12 @@
             box-shadow: var(--shadow-md); min-width: 180px; max-height: 280px;
             overflow: hidden; flex-direction: column; margin-top: 2px;
         }
+        /* 工具栏设了 overflow-x:auto，绝对定位的 .ss-dropdown 会被裁掉/困在滚动盒里。
+           改为相对视口定位（JS 在打开时算坐标），脱离任何裁剪祖先。 */
         .searchable-select .ss-dropdown.open { display: flex; }
+        .searchable-select .ss-dropdown.ss-fixed {
+            position: fixed; margin-top: 0; z-index: 2000;
+        }
         .searchable-select .ss-search {
             padding: 6px 8px; border: none; border-bottom: 1px solid var(--border);
             font-size: 12px; outline: none; width: 100%;
@@ -441,48 +472,71 @@
 
 {% block content %}
 <div class="cv-header">
-    <span class="min-msg-label" id="loadStatus" style="font-size:14px;font-weight:600;color:var(--foreground);"></span>
+    <span class="min-msg-label" id="loadStatus" style="font-size:14px;font-weight:600;color:var(--foreground);white-space:nowrap;"></span>
     <div class="cv-header-right">
+        <div class="cv-toolbar-scroll">
+        {# 顺序：来源 → 月 → 日 → 时 → API Key → 模型 → 文件夹 → 最少消息数 #}
         {% if not export_view_mode %}
-        <span class="min-msg-label" id="rootSelectLabel" style="display:none;">来源地址</span>
-        <select class="folder-select" id="rootSelect" style="display:none;" onchange="onRootChange()">
-        </select>
-        <span class="min-msg-label">时间目录</span>
-        <select class="folder-select" id="logDirSelect" onchange="resetAndLoad()">
-        </select>
+            <span class="min-msg-label" id="rootSelectLabel" style="display:none;">来源</span>
+            <select class="folder-select" id="rootSelect" style="display:none;" onchange="onRootChange()">
+            </select>
+            <span class="min-msg-label">月</span>
+            <div class="searchable-select" id="ymWrap" data-hidden="ymSelect" data-all="全部月">
+                <div class="ss-display" onclick="toggleSSDropdown('ymWrap')"><span id="ymLabel">全部月</span></div>
+                <div class="ss-dropdown"><input class="ss-search" type="text" placeholder="搜索月份..." oninput="filterSSOptions('ymWrap')" /><div class="ss-options"></div></div>
+            </div>
+            <input type="hidden" id="ymSelect" value="" />
+            <span class="min-msg-label">日</span>
+            <div class="searchable-select" id="dayWrap" data-hidden="daySelect" data-all="全部日">
+                <div class="ss-display" onclick="toggleSSDropdown('dayWrap')"><span id="dayLabel">全部日</span></div>
+                <div class="ss-dropdown"><input class="ss-search" type="text" placeholder="搜索日期..." oninput="filterSSOptions('dayWrap')" /><div class="ss-options"></div></div>
+            </div>
+            <input type="hidden" id="daySelect" value="" />
+            <span class="min-msg-label">时</span>
+            <div class="searchable-select" id="hourWrap" data-hidden="hourSelect" data-all="全部时">
+                <div class="ss-display" onclick="toggleSSDropdown('hourWrap')"><span id="hourLabel">全部时</span></div>
+                <div class="ss-dropdown"><input class="ss-search" type="text" placeholder="搜索时段..." oninput="filterSSOptions('hourWrap')" /><div class="ss-options"></div></div>
+            </div>
+            <input type="hidden" id="hourSelect" value="" />
         {% else %}
-        <input type="hidden" id="logDirSelect" value="" />
+        <input type="hidden" id="ymSelect" value="" />
+        <input type="hidden" id="daySelect" value="" />
+        <input type="hidden" id="hourSelect" value="" />
         {% endif %}
-        <span class="min-msg-label">文件夹</span>
-        <select class="folder-select" id="folderSelect" onchange="resetAndLoad()">
-            <option value="agg">聚合视图</option>
-            <option value="list">单文件列表</option>
-        </select>
-        <span class="min-msg-label">最少消息数</span>
-        <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
-        {% if not shared_mode %}
-        <span class="min-msg-label">API Key</span>
-        <div class="searchable-select" id="filterKeyWrap">
-            <div class="ss-display" onclick="toggleSSDropdown('filterKeyWrap')"><span id="filterKeyLabel">全部</span></div>
-            <div class="ss-dropdown" id="filterKeyDropdown">
-                <input class="ss-search" type="text" placeholder="搜索 key..." oninput="filterSSOptions('filterKeyWrap')" />
-                <div class="ss-options">
-                    <div class="ss-option selected" data-value="" onclick="selectSSOption('filterKeyWrap','','全部');reloadWithKey()">全部</div>
+            {% if not shared_mode %}
+            <span class="min-msg-label">API Key</span>
+            <div class="searchable-select" id="filterKeyWrap" data-hidden="filterKey" data-all="全部">
+                <div class="ss-display" onclick="toggleSSDropdown('filterKeyWrap')"><span id="filterKeyLabel">全部</span></div>
+                <div class="ss-dropdown" id="filterKeyDropdown">
+                    <input class="ss-search" type="text" placeholder="搜索 key..." oninput="filterSSOptions('filterKeyWrap')" />
+                    <div class="ss-options">
+                        <div class="ss-option selected" data-value="" onclick="selectSSOption('filterKeyWrap','','全部');reloadWithKey()">全部</div>
+                    </div>
                 </div>
             </div>
-        </div>
-        <input type="hidden" id="filterKey" value="" />
-        {% else %}
-        <input type="hidden" id="filterKey" value="{{ shared_api_key|default('') }}" />
-        {% endif %}
-        <span class="min-msg-label">模型</span>
-        <select class="folder-select" id="filterModel" onchange="reloadWithModel()">
-            <option value="">全部</option>
-        </select>
+            <input type="hidden" id="filterKey" value="" />
+            {% else %}
+            <input type="hidden" id="filterKey" value="{{ shared_api_key|default('') }}" />
+            {% endif %}
+            <span class="min-msg-label">模型</span>
+            <select class="folder-select" id="filterModel" onchange="reloadWithModel()">
+                <option value="">全部</option>
+            </select>
+            <span class="min-msg-label">文件夹</span>
+            <select class="folder-select" id="folderSelect" onchange="resetAndLoad()">
+                <option value="agg">聚合视图</option>
+                <option value="list">单文件列表</option>
+            </select>
+            <span class="min-msg-label">最少消息数</span>
+            <input class="min-msg-input" type="number" id="minMessages" value="1" min="1" />
         {% if not export_view_mode %}
-        <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
+            <button class="btn btn-green" onclick="resetAndLoad()">刷新列表</button>
+            <span id="lastRefreshTime" style="font-size:.74rem;color:var(--muted-foreground);display:none;"></span>
+        {% else %}
+        <span id="lastRefreshTime" style="display:none;"></span>
         {% endif %}
-        <span id="lastRefreshTime" style="font-size:.74rem;color:var(--muted-foreground);margin-left:6px;display:none;"></span>
+        <input type="hidden" id="logDirSelect" value="" />
+        </div>
     </div>
 </div>
 
@@ -639,23 +693,284 @@ function currentLogDir() {
 }
 
 // 用指定来源（root basename）过滤填充「时间目录」下拉；root===null 表示不过滤（单来源）
-function _populateDirSelect(rootName) {
-    const sel = document.getElementById('logDirSelect');
-    sel.innerHTML = '';
+// 格式化 8 位时间字符串：26073018 → 26年07月30日18时；6位：260730 → 26年07月30日；4位：2607 → 26年07月
+function _fmtYMDH(s) {
+    if (!s || s.length < 4) return s;
+    const yy = s.slice(0,2), mm = s.slice(2,4), dd = s.length >= 6 ? s.slice(4,6) : '';
+    const hh = s.length >= 8 ? s.slice(6,8) : '';
+    let out = yy + '年' + mm + '月';
+    if (dd) out += dd + '日';
+    if (hh) out += hh + '时';
+    return out;
+}
+
+// 从 name 末段提取 8 位 ymdh（26073018），或 6 位（260730），或直接返回 name
+function _ymdhFromName(name) {
+    if (!name) return '';
+    const p = name.split('::');
+    const rel = p.length > 1 ? p[p.length - 1] : name;
+    // rel 形如 details/260730/26073018 或 26091020
+    const seg = rel.split('/');
+    return seg[seg.length - 1] || '';
+}
+
+// 从 name 中提取 root 前缀（'::' 之前的部分）
+function _rootFromName(name) {
+    if (!name) return '';
+    const idx = name.indexOf('::');
+    return idx >= 0 ? name.slice(0, idx) : '';
+}
+
+// ymdh 为 8 位 YYMMDDHH：YY(0,2) MM(2,4) DD(4,6) HH(6,8)
+// 从 ymdh 提取年月（YYMM）
+function _ymFromYmdh(ymdh) { return ymdh ? ymdh.slice(0,4) : ''; }
+// 从 ymdh 提取日（DD）
+function _dayFromYmdh(ymdh) { return ymdh && ymdh.length >= 6 ? ymdh.slice(4,6) : ''; }
+// 从 ymdh 提取时（HH）
+function _hourFromYmdh(ymdh) { return ymdh && ymdh.length >= 8 ? ymdh.slice(6,8) : ''; }
+
+// 填充一个 searchable-select 包装器：items = [{value, label, selected}]
+// wrapId 是外层 .searchable-select 的 id；labelId 是 ss-display 里的 span id；
+// 选中后写回 data-hidden 指定的 hidden input，并触发 wrap 上的 onSelect 回调。
+function _fillSSWrap(wrapId, labelId, items, onSelect) {
+    const wrap = document.getElementById(wrapId);
+    if (!wrap) return;
+    const optsBox = wrap.querySelector('.ss-options');
+    const labelEl = document.getElementById(labelId);
+    const hidden = document.getElementById(wrap.dataset.hidden || '');
+    const allLabel = wrap.dataset.all || '全部';
+    optsBox.innerHTML = '';
+    const allOpt = document.createElement('div');
+    allOpt.className = 'ss-option';
+    allOpt.dataset.value = '';
+    allOpt.textContent = allLabel;
+    allOpt.onclick = function() { _pickSSOption(wrapId, labelId, '', allLabel, onSelect); };
+    optsBox.appendChild(allOpt);
+    let cur = hidden ? hidden.value : '';
+    // 当前值不在新列表里 → 回落到「全部」
+    if (cur && !items.some(it => String(it.value) === String(cur))) cur = '';
+    items.forEach(it => {
+        const div = document.createElement('div');
+        div.className = 'ss-option';
+        div.dataset.value = it.value;
+        div.textContent = it.label;
+        div.onclick = function() { _pickSSOption(wrapId, labelId, it.value, it.label, onSelect); };
+        optsBox.appendChild(div);
+    });
+    if (hidden) hidden.value = cur;
+    const match = items.find(it => String(it.value) === String(cur));
+    if (labelEl) labelEl.textContent = match ? match.label : allLabel;
+    wrap.querySelectorAll('.ss-option').forEach(o => {
+        o.classList.toggle('selected', String(o.dataset.value) === String(cur));
+    });
+}
+
+function _pickSSOption(wrapId, labelId, value, label, onSelect) {
+    const wrap = document.getElementById(wrapId);
+    const hidden = document.getElementById(wrap.dataset.hidden || '');
+    if (hidden) hidden.value = value;
+    const labelEl = document.getElementById(labelId);
+    if (labelEl) labelEl.textContent = label;
+    wrap.querySelectorAll('.ss-option').forEach(o => {
+        o.classList.toggle('selected', String(o.dataset.value) === String(value));
+    });
+    _closeSSDropdown(wrap.querySelector('.ss-dropdown'));
+    if (typeof onSelect === 'function') onSelect(value);
+}
+
+// 三级联动下拉填充（改用可搜索下拉组件）
+function _populateYmSelect(rootName) {
+    const seen = new Set();
     _allDirs.forEach(d => {
         if (rootName !== null && (d.root || '') !== rootName) return;
-        const opt = document.createElement('option');
-        opt.value = d.name;   // 仍存 "<root>::<rel>"（多来源），后端 resolve_log_dir 解析
-        // 多来源时去掉 "<root>::" 前缀，只显示时间目录相对路径
-        let rel = d.name;
-        const sep = d.name.indexOf('::');
-        if (sep >= 0) rel = d.name.slice(sep + 2);
-        let label = d.label || rel;
-        if (d.count !== undefined) label += ' (' + d.count + ')';
-        if (d.current) { label += ' (当前)'; opt.selected = true; }
-        opt.textContent = label;
-        sel.appendChild(opt);
+        const ym = _ymFromYmdh(_ymdhFromName(d.name));
+        if (ym) seen.add(ym);
     });
+    // 按时间倒序（最新在前）：纯数字字符串比较即可
+    const items = [...seen].sort().reverse().map(ym => ({ value: ym, label: _fmtYMDH(ym) }));
+    _fillSSWrap('ymWrap', 'ymLabel', items, () => {
+        const root = _currentRootValue();
+        _populateDaySelect(root, document.getElementById('ymSelect').value);
+        _populateHourSelect(root, document.getElementById('ymSelect').value, document.getElementById('daySelect').value);
+        _reloadForTimeChange();
+    });
+    _populateDaySelect(rootName, document.getElementById('ymSelect').value);
+}
+
+function _populateDaySelect(rootName, ym) {
+    const seen = new Set();
+    if (ym) {
+        _allDirs.forEach(d => {
+            if (rootName !== null && (d.root || '') !== rootName) return;
+            const ymdh = _ymdhFromName(d.name);
+            if (!ymdh.startsWith(ym)) return;
+            const day = _dayFromYmdh(ymdh);
+            if (day) seen.add(day);
+        });
+    }
+    const items = [...seen].sort().reverse().map(d => ({ value: d, label: d + '日' }));
+    _fillSSWrap('dayWrap', 'dayLabel', items, () => {
+        const root = _currentRootValue();
+        const ymv = document.getElementById('ymSelect').value;
+        _populateHourSelect(root, ymv, document.getElementById('daySelect').value);
+        _reloadForTimeChange();
+    });
+    _populateHourSelect(rootName, ym, document.getElementById('daySelect').value);
+}
+
+function _populateHourSelect(rootName, ym, day) {
+    const prefix = ym + (day || '');
+    const items = [];
+    const seen = new Set();
+    if (prefix) _allDirs.forEach(d => {
+        if (rootName !== null && (d.root || '') !== rootName) return;
+        const ymdh = _ymdhFromName(d.name);
+        if (ymdh.length < 8 || !ymdh.startsWith(prefix) || seen.has(ymdh)) return;
+        seen.add(ymdh);
+        // 未选「日」时会在整月范围内列小时，标签补上日期避免歧义
+        let label = day ? (ymdh.slice(6, 8) + '时') : _fmtYMDH(ymdh);
+        if (d.count !== undefined) label += ' (' + d.count + ')';
+        items.push({ value: ymdh, label });
+    });
+    items.sort((a, b) => b.value.localeCompare(a.value));
+    _fillSSWrap('hourWrap', 'hourLabel', items, () => { _reloadForTimeChange(); });
+}
+
+function _currentRootValue() {
+    const rootSel = document.getElementById('rootSelect');
+    return rootSel && rootSel.tagName === 'SELECT' && rootSel.style.display !== 'none'
+        ? (rootSel.value || null) : null;
+}
+
+// logDirSelect（hidden）由三级下拉合成；currentLogDir() 读它
+function _syncLogDirFromSelects() {
+    const hidden  = document.getElementById('logDirSelect');
+    if (!hidden) return;
+    const ymEl = document.getElementById('ymSelect');
+    const dayEl = document.getElementById('daySelect');
+    const hourEl = document.getElementById('hourSelect');
+    if (!ymEl) { hidden.value = ''; return; }
+
+    const ymdh = (hourEl && hourEl.value) || '';
+    const ym   = ymEl.value || '';
+    const day  = (dayEl && dayEl.value) || '';
+
+    if (!ymdh && !ym) { hidden.value = ''; return; }
+
+    // 从 _allDirs 中找匹配的 dir.name
+    const root = _currentRootValue();
+    const targetYmdh = ymdh || (ym + day);   // 8位或6位前缀
+    const match = _allDirs.find(d => {
+        if (root !== null && (d.root || '') !== root) return false;
+        const dy = _ymdhFromName(d.name);
+        return ymdh ? dy === ymdh : dy.startsWith(targetYmdh);
+    });
+    hidden.value = match ? match.name : '';
+}
+
+// URL 参数读写
+// 注意：key 是完整 API Key（服务端按 api_key = ? 精确匹配，掩码值无法恢复筛选）。
+// 该页会加载 jsdelivr CDN 资源，带 key 的 URL 会随 Referer 外发；仅适用于内部监控环境。
+function _writeUrlState() {
+    if (_exportViewMode || _sharedMode) return;
+    const params = new URLSearchParams(window.location.search);
+    const root = _currentRootValue() || '';
+    const hourEl = document.getElementById('hourSelect');
+    const ymdh = (hourEl && hourEl.value) || '';
+    const keyEl = document.getElementById('filterKey');
+    const key = (keyEl && keyEl.value) || '';
+    const modelEl = document.getElementById('filterModel');
+    const model = (modelEl && modelEl.value) || '';
+    if (root) params.set('source', root); else params.delete('source');
+    if (ymdh) params.set('ymdh', ymdh);  else params.delete('ymdh');
+    if (key) params.set('key', key);     else params.delete('key');
+    if (model) params.set('model', model); else params.delete('model');
+    const qs = params.toString();
+    history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
+}
+
+function _restoreUrlState() {
+    if (_exportViewMode || _sharedMode) return null;
+    const params = new URLSearchParams(window.location.search);
+    return {
+        source: params.get('source') || '',
+        ymdh: params.get('ymdh') || '',
+        key: params.get('key') || '',
+        model: params.get('model') || '',
+    };
+}
+
+// 应用 URL 里的 key/model 过滤（须在 resetAndLoad 清空过滤之后调用）
+function _applyUrlFilters(state) {
+    if (!state || _exportViewMode || _sharedMode) return;
+    if (state.key) {
+        const hidden = document.getElementById('filterKey');
+        if (hidden) hidden.value = state.key;
+        const label = document.getElementById('filterKeyLabel');
+        if (label) label.textContent = state.key === '__default__' ? 'default' : maskKey(state.key);
+        // 阻止 collectKeys 里的 localStorage 偏好覆盖 URL 指定的 key
+        _keyPrefRestored = true;
+    }
+    if (state.model) {
+        const sel = document.getElementById('filterModel');
+        if (sel) {
+            if (![...sel.options].some(o => o.value === state.model)) {
+                const o = document.createElement('option');
+                o.value = state.model; o.textContent = state.model;
+                sel.appendChild(o);
+            }
+            sel.value = state.model;
+        }
+    }
+}
+
+function _applyUrlState(state) {
+    if (!state || (!state.source && !state.ymdh)) return false;
+    const rootSel = document.getElementById('rootSelect');
+    if (state.source && rootSel && rootSel.tagName === 'SELECT') {
+        if ([...rootSel.options].some(o => o.value === state.source)) {
+            rootSel.value = state.source;
+        }
+    }
+    const root = _currentRootValue();
+    _populateYmSelect(root);
+    if (state.ymdh && state.ymdh.length >= 8) {
+        const ym  = _ymFromYmdh(state.ymdh);    // YYMM
+        const day = _dayFromYmdh(state.ymdh);   // DD
+        if ([...document.querySelectorAll('#ymWrap .ss-option')].some(o => o.dataset.value === ym)) {
+            _pickSSOption('ymWrap', 'ymLabel', ym, _fmtYMDH(ym));
+        }
+        _populateDaySelect(root, ym);
+        if ([...document.querySelectorAll('#dayWrap .ss-option')].some(o => o.dataset.value === day)) {
+            _pickSSOption('dayWrap', 'dayLabel', day, day + '日');
+        }
+        _populateHourSelect(root, ym, day);
+        const hourOpt = [...document.querySelectorAll('#hourWrap .ss-option')].find(o => o.dataset.value === state.ymdh);
+        if (hourOpt) _pickSSOption('hourWrap', 'hourLabel', state.ymdh, hourOpt.textContent);
+        return true;
+    }
+    return false;
+}
+
+// 兼容旧代码：_populateDirSelect 现在用三级联动实现
+function _populateDirSelect(rootName) {
+    _populateYmSelect(rootName);
+}
+
+// 切换时间目录时不清空 API Key / 模型过滤器，只重置翻页状态后重新加载
+function _reloadForTimeChange() {
+    _syncLogDirFromSelects();
+    _writeUrlState();
+    offset = 0;
+    totalItems = 0;
+    aggChains = [];
+    renderedCount = 0;
+    _searchQuery = '';
+    _resetDeepSearchState();
+    document.getElementById('q1Search').value = '';
+    fileListEl.innerHTML = '<div class="cv-sidebar-tip"><span class="spinner"></span>加载中…</div>';
+    document.getElementById('loadStatus').textContent = '';
+    loadFileList(true);
 }
 
 async function loadLogDirs() {
@@ -699,11 +1014,15 @@ async function loadLogDirs() {
     } catch(e) {}
 }
 
-// 切换来源：按新来源重填时间目录（默认落到该来源第一个），再重新加载
+// 切换来源：清空时间选择，按新来源重填，再重新加载
 function onRootChange() {
     const rootSel = document.getElementById('rootSelect');
+    ['ymSelect', 'daySelect', 'hourSelect'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
     _populateDirSelect(rootSel.value);
-    resetAndLoad();
+    _reloadForTimeChange();
 }
 
 function currentFolder() {
@@ -808,7 +1127,8 @@ function _resetDeepSearchState() {
     if (btn) { btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }
 }
 
-function resetAndLoad() {
+function resetAndLoad(skipLoad) {
+    _syncLogDirFromSelects();
     offset = 0;
     totalItems = 0;
     aggChains = [];
@@ -823,14 +1143,16 @@ function resetAndLoad() {
         var keyLabel = document.getElementById('filterKeyLabel');
         if (keyLabel) keyLabel.textContent = '全部';
     }
+    _writeUrlState();   // 过滤已清空，URL 同步去掉 key/model
     fileListEl.innerHTML = '<div class="cv-sidebar-tip"><span class="spinner"></span>加载中…</div>';
     document.getElementById('loadStatus').textContent = '';
-    loadFileList(true);
+    if (!skipLoad) loadFileList(true);
 }
 
 function reloadWithKey() {
     var selectedKey = document.getElementById('filterKey').value;
     if (_userName) localStorage.setItem(_keyPrefKey, selectedKey);
+    _writeUrlState();
     offset = 0;
     totalItems = 0;
     aggChains = [];
@@ -844,6 +1166,7 @@ function reloadWithKey() {
 }
 
 function reloadWithModel() {
+    _writeUrlState();
     offset = 0;
     totalItems = 0;
     aggChains = [];
@@ -1726,13 +2049,25 @@ function toggleSSDropdown(wrapId) {
     const wrap = document.getElementById(wrapId);
     const dd = wrap.querySelector('.ss-dropdown');
     const isOpen = dd.classList.contains('open');
-    document.querySelectorAll('.ss-dropdown.open').forEach(d => d.classList.remove('open'));
+    document.querySelectorAll('.ss-dropdown.open').forEach(_closeSSDropdown);
     if (!isOpen) {
         dd.classList.add('open');
+        // 工具栏 overflow-x:auto 会裁掉/困住绝对定位的下拉，改为贴合按钮的视口定位
+        const disp = wrap.querySelector('.ss-display');
+        const r = disp.getBoundingClientRect();
+        dd.classList.add('ss-fixed');
+        dd.style.minWidth = r.width + 'px';
+        dd.style.left = r.left + 'px';
+        dd.style.top = (r.bottom + 2) + 'px';
         const input = dd.querySelector('.ss-search');
         input.value = '';
         input.focus();
         filterSSOptions(wrapId);
+        // 视口空间不够时向上展开
+        const dh = dd.offsetHeight;
+        if (r.bottom + 2 + dh > window.innerHeight && r.top - 2 - dh > 0) {
+            dd.style.top = (r.top - 2 - dh) + 'px';
+        }
     }
 }
 
@@ -1747,19 +2082,39 @@ function filterSSOptions(wrapId) {
 
 function selectSSOption(wrapId, value, label) {
     const wrap = document.getElementById(wrapId);
-    const hidden = document.getElementById(wrapId === 'filterKeyWrap' ? 'filterKey' : '');
+    const hidden = document.getElementById(wrap.dataset.hidden || (wrapId === 'filterKeyWrap' ? 'filterKey' : ''));
     if (hidden) hidden.value = value;
     const labelEl = wrap.querySelector('.ss-display span');
     if (labelEl) labelEl.textContent = label;
     wrap.querySelectorAll('.ss-option').forEach(opt => {
-        opt.classList.toggle('selected', opt.dataset.value === value);
+        opt.classList.toggle('selected', String(opt.dataset.value) === String(value));
     });
-    wrap.querySelector('.ss-dropdown').classList.remove('open');
+    _closeSSDropdown(wrap.querySelector('.ss-dropdown'));
 }
+
+// 关闭下拉并清掉视口定位残留（下次打开会重新计算坐标）
+function _closeSSDropdown(dd) {
+    if (!dd) return;
+    dd.classList.remove('open');
+    dd.classList.remove('ss-fixed');
+    dd.style.left = dd.style.top = dd.style.minWidth = '';
+}
+
+// 打开状态下的下拉是相对视口定位的：工具栏横向滚动或窗口尺寸变化会让它漂移，直接收起。
+// scroll 事件不冒泡，但 window 上的捕获阶段监听能收到后代元素的滚动。
+window.addEventListener('scroll', function(e) {
+    const t = e.target;
+    if (t && t.classList && t.classList.contains('cv-toolbar-scroll')) {
+        document.querySelectorAll('.ss-dropdown.open').forEach(_closeSSDropdown);
+    }
+}, true);
+window.addEventListener('resize', function() {
+    document.querySelectorAll('.ss-dropdown.open').forEach(_closeSSDropdown);
+});
 
 document.addEventListener('click', function(e) {
     if (!e.target.closest('.searchable-select')) {
-        document.querySelectorAll('.ss-dropdown.open').forEach(d => d.classList.remove('open'));
+        document.querySelectorAll('.ss-dropdown.open').forEach(_closeSSDropdown);
     }
 });
 
@@ -1811,7 +2166,15 @@ if (_exportViewMode) {
     }
 } else {
 loadLogDirs().then(() => {
-    resetAndLoad();
+    // URL state 恢复：source+ymdh 决定目录，key/model 决定过滤。
+    // resetAndLoad() 会清空 key/model，所以先 resetAndLoad（跳过首次加载）再套用过滤，
+    // 最后只发一次带完整条件的列表请求。
+    const _urlState = _restoreUrlState();
+    _applyUrlState(_urlState);                // 设置 source + 时间下拉 + logDirSelect
+    resetAndLoad(true);                       // 重置状态但不发请求（会清空过滤并同步 URL）
+    _applyUrlFilters(_urlState);              // 套用 URL 指定的 key/model
+    _writeUrlState();                         // 把恢复后的完整条件写回 URL
+    loadFileList(true);
     const _params = new URLSearchParams(window.location.search);
     const _urlFile = _params.get('file');
     const _urlLogDir = _params.get('log_dir');
