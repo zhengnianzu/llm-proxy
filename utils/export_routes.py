@@ -1752,8 +1752,10 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         if dir_workers < 0:
             dir_workers = 0
         # 跨小时节点聚合：把同一条对话在多个小时目录里的段拼成一条产物。
-        # 默认关——产物结构会变（一条记录可能引用多个源目录），下游需先确认兼容。
-        merge_hours = bool(body.get("merge_hours", False))
+        # 默认开——数据按小时分目录存放，同一段对话跨整点会被切成多条，
+        # 不聚合就会把一个会话拆成多条产物。处理器不支持 file_dirs 或只有
+        # 单个目录时会在 _run_task_inner 里自动回退逐目录导出（不报错）。
+        merge_hours = bool(body.get("merge_hours", True))
         # 默认立即入队执行；start=False 时只建草稿（draft）记录，由前端手动「启动」。
         start = body.get("start", True)
         # mode 取值来自 settings/export_modes.yaml 注册表；非法/缺失回退默认。
@@ -2362,7 +2364,7 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
 
     @app.get("/export/submit")
     def public_export_submit(key: str = "", model: str = "", export_name: str = "",
-                             mode: str = "", merge_hours: bool = False,
+                             mode: str = "", merge_hours: bool = True,
                              access_key: str = Query(default="", alias="access-key")):
         """按给定 key 正式导出：创建真实导出任务（export_records），显示名用 export_name。
 

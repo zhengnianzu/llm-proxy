@@ -57,6 +57,10 @@ IDLE_INTERVAL = float(os.getenv("CLEAR_WORKER_INTERVAL", "5") or 5)
 # 宁可慢也不能因为超时把「正在正常推进的删除」判成失败。
 # 超时仍然是兜底：真卡死了就放弃、保留目录，worker 继续处理下一个。
 RM_TIMEOUT = int(os.getenv("CLEAR_WORKER_RM_TIMEOUT", "14400") or 14400)
+# 失败重试上限。典型失败是 `Operation not permitted` —— 删除瞬间文件正被
+# obsutil / watch_worker 打开（NFS v3 hard,nolock），属瞬时冲突，手动 rm
+# 同一个文件立刻就能成功。失败任务会被排到队尾，隔一段时间再碰就过了。
+MAX_CLEAR_ATTEMPTS = int(os.getenv("CLEAR_WORKER_MAX_ATTEMPTS", "3") or 3)
 
 
 def _handle_signal(signum, frame):
@@ -177,10 +181,25 @@ def run_once() -> bool:
         backup_store.finish_clear(job["id"], ok=True)
         logger.info("清理完成 #%s %s", job.get("id"), local_path)
     else:
-        backup_store.append_log(dir_path, f"清理失败: {err}", level="error",
-                                event="delete_fail")
-        backup_store.finish_clear(job["id"], ok=False, error=err)
-        logger.warning("清理失败 #%s %s: %s", job.get("id"), local_path, err)
+        res = backup_store.finish_clear(job["id"], ok=False, error=err,
+                                        max_attempts=MAX_CLEAR_ATTEMPTS)
+        if res["state"] == "requeued":
+            # 失败多半是删除瞬间文件正被 obsutil / watch_worker 打开
+            # （NFS v3 hard,nolock），属瞬时冲突。任务已排到队尾，退回的
+            # 这段时间足够那些句柄关掉，不必原地重试。
+            backup_store.append_log(
+                dir_path,
+                f"清理失败（第 {res['attempts']} 次），已重新排队: {err[:200]}",
+                level="warning", event="delete_retry")
+            logger.warning("清理失败 #%s 已重新排队（第 %d 次）: %s",
+                           job.get("id"), res["attempts"], err[:200])
+        else:
+            backup_store.append_log(
+                dir_path,
+                f"清理失败（已重试 {res['attempts']} 次，放弃）: {err[:200]}",
+                level="error", event="delete_fail")
+            logger.warning("清理失败 #%s 已达重试上限 %d，放弃: %s",
+                           job.get("id"), res["attempts"], err[:200])
     return True
 
 

@@ -363,6 +363,11 @@ def update_sync_status(dir_path: str, status: str, obs_path: str = "", error_msg
     if status == "backed_up":
         fields.append("has_local = 0")
         fields.append("has_obs = 1")
+    # 本地目录已消失且从未上传过 OBS：数据不可恢复，标为终态让流水线跳过。
+    # 只清 has_local，**不能**复用上面的 backed_up 分支（那会把 has_obs 置 1，
+    # 语义从「丢了」变成「已备份」，会让删除校验误判）。
+    if status == "missing":
+        fields.append("has_local = 0")
     params.append(dir_path)
     with _lock:
         _conn.execute(
@@ -816,16 +821,73 @@ def claim_next_clear() -> Optional[dict]:
         return job
 
 
-def finish_clear(job_id: int, ok: bool, error: str = ""):
-    """结束一个清理任务。成功则移除队列行；失败保留为 failed 供排查。"""
+def finish_clear(job_id: int, ok: bool, error: str = "", max_attempts: int = 3) -> dict:
+    """结束一个清理任务。
+
+    成功 → 移除队列行。
+    失败 → attempts 未达上限时**重新入队到队尾**（插入新 id），达到上限才标
+           failed 终态。
+
+    为什么是「删旧行 + 插新行」而不是原地改回 queued：`claim_next_clear`
+    按 id ASC 领取，原地改回会让它**立刻**被再次领取，同一个还开着的文件
+    会连续撞 EPERM 三次然后彻底放弃。插入新行等于排到队尾，退回这段时间
+    就是天然退避（前面几十个任务要跑几分钟到几小时，占用的句柄早关了）。
+
+    实测背景：55 个任务因为 `Operation not permitted` 卡死在 failed，
+    而手动 rm 同一文件立刻成功 —— 是删除瞬间文件正被 obsutil/watch_worker
+    打开（NFS v3 hard,nolock）。属于瞬时冲突，重试即可解。
+    """
     with _lock:
+        row = _conn.execute(
+            "SELECT * FROM backup_clear_queue WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return {"state": "gone", "attempts": 0}
         if ok:
             _conn.execute("DELETE FROM backup_clear_queue WHERE id = ?", (job_id,))
-        else:
-            _conn.execute(
-                "UPDATE backup_clear_queue SET state = 'failed', last_error = ?, "
-                "finished_at = ? WHERE id = ?", (error or "", _now(), job_id))
+            _conn.commit()
+            return {"state": "done", "attempts": int(row["attempts"] or 0)}
+
+        attempts = int(row["attempts"] or 0)
+        if attempts < max(1, int(max_attempts)):
+            _conn.execute("DELETE FROM backup_clear_queue WHERE id = ?", (job_id,))
+            cur = _conn.execute(
+                "INSERT INTO backup_clear_queue "
+                "(dir_path, local_path, state, attempts, last_error) "
+                "VALUES (?, ?, 'queued', ?, ?)",
+                (row["dir_path"], row["local_path"], attempts, error or ""))
+            _conn.commit()
+            return {"state": "requeued", "id": cur.lastrowid, "attempts": attempts}
+
+        _conn.execute(
+            "UPDATE backup_clear_queue SET state = 'failed', last_error = ?, "
+            "finished_at = ? WHERE id = ?", (error or "", _now(), job_id))
         _conn.commit()
+        return {"state": "failed", "attempts": attempts}
+
+
+def requeue_failed_clear(limit: int = 0) -> int:
+    """把 failed 的清理任务重新放回队列（人工触发的一次性消化）。
+
+    同样走「删旧行 + 插新行」，因此会排在现有 queued 之后，不会插队。
+    返回重新入队数量。
+    """
+    with _lock:
+        sql = ("SELECT * FROM backup_clear_queue WHERE state = 'failed' "
+               "ORDER BY id ASC")
+        if limit and limit > 0:
+            sql += f" LIMIT {int(limit)}"
+        rows = _conn.execute(sql).fetchall()
+        n = 0
+        for row in rows:
+            _conn.execute("DELETE FROM backup_clear_queue WHERE id = ?", (row["id"],))
+            _conn.execute(
+                "INSERT INTO backup_clear_queue "
+                "(dir_path, local_path, state, attempts, last_error) "
+                "VALUES (?, ?, 'queued', 0, '')",
+                (row["dir_path"], row["local_path"]))
+            n += 1
+        _conn.commit()
+        return n
 
 
 def reset_clear_on_startup() -> int:

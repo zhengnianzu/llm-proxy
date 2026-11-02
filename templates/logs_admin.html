@@ -17,6 +17,9 @@
 .dir-table th { text-align: left; padding: 10px 8px; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--muted-foreground); font-size: .82rem; white-space: nowrap; }
 .dir-table td { padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; word-break: break-all; }
 .dir-table tr:hover td { background: color-mix(in srgb, var(--primary) 4%, transparent); }
+/* 正在处理的叶子（备份中 / 正在清理）：整行提亮，方便一眼定位 */
+.dir-table tr.row-working td { background: color-mix(in srgb, var(--primary) 9%, transparent); }
+.dir-table tr.row-working td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
 /* 让指定列的表头与单元格都强制居中（覆盖 .dir-table th 的 text-align:left） */
 .dir-table th.col-center, .dir-table td.col-center { text-align: center !important; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: .74rem; font-weight: 600; }
@@ -121,6 +124,9 @@
 .trend-stack > .col { flex: 1; min-width: 3px; height: 100%;
     display: flex; flex-direction: column; justify-content: flex-end; }
 .trend-stack > .col > i { display: block; width: 100%; }
+/* 被点中的柱子：加个描边 + 提亮，表明队列表格已按这个时间段过滤 */
+.trend-stack > .col.picked { outline: 2px solid var(--primary); outline-offset: -1px;
+    border-radius: 3px; background: color-mix(in srgb, var(--primary) 14%, transparent); }
 
 /* 分段按钮（7/30/90 天、按天/周/月）：与 .btn-xs 的朴素风格区分开，
    选中态用实心主色，未选中态是浅底描边，视觉上像一组互斥开关。 */
@@ -810,7 +816,12 @@
                         <span style="font-size:.72rem; color:var(--muted-foreground);">
                             深色=已备份 · 浅色=待备份 · 柱高=叶子数
                         </span>
-                        <span style="margin-left:auto;">
+                        <span style="margin-left:auto; display:flex; align-items:center; gap:8px;">
+                            <span class="seg">
+                                <button v-for="g in [[60,'60 天'],[120,'120 天'],[0,'全部']]"
+                                        :key="g[0]" :class="{on: bkDistDays === g[0]}"
+                                        @click="bkSetDistDays(g[0])">{{ g[1] }}</button>
+                            </span>
                             <span class="seg">
                                 <button v-for="g in [['day','按天'],['week','按周'],['month','按月']]"
                                         :key="g[0]" :class="{on: bkGran === g[0]}"
@@ -818,17 +829,30 @@
                             </span>
                         </span>
                     </div>
-                    <div class="trend-stack">
+                    <div class="trend-stack" style="justify-content:center;">
                         <div v-for="d in bkDistRows" :key="d.key" class="col"
+                             :class="{picked: bkRange && bkRange.key === d.key}"
+                             style="cursor:pointer;"
+                             @click="bkPickBar(d)"
                              :title="d.key + ' · 共 ' + fmtNum(d.leaves) + ' 个叶子 · 已备份 '
-                                     + fmtNum(d.done) + '（' + d.pct + '%）'">
+                                     + fmtNum(d.done) + '（' + d.pct + '%）'
+                                     + (d.uploading ? ' · 上传中 ' + d.uploading : '')
+                                     + (d.clearing ? ' · 删除中 ' + d.clearing : '')
+                                     + ' · 点击查看该时段的叶子'">
                             <!-- 堆叠：上段待备份（浅），下段已备份（深），总高=叶子数。
-                                 用同一主色的透明度区分：已备份 0.8，待备份 0.5。 -->
+                                 用同一主色的透明度区分：已备份 0.8，待备份 0.5。
+                                 该时段有叶子正在上传 → 整根柱子换成绿色，一眼看出
+                                 流水线此刻在动哪天的数据；正在删除则用橙色。 -->
                             <i v-if="d.leaves > d.done"
-                               style="border-radius:3px 3px 0 0; background:var(--primary); opacity:.5;"
-                               :style="{height: bkDaySeg(d, 'pending') + '%'}"></i>
-                            <i style="border-radius:3px; background:var(--primary); opacity:.8;"
-                               :style="{height: bkDaySeg(d, 'done') + '%'}"></i>
+                               :style="{height: bkDaySeg(d, 'pending') + '%',
+                                        borderRadius: '3px 3px 0 0',
+                                        background: d.uploading ? 'var(--success)' : 'var(--primary)',
+                                        opacity: .5}"></i>
+                            <i :style="{height: bkDaySeg(d, 'done') + '%',
+                                        borderRadius: '3px',
+                                        background: d.uploading ? 'var(--success)'
+                                                  : (d.clearing ? 'var(--warning)' : 'var(--primary)'),
+                                        opacity: .8}"></i>
                         </div>
                     </div>
                     <div class="trend-axis">
@@ -846,20 +870,37 @@
             <!-- 叶子节点备份队列 -->
             <div class="panel" style="margin-bottom:0;">
                 <div class="toolbar" style="margin-bottom:12px;">
-                    <h6 style="margin:0;">叶子节点备份队列（按时间从旧到新）</h6>
+                    <h6 style="margin:0;">
+                        叶子节点备份队列（按时间从旧到新）
+                        <span v-if="bkRange && bkRange.label"
+                              style="font-size:.76rem; font-weight:400; color:var(--primary);">
+                            · 已选 {{ bkRange.label }}
+                        </span>
+                    </h6>
                     <span style="margin-left:auto; display:flex; gap:6px; flex-wrap:wrap;">
+                        <button v-if="bkRange && (bkRange.from || bkRange.to)"
+                                class="btn btn-outline btn-sm" @click="bkClearRange">
+                            ✕ 清除时间筛选
+                        </button>
                         <select class="input input-sm" v-model="bkEnv" @change="bkApplyFilter" style="width:auto;">
                             <option value="">全部来源</option>
                             <option v-for="s in bk.sources" :key="s.root_id" :value="s.root_id">{{ s.name }}</option>
                         </select>
                         <select class="input input-sm" v-model="bkStatus" @change="bkApplyFilter" style="width:auto;">
                             <option value="">全部状态</option>
+                            <!-- 这两个是「运行时状态」，不是 backup_dirs.status 的值：
+                                 uploading 由 backup_queue 的 running 行推导，
+                                 clearing 由 backup_clear_queue 的 running 行推导。
+                                 后端据此单独过滤，见 /api/backup/dirs。 -->
+                            <option value="uploading">上传中</option>
+                            <option value="clearing">正在删除</option>
                             <option value="pending">待备份</option>
                             <option value="done">已备份</option>
                             <option value="partial">部分失败</option>
                             <option value="error">失败</option>
                             <option value="backed_up">已清理</option>
                             <option value="pending_delete">待删除</option>
+                            <option value="missing">本地缺失</option>
                         </select>
                         <button class="btn btn-outline btn-sm" @click="bkToggleOrder">
                             {{ bkOrder === 'asc' ? '↑ 时间从旧到新' : '↓ 时间从新到旧' }}
@@ -913,7 +954,9 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <tr v-for="d in bkQueueRows" :key="d.dir_path">
+                        <tr v-for="d in bkQueueRows" :key="d.dir_path"
+                            :class="{'row-working': bkQueue.running === d.dir_path
+                                                || bkClearingRunning === d.dir_path}">
                             <td><input type="checkbox" v-model="bkChecked" :value="d.dir_path"></td>
                             <td>
                                 <div class="mono" style="font-weight:600;">{{ bkLeafLabel(d) }}</div>
@@ -945,7 +988,7 @@
                             </td>
                             <td style="white-space:nowrap;">
                                 <button class="btn btn-outline btn-sm"
-                                        v-if="d.has_local && d.status !== 'done' && d.status !== 'pending_delete' && d.status !== 'backed_up'"
+                                        v-if="d.has_local && d.status !== 'done' && d.status !== 'pending_delete' && d.status !== 'backed_up' && d.status !== 'missing'"
                                         @click="bkSyncOne(d)" :disabled="bkQueueSet.has(d.dir_path)">立即备份</button>
                                 <button class="btn btn-outline btn-sm" @click="bkOpenLogs(d)">查看</button>
                             </td>
@@ -1300,6 +1343,9 @@ new Vue({
         bkEnv: '',
         bkStatus: '',
         bkOrder: 'asc',      // 时间从旧到新
+        // 分布图联动的时间窗口：点柱子后写入，队列表格只显示该区间
+        bkRange: { from: '', to: '', label: '', key: '' },
+        bkDistDays: 0,       // 分布图日粒度窗口：0=全部 | 60 | 120
         bkPage: 1,
         bkPageSize: 15,
         bkTotal: 0,
@@ -1868,7 +1914,9 @@ new Vue({
             // 拿到的还是默认值，界面看起来「点了没反应」。
             var q = '?trend_days=' + this.bkTrendDays
                   + '&recent_page=' + this.bkRecentPage
-                  + '&recent_size=20';
+                  + '&recent_size=20'
+                  // dist_days=0 表示日粒度不截断（后端默认只取最近 60 天）
+                  + '&dist_days=' + this.bkDistDays;
             return this._bkFetch('/api/backup/overview' + q).then(function(d) {
                 if (!d || !d.totals) return;
                 self.bk = d;
@@ -1895,6 +1943,11 @@ new Vue({
                   + '&order=' + encodeURIComponent(this.bkOrder);
             if (this.bkEnv) q += '&env_name=' + encodeURIComponent(this.bkEnv);
             if (this.bkStatus) q += '&status=' + encodeURIComponent(this.bkStatus);
+            // 分布图联动：只显示被点中的时间窗口。没选时由后端默认隐藏已清理行。
+            if (this.bkRange && (this.bkRange.from || this.bkRange.to)) {
+                if (this.bkRange.from) q += '&from=' + encodeURIComponent(this.bkRange.from);
+                if (this.bkRange.to) q += '&to=' + encodeURIComponent(this.bkRange.to);
+            }
             return Promise.all([
                 this._bkFetch('/api/backup/dirs' + q),
                 this._bkFetch('/api/backup/queue-status'),
@@ -1937,6 +1990,57 @@ new Vue({
         bkToggleOrder: function() {
             this.bkOrder = (this.bkOrder === 'asc') ? 'desc' : 'asc';
             this.bkApplyFilter();
+        },
+        // 点分布图的柱子 → 队列表格只显示该时间段内的叶子。
+        // 再点同一根柱子则取消选中，回到全部时间。
+        //
+        // 三种粒度的 key 含义不同，必须展开成 [from, to] 区间，不能直接把 key
+        // 当成单日传下去：
+        //   day   → key 是 YYMMDD，区间就是这一天
+        //   week  → key 是「该周周一」的 YYMMDD，区间 = 周一 ~ 周一+6 天
+        //   month → key 是 YYMM01，区间 = 当月 01 日 ~ 当月最后一天
+        // 早先直接把 key 同时当 from/to 传，点周/月柱子只会匹配到 1 天。
+        bkPickBar: function(d) {
+            var cur = this.bkRange || {};
+            if (cur.key === d.key) {
+                this.bkRange = { from: '', to: '', label: '', key: '' };
+                this.bkApplyFilter();
+                return;
+            }
+            var rng = this._bkRangeOf(d.key);
+            this.bkRange = { from: rng.from, to: rng.to,
+                             label: d.label || d.key, key: d.key };
+            this.bkApplyFilter();
+        },
+        // 把分布图的 key 按当前粒度展开成 [YYMMDD, YYMMDD]（含端点）
+        _bkRangeOf: function(key) {
+            var k = String(key || '');
+            if (!/^\d{6}(\d{2})?$/.test(k)) return { from: k, to: k };
+            var yy = parseInt(k.slice(0, 2), 10), mm = parseInt(k.slice(2, 4), 10);
+            var dd = k.length >= 6 ? parseInt(k.slice(4, 6), 10) : 1;
+            var base = new Date(2000 + yy, mm - 1, dd);
+            var fmt = function(dt) {
+                return String(dt.getFullYear() % 100).padStart(2, '0')
+                     + String(dt.getMonth() + 1).padStart(2, '0')
+                     + String(dt.getDate()).padStart(2, '0');
+            };
+            if (this.bkGran === 'month') {
+                // 当月最后一天：下月 0 日
+                return { from: fmt(base), to: fmt(new Date(2000 + yy, mm, 0)) };
+            }
+            if (this.bkGran === 'week') {
+                return { from: fmt(base), to: fmt(new Date(base.getTime() + 6 * 86400000)) };
+            }
+            return { from: fmt(base), to: fmt(base) };
+        },
+        bkClearRange: function() {
+            this.bkRange = { from: '', to: '', label: '', key: '' };
+            this.bkApplyFilter();
+        },
+        // 分布图日粒度窗口重新加载（60 / 120 / 全部）
+        bkSetDistDays: function(days) {
+            this.bkDistDays = days;
+            this.loadBackupOverview();
         },
         loadBackupConfig: function() {
             var self = this;
@@ -1994,6 +2098,7 @@ new Vue({
                 pending: '待备份', syncing: '上传中', live_syncing: '在线同步',
                 done: '已备份', partial: '部分失败', error: '失败',
                 pending_delete: '待删除', backed_up: '已清理',
+                missing: '本地缺失',
             };
             return m[s] || s;
         },
@@ -2002,6 +2107,7 @@ new Vue({
                 pending: 'badge-warn', syncing: 'badge-fmt', live_syncing: 'badge-fmt',
                 done: 'badge-active', partial: 'badge-warn', error: 'badge-missing',
                 pending_delete: 'badge-warn', backed_up: 'badge-history',
+                missing: 'badge-missing',
             };
             return m[s] || 'badge-history';
         },
@@ -2017,6 +2123,7 @@ new Vue({
             var m = {
                 upload_done: '上传完成', verify_ok: '校验通过', verify_fail: '校验失败',
                 deleted: '已清理', upload_fail: '上传失败', delete_fail: '清理失败',
+                delete_retry: '清理重试', missing: '本地缺失',
                 enqueue: '已入队',
             };
             if (l.event && m[l.event]) return m[l.event];
@@ -2027,6 +2134,7 @@ new Vue({
                 upload_done: 'badge-active', verify_ok: 'badge-active',
                 deleted: 'badge-active', verify_fail: 'badge-missing',
                 upload_fail: 'badge-missing', delete_fail: 'badge-missing',
+                delete_retry: 'badge-warn', missing: 'badge-missing',
                 enqueue: 'badge-fmt',
             };
             if (l.event && m[l.event]) return m[l.event];

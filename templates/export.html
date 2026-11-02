@@ -678,8 +678,9 @@ new Vue({
         selectedMtimes: [],
         forceExport: false,
         // 跨小时节点聚合：把同一条对话在各小时目录里的段合成一条产物。
-        // 默认关——产物结构会变（一条记录可能引用多个源目录），下游需确认兼容。
-        mergeHours: false,
+        // 默认开——数据按小时分目录存放，不聚合会把同一段对话拆成多条产物。
+        // 处理器不支持 file_dirs / 只选了一个目录时后端自动回退，不报错。
+        mergeHours: true,
         exportMode: 'reformat',
         taskWorkers: 8,
         taskDirWorkers: 8,
@@ -1205,7 +1206,8 @@ new Vue({
             this.showModal = true;
             this.modalKey = null;
             this.forceExport = false;
-            this.mergeHours = false;
+            // 跨小时聚合默认开（见 data.mergeHours 的说明）
+            this.mergeHours = true;
             // 默认方式：配置里第一个产合并文件的模式（无则第一个）
             this.exportMode = this._defaultExportMode();
             this.taskWorkers = 8;

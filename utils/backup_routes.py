@@ -686,14 +686,21 @@ def _run_sync_for_dir(dir_path: str, logs_all: Path, obs_base: str, workers: int
         script = str((Path(__file__).resolve().parent.parent / script).resolve())
 
     try:
-        # 本地目录不存在：已被清理，标记为 backed_up 跳过上传
+        # 本地目录不存在。必须**收敛成终态**，不能只写日志就 return ——
+        # 早先这里写了日志但不改状态，叶子仍是 pending，流水线下一轮又选中它，
+        # 形成无限空转（实测 3 天里同一句日志写了 266 万行、21 行/秒）。
         if not Path(real_dir).is_dir():
             dir_info = get_dir(dir_path)
             if dir_info and dir_info.get("obs_path"):
+                # 有 OBS 记录 → 内容确实在 OBS 上，本地是删掉了，收敛为 backed_up
                 update_sync_status(dir_path, "backed_up", obs_path=dir_info["obs_path"])
                 append_log(dir_path, "本地目录不存在，已标记为已备份（跳过上传）")
             else:
-                append_log(dir_path, "本地目录不存在且无 OBS 路径，跳过", level="error")
+                # 从未上传且本地已消失 → 数据不可恢复，标终态不再重试
+                update_sync_status(dir_path, "missing",
+                                   error_msg="本地目录不存在且无 OBS 路径")
+                append_log(dir_path, "本地目录不存在且无 OBS 路径，标记为本地缺失",
+                           level="error", event="missing")
             return
 
         # synced=1：之前已成功同步过（**已备份**），跳过重复上传。
@@ -1044,6 +1051,35 @@ def resolve_real_backup_dir(dir_path: str, logs_dir) -> Path:
     return cand  # 兜底：返回 logs_all 下的路径（可能不存在）
 
 
+def _mtime_in_range(mtime_tag, from_key: str = "", to_key: str = "") -> bool:
+    """mtime_tag 是否落在 [from_key, to_key] 内（按数据日期，含端点）。
+
+    mtime_tag 有两种形态：
+      - native 来源：`26080320`（YYMMDDHH）
+      - newapi 来源：`260803/26080320`（天/小时，带斜杠）
+    所以不能直接做字符串比较 —— 先归一化成 YYMMDDHH 再比。
+    解析不出时间键时返回 True（放行），避免过滤把异常行整个吃掉。
+    """
+    from utils.log_scan import scan_time_key
+
+    if not from_key and not to_key:
+        return True
+    key = scan_time_key(mtime_tag or "")
+    if not key:
+        return True
+    if from_key and key < from_key:
+        return False
+    if to_key:
+        # to_key 是「包含」语义：可能只给了 YYMMDD，此时同一天的所有小时
+        # 都要包含进来，所以按前缀比较；给了完整的 YYMMDDHH 就精确比。
+        if len(to_key) < len(key):
+            if not key.startswith(to_key):
+                return False
+        elif key > to_key:
+            return False
+    return True
+
+
 def select_archive_candidates(active_dir_path: str = "", envs=None,
                               older_than: str = "", limit: int = 20,
                               busy: set = None):
@@ -1075,7 +1111,7 @@ def select_archive_candidates(active_dir_path: str = "", envs=None,
             skipped.append({"dir_path": dp, "reason": "本地不存在"})
             continue
         st = d.get("status") or "pending"
-        if st in ("done", "pending_delete", "backed_up", "live_syncing"):
+        if st in ("done", "pending_delete", "backed_up", "live_syncing", "missing"):
             skipped.append({"dir_path": dp, "reason": f"状态 {st}"})
             continue
         if dp in queue_paths:
@@ -1311,7 +1347,7 @@ def select_pipeline_next(auto_delete: bool, retain_days: int,
         st = (d.get("status") or "pending")
         if not d.get("has_local"):
             continue
-        if st in ("pending_delete", "backed_up", "syncing", "live_syncing"):
+        if st in ("pending_delete", "backed_up", "syncing", "live_syncing", "missing"):
             continue
         if dp in queued or dp in clearing:
             continue
@@ -1335,6 +1371,29 @@ def select_pipeline_next(auto_delete: bool, retain_days: int,
             continue                           # 太新，不自动动
         if _recent_event(dp, ("upload_fail",), VERIFY_RETRY_BACKOFF_SEC):
             continue                           # 刚上传失败过，先放一边别反复撞墙
+        # **目录必须真实存在**。DB 里 has_local 只是登记值，源根目录被删掉后
+        # 它不会自动更新；只看状态会让流水线反复挑中一个不存在的目录，
+        # 而 _run_sync_for_dir 发现缺失后不改状态 → 无限空转（实测 3 天）。
+        # 这里就地收敛成终态，然后 continue 看下一个候选。
+        try:
+            real = resolve_real_backup_dir(dp, svc_dir)
+        except Exception:  # noqa: BLE001
+            logger.exception("resolve failed for %s", dp)
+            continue
+        if not real.is_dir():
+            if d.get("obs_path"):
+                # 有 OBS 记录 → 内容在 OBS 上，本地已删，收敛为已备份
+                mark_backed_up(dp)
+                set_uploaded(dp)
+                set_deleted(dp)
+                append_log(dp, "本地目录不存在但已有 OBS 路径，标记为已备份",
+                           event="deleted")
+            else:
+                update_sync_status(dp, "missing",
+                                   error_msg="本地目录不存在且无 OBS 路径")
+                append_log(dp, "本地目录不存在且无 OBS 路径，标记为本地缺失",
+                           level="error", event="missing")
+            continue                           # 换下一个，不返回
         return {"action": "backup", "dir_path": dp, "time": key,
                 "obs_path": d.get("obs_path") or "", "reason": f"状态 {st}"}
 
@@ -1552,6 +1611,14 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         size_raw = request.query_params.get("page_size", "")
         status_f = request.query_params.get("status", "")
         order_raw = (request.query_params.get("order", "") or "").lower()
+        # 时间窗口过滤：点分布图的柱子时带过来，只显示该区间内的叶子。
+        # 键与 mtime_tag 同构（YYMMDD…），字符串比较即可，不需要解析。
+        from_raw = (request.query_params.get("from") or "").strip()
+        to_raw = (request.query_params.get("to") or "").strip()
+        # 默认隐藏「已清理」：那些本地已删、OBS 归档完成，放进工作队列只会
+        # 稀释真正要看的内容。显式传 status=backed_up 时才显示。
+        hide_cleaned = (request.query_params.get("hide_cleaned", "1") not in
+                        ("0", "false", "no"))
         paged = bool(page_raw or size_raw)
         _newapi_root = _extra_root_for_env(env_name) if env_name else None
 
@@ -1629,8 +1696,31 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         # ── 分页模式（备份管理 Tab 的队列表格用）──────────────────────────
         # 排序键用 mtime_tag（YYMMDDHH 定长，字典序即时间序）；同一时间可能
         # 跨多个来源，再按 dir_path 兜底保证跨页顺序稳定、不重不漏。
-        if status_f:
+        #
+        # `uploading` / `clearing` 是两个**运行时状态**，不是 backup_dirs.status
+        # 的值 —— 它们分别来自 backup_queue 和 backup_clear_queue 的 running 行。
+        # 前端下拉框里选了它们时按这里过滤，而不是按 status 精确匹配。
+        if status_f in ("uploading", "clearing"):
+            try:
+                if status_f == "uploading":
+                    busy = {j.get("dir_path") for j in list_queue()
+                            if j.get("state") == "running"}
+                else:
+                    busy = {j.get("dir_path") for j in list_clear_queue()
+                            if j.get("state") == "running"}
+            except Exception:  # noqa: BLE001
+                logger.exception("busy filter failed for %s", status_f)
+                busy = set()
+            merged = [e for e in merged if e.get("dir_path") in busy]
+        elif status_f:
             merged = [e for e in merged if e.get("status") == status_f]
+        elif hide_cleaned:
+            # 未指定状态时默认不列「已清理」：本地已删、归档完成的行
+            # 放进工作队列没有意义，只会把真正待处理的叶子挤到后面的页。
+            merged = [e for e in merged if e.get("status") != "backed_up"]
+        if from_raw or to_raw:
+            merged = [e for e in merged
+                      if _mtime_in_range(e.get("mtime_tag"), from_raw, to_raw)]
         desc = order_raw == "desc"
         merged.sort(key=lambda e: (e.get("mtime_tag") or "", e.get("dir_path") or ""),
                     reverse=desc)
@@ -2420,6 +2510,19 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         # 按「数据日期」聚合：{YYMMDD: {"leaves": 总数, "done": 已备份}}
         days: dict = {}
 
+        # 当前正在上传 / 正在删除的 dir_path 集合，用于把对应柱子染色。
+        # 前者来自 backup_queue 的 running，后者来自 backup_clear_queue。
+        try:
+            _busy_upload = {j.get("dir_path") for j in list_queue()
+                            if j.get("state") == "running"}
+        except Exception:  # noqa: BLE001
+            _busy_upload = set()
+        try:
+            _busy_clear = {j.get("dir_path") for j in list_clear_queue()
+                           if j.get("state") == "running"}
+        except Exception:  # noqa: BLE001
+            _busy_clear = set()
+
         for r in leaf_rows:
             lp = r.get("leaf_path") or ""
             rid = r.get("root_id") or ""
@@ -2455,11 +2558,19 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                 dk_day = day_key(t)          # YYMMDD
                 cell = days.get(dk_day)
                 if cell is None:
-                    cell = days[dk_day] = {"leaves": 0, "done": 0}
+                    cell = days[dk_day] = {"leaves": 0, "done": 0, "uploading": 0,
+                                           "clearing": 0}
                 cell["leaves"] += 1
                 # 已备份口径与 totals 一致：有 OBS 内容，或已归档（本地已删）
                 if (b and b.get("has_obs")) or r.get("archived"):
                     cell["done"] += 1
+                # 「正在上传 / 正在删除」用于把对应柱子染成绿色/橙色，
+                # 让页面上能直接看出流水线此刻在动哪天的数据。
+                bdp = (b or {}).get("dir_path") or ""
+                if bdp and bdp in _busy_upload:
+                    cell["uploading"] += 1
+                if bdp and bdp in _busy_clear:
+                    cell["clearing"] += 1
 
         # 按「数据日期」分布，支持 天 / 周 / 月 三种粒度。
         # 用数据日期（目录名 YYMMDDHH）而不是备份时间 —— 这张图回答的是
@@ -2479,8 +2590,15 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         day_points, week_points, month_points = [], [], []
         if days:
             keys = sorted(days)
-            # 日：最近 60 个有数据的日子
-            for k in keys[-60:]:
+            # 日粒度窗口：默认最近 60 个有数据的日子，可用 ?dist_days 放大到全部。
+            # 早先写死 [-60:]，实测有 115 个有数据的天（260608~261102），
+            # 6-7 月的柱子被截掉，页面上完全看不到。
+            try:
+                _dist_days = int(request.query_params.get("dist_days") or 60)
+            except (TypeError, ValueError):
+                _dist_days = 60
+            _day_keys = keys if _dist_days <= 0 else keys[-max(1, _dist_days):]
+            for k in _day_keys:
                 cell = days[k]
                 pct = round(cell["done"] * 100 / cell["leaves"], 1) if cell["leaves"] else 0
                 day_points.append({
@@ -2490,6 +2608,10 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                     "leaves": cell["leaves"],
                     "done": cell["done"],
                     "pct": pct,
+                    # 该时间桶里是否有叶子正在上传 / 正在删除 —— 前端据此
+                    # 把柱子染成绿色（上传中）/ 橙色（删除中）
+                    "uploading": cell.get("uploading", 0),
+                    "clearing": cell.get("clearing", 0),
                 })
 
             # 周 / 月：把日粒度 roll up
@@ -2508,9 +2630,12 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                     gk = _week_key(k) if gran == "week" else k[:4] + "01"
                     c = roll.get(gk)
                     if c is None:
-                        c = roll[gk] = {"leaves": 0, "done": 0}
+                        c = roll[gk] = {"leaves": 0, "done": 0,
+                                        "uploading": 0, "clearing": 0}
                     c["leaves"] += days[k]["leaves"]
                     c["done"] += days[k]["done"]
+                    c["uploading"] += days[k].get("uploading", 0)
+                    c["clearing"] += days[k].get("clearing", 0)
                 for gk in sorted(roll)[-n_keep:]:
                     c = roll[gk]
                     target.append({
@@ -2519,6 +2644,8 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
                         "leaves": c["leaves"],
                         "done": c["done"],
                         "pct": round(c["done"] * 100 / c["leaves"], 1) if c["leaves"] else 0,
+                        "uploading": c["uploading"],
+                        "clearing": c["clearing"],
                     })
 
 
