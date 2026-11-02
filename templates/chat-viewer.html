@@ -980,9 +980,26 @@ function _syncLogDirFromSelects() {
 // URL 参数读写
 // 注意：key 是完整 API Key（服务端按 api_key = ? 精确匹配，掩码值无法恢复筛选）。
 // 该页会加载 jsdelivr CDN 资源，带 key 的 URL 会随 Referer 外发；仅适用于内部监控环境。
+// URL 里待恢复的会话（导出浏览模式）：resetAndLoad() 会先调 _writeUrlState()，
+// 那时 _kfSessionKey 还是空的，不能让 session 参数在这一步被抹掉。
+let _urlSessionPending = false;
+
 function _writeUrlState() {
-    if (_exportViewMode) return;
     const params = new URLSearchParams(window.location.search);
+    // 导出浏览：key / model / access-key 由外部链接给定，本页只维护 session，
+    // 不动其余参数（否则会把分享链接里的 key 写丢）。
+    if (_exportViewMode) {
+        const _esk = window._kfSessionKey || '';
+        if (_esk) {
+            params.set('session', _esk);
+            _urlSessionPending = false;   // 已经有了真实值，后续以它为准
+        } else if (!_urlSessionPending) {
+            params.delete('session');
+        }
+        const _eqs = params.toString();
+        history.replaceState(null, '', _eqs ? '?' + _eqs : window.location.pathname);
+        return;
+    }
     const root = _currentRootValue() || '';
     const hourEl = document.getElementById('hourSelect');
     const ymdh = (hourEl && hourEl.value) || '';
@@ -1588,7 +1605,9 @@ async function _loadAggFallback(min, params) {
  */
 function _autoSelectSession(sessionKey, attempt) {
     attempt = attempt || 0;
-    const MAX_ATTEMPTS = 40;      // 40 × 500ms ≈ 20s
+    // 导出浏览是流式跨叶子聚合，大 key 首屏要几十秒才收到目标会话，给更长的等待；
+    // 普通浏览页按小时目录，20s 足够。
+    const MAX_ATTEMPTS = _exportViewMode ? 240 : 40;   // 240 × 500ms ≈ 2min
     const idx = aggChains.findIndex(c => c && c.session_key === sessionKey);
     if (idx >= 0) {
         // 渲染到该条所在窗口
@@ -1690,6 +1709,10 @@ async function selectAggChain(idx, el) {
     activeItem = el;
     const chain = aggChains[idx];
     const logDir = currentLogDir();
+    // 换选中时先把旧会话标识清掉：URL 里的 session 要跟着新选中的会话走，
+    // 不能在新明细回来之前还挂着上一条。
+    window._kfSessionKey = '';
+    window._kfLeafPath = '';
 
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     // 先用列表里已有的标量把详情面板画出来（不含「关联列表」），内容与明细并行加载。
@@ -1748,7 +1771,7 @@ async function selectAggChain(idx, el) {
             // 是在渲染时读这个全局变量，赋值晚了按钮上就是空值。
             window._kfTraceList = (_tracesRes && _tracesRes.items) || [];
             window._kfChain = chain;
-            window._kfSessionKey = (_tracesRes && _tracesRes.session_key) || '';
+            window._kfSessionKey = (_tracesRes && _tracesRes.session_key) || chain.session_key || '';
             // 绝对叶子路径由后端返回（logDir 只是相对 dir_key，worker 读不到文件）
             window._kfLeafPath = (_tracesRes && _tracesRes.leaf_path) || '';
             // session_key 只有异步取回明细后才知道，此时补写一次 URL，
@@ -2915,8 +2938,17 @@ if (_exportViewMode) {
         }
         if (_mSel) _mSel.value = _exportModel;
     }
+    // 分享链接定位：URL 带 ?session=xxx 时（/export/view 与 /history 同一套参数语义），
+    // 列表加载完自动选中该会话。导出浏览是流式聚合，目标可能在后面的页里，故带重试。
+    const _ekfParams = new URLSearchParams(window.location.search);
+    const _ekfSession = _ekfParams.get('session') || '';
+    _urlSessionPending = !!_ekfSession;
     resetAndLoad();
-    const _params = new URLSearchParams(window.location.search);
+    if (_ekfSession) {
+        // 等首屏开始收集后再找：aggChains 为空时 _autoSelectSession 只会空转轮询。
+        _autoSelectSession(_ekfSession);
+    }
+    const _params = _ekfParams;
     const _urlFile = _params.get('file');
     if (_urlFile) {
         setTimeout(async () => {

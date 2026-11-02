@@ -161,6 +161,7 @@ def _stats_roots():
     """统计聚合的所有根目录：活跃 env_dir + 配置的历史路径。"""
     return get_stats_roots(ENV_DIR)
 
+
 SERVICE_LOG_DIR = get_service_log_dir()
 
 
@@ -1785,8 +1786,48 @@ async def export_view_page(request: Request, key: str = "", model: str = "",
     )
 
 
+@app.get("/export/mode_list")
+def export_mode_list(access_key: str = Query(default="", alias="access-key")):
+    """可用的导出模式清单（只含 public=true 的模式）。
+
+    只管模式定义，不含任何 host / 来源信息（那是 /export/proxy_list 的事）。
+    """
+    if not verify_access_key(access_key):
+        return JSONResponse({"detail": "Invalid access-key"}, status_code=403)
+    from utils.export_public import mode_list
+
+    return JSONResponse({"modes": mode_list()})
+
+
+@app.get("/export/proxy_list")
+def export_proxy_list(access_key: str = Query(default="", alias="access-key")):
+    """当前管理的 IP → 来源名 绑定清单（纯展示，不参与过滤）。
+
+    数据源是 sources 表（「数据管理 → 来源与路径」登记的 IP 绑定），
+    所以在页面上改了 IP，这里立刻生效。
+    """
+    if not verify_access_key(access_key):
+        return JSONResponse({"detail": "Invalid access-key"}, status_code=403)
+    from utils.export_public import proxy_list
+
+    return JSONResponse({"proxies": proxy_list()})
+
+
+def _request_host(request=None, fallback: str = "") -> str:
+    """取请求主机：优先 X-Forwarded-Host / Host 头，其次显式传入的 host 参数。"""
+    try:
+        if request is not None:
+            hdr = (request.headers.get("x-forwarded-host")
+                   or request.headers.get("host") or "")
+            if hdr:
+                return hdr.split(",")[0].strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return (fallback or "").strip()
+
+
 @app.get("/export/view/api/aggregate")
-def export_view_api_aggregate(key: str = "", model: str = "", min_messages: int = 1,
+def export_view_api_aggregate(request: Request, key: str = "", model: str = "", min_messages: int = 1,
                               offset: int = 0, limit: int = 50, refresh: bool = False,
                               search: str = "", q1search: str = "",
                               access_key: str = Query(default="", alias="access-key")):
@@ -1799,7 +1840,7 @@ def export_view_api_aggregate(key: str = "", model: str = "", min_messages: int 
 
 
 @app.get("/export/view/api/aggregate/stream/start")
-def export_view_api_aggregate_stream_start(key: str = "", model: str = "", min_messages: int = 1,
+def export_view_api_aggregate_stream_start(request: Request, key: str = "", model: str = "", min_messages: int = 1,
                                            refresh: bool = False,
                                            access_key: str = Query(default="", alias="access-key")):
     """开启聚合流式任务：后台逐叶收集，前端轮询 /aggregate/stream/{task_id} 拿增量。"""
@@ -1828,7 +1869,7 @@ def export_view_api_aggregate_stream_poll(task_id: str,
 
 
 @app.get("/export/view/api/list")
-def export_view_api_list(key: str = "", model: str = "", min_messages: int = 1,
+def export_view_api_list(request: Request, key: str = "", model: str = "", min_messages: int = 1,
                          offset: int = 0, limit: int = 50, refresh: bool = False,
                          search: str = "", q1search: str = "",
                          access_key: str = Query(default="", alias="access-key")):
@@ -1849,7 +1890,7 @@ def export_view_api_dirs(key: str = "", access_key: str = Query(default="", alia
 
 
 @app.get("/export/view/api/file")
-def export_view_api_file(key: str = "", filename: str = "", log_dir: str = "",
+def export_view_api_file(request: Request, key: str = "", filename: str = "", log_dir: str = "",
                          access_key: str = Query(default="", alias="access-key")):
     err, resolved_key = _check_public_view(access_key, key)
     if err:
@@ -1865,7 +1906,7 @@ def export_view_api_file(key: str = "", filename: str = "", log_dir: str = "",
 
 
 @app.get("/export/view/api/session-traces")
-def export_view_api_session_traces(key: str = "", filename: str = "", chain_lookup: str = "",
+def export_view_api_session_traces(request: Request, key: str = "", filename: str = "", chain_lookup: str = "",
                                    access_key: str = Query(default="", alias="access-key")):
     """按会话取 trace 明细（「关联列表」）。列表接口只回 file_count，点开才拉明细。
 
@@ -1912,7 +1953,7 @@ async def export_view_api_session_keyframes_analyze(request: Request, key: str =
 
 
 @app.get("/export/view/api/file/download")
-def export_view_api_file_download(key: str = "", filename: str = "", log_dir: str = "",
+def export_view_api_file_download(request: Request, key: str = "", filename: str = "", log_dir: str = "",
                                   access_key: str = Query(default="", alias="access-key")):
     err, resolved_key = _check_public_view(access_key, key)
     if err:
@@ -1925,7 +1966,7 @@ def export_view_api_file_download(key: str = "", filename: str = "", log_dir: st
 
 
 @app.get("/export/view/api/file/raw")
-def export_view_api_file_raw(key: str = "", filename: str = "", log_dir: str = "",
+def export_view_api_file_raw(request: Request, key: str = "", filename: str = "", log_dir: str = "",
                              access_key: str = Query(default="", alias="access-key")):
     err, resolved_key = _check_public_view(access_key, key)
     if err:

@@ -462,6 +462,13 @@
                     placeholder="如 new-api数据" @keyup.enter="addPath">
             </div>
             <div class="modal-field">
+                <label>IP（可选，仅展示）</label>
+                <input type="text" class="input input-sm mono" v-model="newIp"
+                    placeholder="115.33.106.42（多个用逗号分隔）" @keyup.enter="addPath">
+                <div class="hint" style="margin-top:4px;">只记录这台机器对应的对外 IP，用于
+                    <span class="mono">/export/proxy_list</span> 查询；不影响数据范围，也不做任何限制。</div>
+            </div>
+            <div class="modal-field">
                 <label>层级模板（可选，一行一个；空则按格式默认）</label>
                 <textarea class="input input-sm mono" v-model="newTemplates" rows="3"
                     placeholder="占位符：{日6}=6位数字 {时8}=8位数字 {数N}=N位数字，字面段原样匹配。&#10;例：details/{日6}/{时8}&#10;proxy-004 多布局可再加一行 details/details/{日6}/{时8}"></textarea>
@@ -489,6 +496,28 @@
             <div class="modal-actions">
                 <button class="btn btn-outline btn-sm" @click="closeRename">取消</button>
                 <button class="btn btn-primary btn-sm" @click="submitRename" :disabled="editing">{{ editing ? '保存中…' : '保存' }}</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 改 IP 弹窗 -->
+    <div class="modal-overlay" v-if="showIp" @click.self="closeIp">
+        <div class="modal-box">
+            <h6>IP 绑定</h6>
+            <div class="modal-field">
+                <label>路径</label>
+                <input type="text" class="input input-sm mono" :value="editPath" disabled>
+            </div>
+            <div class="modal-field">
+                <label>IP（多个用逗号分隔；留空即解除绑定）</label>
+                <input type="text" class="input input-sm mono" v-model="editIp"
+                    placeholder="115.33.106.42" @keyup.enter="submitIp">
+                <div class="hint" style="margin-top:4px;">仅用于展示与
+                    <span class="mono">/export/proxy_list</span> 查询，不影响任何数据范围。</div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline btn-sm" @click="closeIp">取消</button>
+                <button class="btn btn-primary btn-sm" @click="submitIp" :disabled="editing">{{ editing ? '保存中…' : '保存' }}</button>
             </div>
         </div>
     </div>
@@ -534,12 +563,16 @@
                 <tr>
                     <th>名称</th>
                     <th>标识</th>
+                    <th>IP</th>
                     <th>路径</th>
                     <th>状态</th>
                     <th>格式</th>
                     <th>层级模板</th>
                     <th class="col-center">节点数</th>
                     <th class="col-center">Index节点数</th>
+                    <th class="col-center">备份叶子数</th>
+                    <th class="col-center">清理叶子数</th>
+                    <th class="col-center">本地叶子数</th>
                     <th class="col-center">构建状态</th>
                     <th class="text-center" v-if="withSize">大小</th>
                     <th class="col-center">操作</th>
@@ -550,6 +583,11 @@
                 <tr :key="r.path">
                     <td><span class="badge badge-fmt">{{ r.name || 'default' }}</span></td>
                     <td class="mono">{{ r.root_id || '-' }}</td>
+                    <td class="mono" style="font-size:.78rem; white-space:nowrap;"
+                        :title="(r.ip && r.ip.length) ? r.ip.join('、') : '未绑定 IP'">
+                        <span v-if="r.ip && r.ip.length">{{ r.ip.join('、') }}</span>
+                        <span v-else style="color:var(--muted-foreground);">—</span>
+                    </td>
                     <td class="mono path-cell">
                         <span class="path-text" :class="{ expanded: expanded[r.path] }"
                             :title="r.path" @click="togglePath(r.path)">{{ r.path }}</span>
@@ -586,6 +624,24 @@
                         </template>
                         <template v-else>—</template>
                     </td>
+                    <!-- 备份维度：内容已上传 OBS 的叶子数（含已清理） -->
+                    <td class="col-center" :title="'内容已上传到 OBS 的叶子数（含已清理的）'"
+                        style="font-size:.82rem;">
+                        <template v-if="r.backed_count">{{ r.backed_count }}</template>
+                        <span v-else style="color:var(--muted-foreground);">—</span>
+                    </td>
+                    <!-- 清理维度：本地目录已删除的叶子数 -->
+                    <td class="col-center" :title="'本地目录已删除的叶子数'"
+                        style="font-size:.82rem;">
+                        <template v-if="r.cleaned_count">{{ r.cleaned_count }}</template>
+                        <span v-else style="color:var(--muted-foreground);">—</span>
+                    </td>
+                    <!-- 本地维度：本地目录仍存在的叶子数 -->
+                    <td class="col-center" :title="'本地目录仍存在的叶子数'"
+                        style="font-size:.82rem;">
+                        <template v-if="r.local_count">{{ r.local_count }}</template>
+                        <span v-else style="color:var(--muted-foreground);">—</span>
+                    </td>
                     <td class="col-center">
                         <span v-if="r.build_status === 'building'" class="building-blink" style="color:var(--info);">⟳ 正在进行</span>
                         <span v-else-if="r.build_status === 'queued'" style="color:#999;">排队</span>
@@ -594,12 +650,18 @@
                     <td class="text-center" v-if="withSize">{{ r.size || '-' }}</td>
                     <td class="col-center">
                         <div style="display:inline-flex; justify-content:center; align-items:center; gap:4px;">
+                        <!-- 同步按钮：不可同步时仍然显示但置灰，并把原因放进 tooltip。
+                             此前是直接 v-if 隐藏，导致「为什么这个源没有同步」无法解释。 -->
                         <button class="btn btn-outline btn-sm"
-                            v-if="r.exists && (r.format === 'newapi' || r.format === 'native')"
-                            @click="syncNodes(r.path)" :disabled="syncing[r.path]"
-                            title="扫描该源的小时目录，把节点清单写入 log_dir.db（不触发回填；本项目源同步即已 index）">
+                            v-if="r.exists"
+                            @click="syncNodes(r.path)"
+                            :disabled="syncing[r.path] || !canSync(r)"
+                            :style="canSync(r) ? '' : 'opacity:.45; cursor:not-allowed;'"
+                            :title="canSync(r) ? '扫描该源的小时目录，把节点清单写入 log_dir.db（不触发回填；本项目源同步即已 index）' : r.sync_hint">
                             {{ syncing[r.path] ? '同步中…' : '同步' }}
                         </button>
+                        <span v-else style="color:var(--muted-foreground); font-size:.8rem;"
+                              :title="r.sync_hint">—</span>
                         <div class="dropdown" v-if="hasMore(r)">
                             <button class="btn btn-outline btn-sm" @click="toggleMenu(r.path)">更多 ▾</button>
                             <div class="dropdown-menu" v-if="openMenu === r.path">
@@ -613,6 +675,7 @@
                                 </template>
                                 <div class="divider" v-if="(r.exists && (r.format === 'newapi' || r.format === 'native')) && !r.active"></div>
                                 <button v-if="!r.active" @click="menuAction(r.path, 'rename')">改名</button>
+                                <button @click="menuAction(r.path, 'ip')">改 IP</button>
                                 <button v-if="!r.active && r.exists" @click="menuAction(r.path, 'templates')">编辑模板</button>
                                 <button class="danger" v-if="!r.active" @click="menuAction(r.path, 'remove')">删除</button>
                             </div>
@@ -622,7 +685,7 @@
                     </td>
                 </tr>
                 <tr v-if="leavesOpen[r.path]" :key="r.path + '-leaves'">
-                    <td :colspan="withSize ? 10 : 9" style="background:var(--muted, #f7f7f8); padding:12px 16px;">
+                    <td :colspan="withSize ? 15 : 14" style="background:var(--muted, #f7f7f8); padding:12px 16px;">
                         <div v-if="leaves[r.path] && leaves[r.path].loading" style="color:var(--muted-foreground); font-size:.82rem;">加载中…</div>
                         <div v-else-if="leaves[r.path] && !leaves[r.path].synced" style="color:var(--muted-foreground); font-size:.82rem;">
                             尚未同步到索引库。请先点该行「同步」，再查看叶子详情。
@@ -653,7 +716,7 @@
                 </tr>
                 </template>
                 <tr v-if="rows.length === 0">
-                    <td :colspan="withSize ? 10 : 9" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
+                    <td :colspan="withSize ? 15 : 14" style="text-align:center; color:var(--muted-foreground); padding:24px;">暂无数据</td>
                 </tr>
             </tbody>
         </table>
@@ -1296,9 +1359,12 @@ new Vue({
         newPath: '',
         newName: '',
         newTemplates: '',
+        newIp: '',
         showAdd: false,
         showRename: false,
         showTemplates: false,
+        showIp: false,
+        editIp: '',
         editPath: '',
         editName: '',
         editTemplatesArr: [],
@@ -1574,6 +1640,12 @@ new Vue({
             this.$set(this.expanded, path, !this.expanded[path]);
         },
         hasSync: function(r) {
+            return this.canSync(r);
+        },
+        // 是否支持「同步」。detect_format() 只认 index.jsonl，所以叶子是
+        // index.db 格式的源会被判成 empty 而不可同步；此时按钮仍显示，
+        // 但置灰并用 r.sync_hint 说明原因（见模板里的 tooltip）。
+        canSync: function(r) {
             return !!(r.exists && (r.format === 'newapi' || r.format === 'native'));
         },
         hasMore: function(r) {
@@ -1594,6 +1666,7 @@ new Vue({
             else if (action === 'leaves') this.toggleLeaves(path);
             else if (action === 'buildlog') this.toggleBuildLog(path);
             else if (action === 'rename') this.openRename(path);
+            else if (action === 'ip') this.openIp(path);
             else if (action === 'templates') this.openTemplates(path);
         },
         _rowOf: function(path) {
@@ -1774,6 +1847,7 @@ new Vue({
             this.newPath = '';
             this.newName = '';
             this.newTemplates = '';
+            this.newIp = '';
             this.showAdd = true;
         },
         closeAdd: function() {
@@ -1786,15 +1860,39 @@ new Vue({
             fetch('/api/logs-admin/add', {
                 method: 'POST',
                 headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: p, name: (this.newName || '').trim(), templates: (this.newTemplates || '').trim() })
+                body: JSON.stringify({ path: p, name: (this.newName || '').trim(), templates: (this.newTemplates || '').trim(), ip: (this.newIp || '').trim() })
             })
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     this.adding = false;
                     this.showMsg(data.msg, data.ok);
-                    if (data.ok) { this.newPath = ''; this.newName = ''; this.newTemplates = ''; this.showAdd = false; this.load(); }
+                    if (data.ok) { this.newPath = ''; this.newName = ''; this.newTemplates = ''; this.newIp = ''; this.showAdd = false; this.load(); }
                 }.bind(this))
                 .catch(function() { this.adding = false; this.showMsg('请求失败', false); }.bind(this));
+        },
+        openIp: function(path) {
+            var row = this._rowOf(path);
+            this.editPath = path;
+            this.editIp = row && row.ip ? row.ip.join(',') : '';
+            this.showIp = true;
+        },
+        closeIp: function() {
+            this.showIp = false;
+        },
+        submitIp: function() {
+            this.editing = true;
+            fetch('/api/logs-admin/set-ip', {
+                method: 'POST',
+                headers: { 'x-requested-with': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: this.editPath, ip: (this.editIp || '').trim() })
+            })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    this.editing = false;
+                    this.showMsg(data.msg, data.ok);
+                    if (data.ok) { this.showIp = false; this.load(); }
+                }.bind(this))
+                .catch(function() { this.editing = false; this.showMsg('请求失败', false); }.bind(this));
         },
         removePath: function(path) {
             if (!confirm('确认移除此路径？只从统计中排除，不会删除磁盘文件。\n\n' + path)) return;

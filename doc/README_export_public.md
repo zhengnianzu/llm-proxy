@@ -14,6 +14,8 @@
 | `/export/view/api/{aggregate,list,file,file/download,file/raw,dirs}` | GET | 浏览页后端数据接口 |
 | `/export/submit` | GET | 正式导出提交（建真实 export_records 任务，可选导出类型 mode） |
 | `/export/status` | GET | 按 export_id 查询导出状态 |
+| `/export/mode_list` | GET | **可用的导出模式清单**（只含 `public: true`），见下文 |
+| `/export/proxy_list` | GET | **当前管理的 IP → 来源名 绑定**（纯展示，不参与过滤），见下文 |
 | `/keys/export/browse` | GET | **内部**鉴权的 key 选择落地页（侧栏「导出浏览」入口） |
 
 URL 形态（示例）：
@@ -37,7 +39,146 @@ http://<host>:<port>/export/status?export_id=<id>&access-key=<ak>
 - `/export/submit`：`utils/export_routes.py` 的 `_check_public_export(key, access_key)`。
 - `/export/status`：`export_routes.py` 内联校验（仅 `access-key`，URL 带 `key` 时再校验归属一致）。
 
-## key 匹配规则（`resolve_export_key`）
+## `/export/mode_list` 与 `/export/proxy_list`
+
+两个**互相独立**的查询端点，各管一件事：
+
+| 端点 | 返回 | 数据源 |
+|------|------|--------|
+| `/export/mode_list` | 可用的**导出模式**清单 | `settings/export_modes.yaml`（`public: true` 的那些） |
+| `/export/proxy_list` | 当前管理的 **IP → 来源名** 绑定 | `log_dir.db` 的 `sources.ip` 列 |
+
+两者都只需要 `access-key`，都**不参与任何数据过滤**。
+
+### 调用示例
+
+先取一个 access-key（`.env` 里的 `ACCESS_KEY`）：
+
+```bash
+AK=$(grep -E '^ACCESS_KEY=' /root/llm-proxy-main/.env | cut -d= -f2-)
+BASE=http://127.0.0.1:8084
+```
+
+**导出模式清单** — 直接看全部：
+
+```bash
+curl -s "$BASE/export/mode_list?access-key=$AK" | python3 -m json.tool
+```
+
+只列 id / label，适合灌进脚本下拉框：
+
+```bash
+curl -s "$BASE/export/mode_list?access-key=$AK" \
+  | python3 -c 'import sys,json;[print("%-20s %s"%(m["id"],m["label"])) for m in json.load(sys.stdin)["modes"]]'
+```
+
+```
+export               导出原始文件（三元组，不分析）
+reformat             合并导出（三元组合并成单 JSON，不质检）
+reconstruct          重构导出（hermes 聚合去重+回填 reasoning，仅 new-api）
+full_reformat        全量导出（session 全部 trace 文件合并，仅单目录，不质检）
+jiuwen_reformat      九问导出（reasoning_content 回填重构）
+jiuwenswarm_dev      Jiuwenswarm 开发导出（压缩分段 + 权重 + reasoning 回填）
+jiuwenswarm_xiaoyi   小艺导出（压缩分段 + 权重 + reasoning 回填）
+key_frame_export     关键帧导出（上下文连续性分段，原始 JSON）
+eval                 质检模式（reformat+分析，出报告）
+```
+
+**IP → 来源名 绑定清单**：
+
+```bash
+curl -s "$BASE/export/proxy_list?access-key=$AK" | python3 -m json.tool
+```
+
+压成「来源 → IP」两列方便核对：
+
+```bash
+curl -s "$BASE/export/proxy_list?access-key=$AK" \
+  | python3 -c 'import sys,json;[print("%-20s %s"%(p["source"],",".join(p["ips"]))) for p in json.load(sys.stdin)["proxies"]]'
+```
+
+```
+jumper               115.120.48.151
+jumper-001           115.120.62.121
+jumper-002           115.33.106.42
+jumper-003-latest    115.120.113.66
+proxy-004-latest     115.33.106.57
+proxy45              115.120.127.45
+proxy8               115.120.50.8
+```
+
+反查某个 IP 属于哪个来源（例如排查「这个入口该看哪台机器的日志」）：
+
+```bash
+IP=115.33.106.42
+curl -s "$BASE/export/proxy_list?access-key=$AK" \
+  | python3 -c 'import sys,json,os;ip=sys.argv[1];[print(p["source"],p["root_path"]) for p in json.load(sys.stdin)["proxies"] if ip in p["ips"]]' "$IP"
+```
+
+注意：`IP` 要作为**参数**传给 `python3`（或先 `export IP`），不能写成 `IP=... curl ... | python3`——
+那种写法里变量只作用于 `curl`，管道另一端的 python 读不到。
+
+从别的机器访问，把 `127.0.0.1` 换成对外 IP 即可：
+`http://115.33.106.42:8084/export/proxy_list?access-key=$AK`
+
+access-key 错或缺失 → `403 {"detail":"Invalid access-key"}`。
+
+### `/export/mode_list`
+
+```json
+{ "modes": [ { "id": "export", "label": "…", "public": true, ... }, ... ] }
+```
+
+- `modes` 直接来自 `settings/export_modes.yaml` 的 `to_public_list()`，只保留 `public: true` 的，
+  **不维护第二份模式定义**。要新增/隐藏导出模式，只改 `settings/export_modes.yaml`，
+  改完按 mtime 热生效，无需重启。
+- 每个模式含：`id` / `label` / `mode_label` / `obs_sub` / `pipeline` / `reformat` /
+  `max_mtimes` / `formats` / `public`。
+- 不含 host / 来源信息——那是下面 `/export/proxy_list` 的事。
+
+### `/export/proxy_list`
+
+```json
+{ "proxies": [
+  { "source": "jumper-003-latest", "root_id": "97756828",
+    "root_path": "/mnt/.../harness/jumper-003/data/newapi/logs/details",
+    "ips": ["115.120.113.66"] }
+] }
+```
+
+- 数据源是 `sources` 表（「数据管理 → 来源与路径」登记的 IP 绑定），
+  **页面上改了 IP，这里立刻生效**——单一真相源。
+- 只列绑了 IP 的来源；一个来源可以绑多个 IP（逗号分隔）。
+- **纯展示**：不参与 `/export/view` 的数据查询、不参与鉴权、不影响任何数据范围。
+
+### IP 绑定怎么登记
+
+「数据管理 → 来源与路径」：
+
+- **新增日志路径**弹窗里的 `IP（可选，仅展示）` 字段；
+- 已有来源在行末操作菜单里选 **「改 IP」**（清空即解除绑定）。
+
+底层是 `sources.ip`（逗号分隔串），写入走 `POST /api/logs-admin/add`（`ip` 字段）
+与 `POST /api/logs-admin/set-ip`。**不做格式校验、不做重名检查**——它只是展示用。
+
+### `settings/export_public.yaml` 的现状
+
+这张表已降级为**一次性种子**：`init_db` 在首次给 `sources` 加 `ip` 列时，
+把它里面的 7 条 `{IP: 来源名}` 按名字匹配灌进 `sources.ip`；一旦表里有任何非空 IP，
+之后就不再读这个文件。所以改 yaml 对运行时没有影响，要改 IP 请走页面。
+
+> **为什么不再按 host 过滤数据**：曾经的做法是「按请求主机把 root 过滤到该来源再查」，
+> 已移除。`/export/view` 的数据范围完全由 `key` 决定（`_export_key_leaves` 按 key 的
+> mtime 分布定位叶子），再按 host 过滤只会做减法；而且 `access-key` 是全局唯一的，
+> 过滤挡不住任何人。实际后果是配置里任一台机器映射到没有数据的来源
+> （例如 jumper-002 只剩空目录壳），该入口的页面就 200 但 `total=0`，看起来像「打不开」。
+> 真要做数据隔离，应按 host 区分 `access-key`，而不是过滤结果集。
+
+代码：`utils/export_public.py`（`mode_list()` / `proxy_list()`）、
+`utils/logdir_store.py`（`sources.ip` 列、`set_source_ip()`、`_seed_source_ips()`）、
+`app.py` 的两个路由、`utils/logs_routes.py`（新增/改 IP 的接口）。
+
+
 
 `utils/export_routes.py:213` 把 URL 传入的 `key` 解析成**日志命名空间**里的完整 api_key。可接受三种形态：
 

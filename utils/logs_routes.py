@@ -16,6 +16,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -53,12 +54,69 @@ def _is_admin(request: Request) -> bool:
     return role == "admin"
 
 
-def _describe(src: dict, active: bool, active_env_dir: str = "") -> dict:
+def _backup_stat_by_root() -> dict:
+    """{root_id: {total, backed, cleaned, missing}} —— 纯本地 SQL，毫秒级。
+
+    backup_dirs.env_name 就是 sources.root_id，一次 GROUP BY 即可，
+    不需要逐叶 os.path.isdir()（4700 个叶子在 NFS 上要秒级）。
+    """
+    try:
+        from utils.backup_store import _conn, _lock
+        with _lock:
+            rows = _conn.execute(
+                "SELECT env_name, "
+                "       COUNT(*) AS total, "
+                "       SUM(CASE WHEN has_obs = 1 THEN 1 ELSE 0 END) AS backed, "
+                "       SUM(CASE WHEN status = 'backed_up' THEN 1 ELSE 0 END) AS cleaned, "
+                "       SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END) AS missing "
+                "FROM backup_dirs GROUP BY env_name").fetchall()
+        return {r["env_name"]: dict(r) for r in rows}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _split_ips(raw) -> list:
+    """把 sources.ip（逗号分隔串）切成去重有序的列表。"""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        items = [str(x).strip() for x in raw]
+    else:
+        items = [s.strip() for s in str(raw).replace(";", ",").split(",")]
+    return list(dict.fromkeys([s for s in items if s]))
+
+
+def _join_ips(raw) -> str:
+    """把用户输入的 IP（串或列表）归一化成逗号分隔串。不校验格式——仅展示。"""
+    return ",".join(_split_ips(raw))
+
+
+def _sync_hint(exists: bool, fmt: str) -> str:
+    """同步不可用时的原因文案（可同步时返回空串）。
+
+    detect_format() 只认 index.jsonl，所以「叶子是 index.db 格式」的源会被
+    判成 empty 而拿不到同步按钮 —— 界面必须说明原因，否则看起来像功能缺失。
+    """
+    if not exists:
+        return "目录不存在"
+    if fmt == "empty":
+        return ("该目录下未找到 index.jsonl（叶子为 index.db 格式），"
+                "不支持按本项目格式同步")
+    if fmt == "unknown":
+        return "index.jsonl 格式无法识别，无法同步"
+    return ""
+
+
+def _describe(src: dict, active: bool, active_env_dir: str = "",
+              backup_stat: Optional[dict] = None) -> dict:
     """把 sources 表一行渲染成列表页行。
 
     src: logdir_store.list_sources 返回的 dict（含 root_id/root_path/name/
-    format/templates）。DB 是「日志路径列表」的唯一数据源——
+    format/templates/ip）。DB 是「日志路径列表」的唯一数据源——
     这里不再读 YAML history。
+
+    backup_stat: {root_id: {total, backed, cleaned, missing}}，由调用方一次性算好，
+        避免每行查一次库。
     """
     path = (src.get("root_path") or "").strip()
     root_id = src.get("root_id") or "default"
@@ -66,6 +124,8 @@ def _describe(src: dict, active: bool, active_env_dir: str = "") -> dict:
     templates = src.get("templates") or []
     exists = os.path.isdir(path)
     fmt = src.get("format") or (detect_format(path) if exists else "missing")
+    # 该 root 的备份统计（调用方已一次性聚合好；缺失时全部当 0）
+    _st = (backup_stat or {}).get(root_id) or {}
     leaf_count = 0
     built_count = 0
     building_count = 0
@@ -124,6 +184,22 @@ def _describe(src: dict, active: bool, active_env_dir: str = "") -> dict:
         "synced": synced,
         "templates": templates,
         "status": "活跃" if active else "历史",
+        # ── IP 与备份维度（「来源与路径」表格用）─────────────────────────
+        # IP 来自 sources.ip（「新增日志路径」/「改 IP」登记的绑定，逗号分隔串），
+        # 纯展示：不参与任何过滤或鉴权。
+        "ip": _split_ips(src.get("ip")),
+        # 备份维度按 root_id 从 backup_dirs 聚合（env_name == root_id）：
+        #   backed  = has_obs=1        内容确实已上传 OBS（含已清理的）
+        #   cleaned = status='backed_up' 本地已删
+        #   local   = 仍在本地 = total - cleaned - missing
+        # `missing` 是「本地已丢且从未上传」，既不在本地也没备份，不能算本地。
+        "backed_count": _st.get("backed", 0) or 0,
+        "cleaned_count": _st.get("cleaned", 0) or 0,
+        "local_count": max(0, (_st.get("total", 0) or 0)
+                           - (_st.get("cleaned", 0) or 0)
+                           - (_st.get("missing", 0) or 0)),
+        # 同步不可用时的原因（可同步为空串），供按钮 tooltip 使用
+        "sync_hint": _sync_hint(exists, fmt),
     }
 
 
@@ -162,9 +238,12 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         # 行来源 = sources 表（活跃行 root_id='default' 排第一），DB 为准。
         srcs = lds.list_sources(active_env_dir)
         rows = []
+        # 备份统计一次性预建，避免每行查一次库。
+        _bk_stat = _backup_stat_by_root()
         for src in srcs:
             active = (src.get("root_id") == "default")
-            row = _describe(src, active=active, active_env_dir=active_env_dir)
+            row = _describe(src, active=active, active_env_dir=active_env_dir,
+                            backup_stat=_bk_stat)
             if active:
                 row["base"] = active_base
             rows.append(row)
@@ -229,10 +308,11 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
                                           f"（{sp}）的上层，会把它递归收录导致重复。"
                                           f"请改登记不与它嵌套的路径，或先移除该源再登记外层。")},
                     status_code=400)
-        # DB 先行
+        # DB 先行。ip 只做展示，原样存表，不校验格式、不查重。
         lds.upsert_source(rid, root_path=os.path.normpath(path),
                           name=name or "default", format=detect_format(path),
-                          templates=templates or [])
+                          templates=templates or [],
+                          ip=_join_ips(body.get("ip")))
         return JSONResponse({"ok": True, "msg": "已添加"})
 
     @app.post("/api/logs-admin/remove")
@@ -340,6 +420,25 @@ def register_logs_routes(app: FastAPI, templates: Jinja2Templates, active_env_di
         if not ok:
             return JSONResponse({"ok": False, "msg": "路径不存在"})
         return JSONResponse({"ok": True, "msg": "已改名"})
+
+    @app.post("/api/logs-admin/set-ip")
+    async def logs_admin_set_ip(request: Request):
+        """改数据源的 IP 绑定（DB 为准）。纯展示，不校验格式、不做任何过滤。"""
+        denied = _require_ajax(request)
+        if denied:
+            return denied
+        if not _is_admin(request):
+            return JSONResponse({"ok": False, "msg": "仅管理员可操作"}, status_code=403)
+
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        ip = _join_ips(body.get("ip"))
+        import utils.logdir_store as lds
+        rid = get_root_id(path)
+        ok = lds.set_source_ip(rid, ip)
+        if not ok:
+            return JSONResponse({"ok": False, "msg": "路径不存在"})
+        return JSONResponse({"ok": True, "msg": "已保存 IP" if ip else "已清空 IP"})
 
     @app.post("/api/logs-admin/set-templates")
     async def logs_admin_set_templates(request: Request):

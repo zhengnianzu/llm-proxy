@@ -207,7 +207,66 @@ def init_db(db_dir: str):
             _conn.execute(
                 "ALTER TABLE keyframe_analysis ADD COLUMN traces_json TEXT NOT NULL DEFAULT '[]'"
             )
+        # 迁移：sources 表补 ip 列（对外主机 IP → 来源的绑定，纯展示）。
+        # 存逗号分隔串（一台来源可能绑多个入口 IP），空串 = 未绑定。
+        _s_cols = {r[1] for r in _conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "ip" not in _s_cols:
+            _conn.execute(
+                "ALTER TABLE sources ADD COLUMN ip TEXT NOT NULL DEFAULT ''"
+            )
         _conn.commit()
+        _seed_source_ips()
+
+
+def _seed_source_ips() -> None:
+    """首次迁移时把 settings/export_public.yaml 的 proxies 灌进 sources.ip。
+
+    历史原因，IP↔来源的映射先写在 yaml 里；现在改为以 sources 表为准
+    （页面上能直接登记 IP）。这里只在「表里一个 IP 都没有」时跑一次，
+    之后无论 yaml 怎么改都不再影响运行时——避免两处数据源互相打架。
+    """
+    try:
+        if not _ready():
+            return
+        with _lock:
+            row = _conn.execute(
+                "SELECT COUNT(*) AS n FROM sources WHERE ip != ''"
+            ).fetchone()
+        if row and int(row["n"] or 0) > 0:
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    try:
+        from utils.export_public import get_config as _get_public_cfg
+        proxies = _get_public_cfg()["proxies"]
+    except Exception:  # noqa: BLE001
+        return
+    if not proxies:
+        return
+
+    # {来源名: [ip, ...]}（yaml 里一个 IP 可对应多个名字，反过来一个名字也可能多个 IP）
+    by_name: dict = {}
+    for ip, names in proxies.items():
+        for n in names:
+            by_name.setdefault(n, []).append(ip)
+    if not by_name:
+        return
+
+    try:
+        with _lock:
+            rows = _conn.execute("SELECT root_id, name FROM sources").fetchall()
+            for r in rows:
+                ips = by_name.get((r["name"] or "").strip())
+                if not ips:
+                    continue
+                _conn.execute(
+                    "UPDATE sources SET ip = ? WHERE root_id = ?",
+                    (",".join(dict.fromkeys(ips)), r["root_id"]),
+                )
+            _conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _now() -> str:
@@ -987,7 +1046,8 @@ def _templates_from_json(raw: str) -> list:
 def upsert_source(root_id: str, *, root_path: Optional[str] = None,
                   name: Optional[str] = None, format: Optional[str] = None,
                   templates=None, leaf_count: Optional[int] = None,
-                  built_count: Optional[int] = None) -> str:
+                  built_count: Optional[int] = None,
+                  ip: Optional[str] = None) -> str:
     """新增或更新一条数据源。返回 'added' | 'updated'。仅传入的字段被更新。"""
     if not _ready() or not root_id:
         return "skipped"
@@ -1010,6 +1070,8 @@ def upsert_source(root_id: str, *, root_path: Optional[str] = None,
                 fields.append("leaf_count = ?"); params.append(int(leaf_count))
             if built_count is not None:
                 fields.append("built_count = ?"); params.append(int(built_count))
+            if ip is not None:
+                fields.append("ip = ?"); params.append(ip)
             params.append(root_id)
             _conn.execute(
                 f"UPDATE sources SET {', '.join(fields)} WHERE root_id = ?", params
@@ -1020,11 +1082,12 @@ def upsert_source(root_id: str, *, root_path: Optional[str] = None,
             _conn.execute("""
                 INSERT INTO sources
                     (root_id, root_path, name, format, templates,
-                     leaf_count, built_count, synced_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     leaf_count, built_count, ip, synced_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (root_id, root_path or "", name or "default", format or "",
                   _templates_to_json(templates),
-                  int(leaf_count or 0), int(built_count or 0), _now(), _now()))
+                  int(leaf_count or 0), int(built_count or 0), ip or "",
+                  _now(), _now()))
             _conn.commit()
             return "added"
 
@@ -1124,6 +1187,19 @@ def set_source_name(root_id: str, name: str) -> bool:
         cur = _conn.execute(
             "UPDATE sources SET name = ?, synced_at = ? WHERE root_id = ?",
             (name or "default", _now(), root_id),
+        )
+        _conn.commit()
+        return cur.rowcount > 0
+
+
+def set_source_ip(root_id: str, ip: str) -> bool:
+    """改数据源的 IP 绑定（逗号分隔串，纯展示）。行不存在返回 False。"""
+    if not _ready() or not root_id:
+        return False
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE sources SET ip = ?, synced_at = ? WHERE root_id = ?",
+            (ip or "", _now(), root_id),
         )
         _conn.commit()
         return cur.rowcount > 0
