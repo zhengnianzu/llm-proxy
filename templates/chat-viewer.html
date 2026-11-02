@@ -200,7 +200,43 @@
             display: flex; align-items: center; gap: 12px;
         }
         .tlist-sub { font-size: 11px; color: var(--muted-foreground); font-weight: 400; }
-        .tlist-scroll { overflow: auto; padding: 4px 0 8px; }
+        .tlist-close {
+            margin-left: auto; cursor: pointer; border: 1px solid var(--border);
+            background: transparent; color: var(--muted-foreground); border-radius: var(--radius-sm);
+            font-family: var(--font-sans); font-size: 12px; padding: 5px 12px;
+            transition: all var(--transition);
+        }
+        .tlist-close:hover { color: var(--foreground); border-color: var(--primary); background: var(--muted); }
+        .tlist-scroll { overflow: auto; padding: 4px 0 0; }
+        /* 分页条 */
+        .tlist-pager {
+            display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+            border-top: 1px solid var(--border); font-size: 11px;
+            color: var(--muted-foreground); background: var(--background);
+        }
+        .tlist-pager button {
+            cursor: pointer; border: 1px solid var(--border); background: transparent;
+            color: var(--muted-foreground); border-radius: var(--radius-sm);
+            font-family: var(--font-sans); font-size: 11px; padding: 3px 10px;
+        }
+        .tlist-pager button:hover:not(:disabled) { color: var(--foreground); border-color: var(--primary); }
+        .tlist-pager button:disabled { opacity: .4; cursor: not-allowed; }
+        .tlist-pager .page-info { margin-left: auto; }
+        /* 分析结论：列表下方 */
+        .tlist-summary {
+            border-top: 1px solid var(--border); padding: 10px 16px 12px;
+            font-size: 11.5px; color: var(--muted-foreground); line-height: 1.7;
+        }
+        .tlist-summary .st-title {
+            font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .05em; color: var(--faint); margin-bottom: 6px;
+        }
+        .tlist-summary .st-row { display: flex; gap: 16px; flex-wrap: wrap; }
+        .tlist-summary .st-k { color: var(--faint); }
+        .tlist-summary .st-v { color: var(--foreground); font-weight: 600; }
+        .tlist-summary .st-bad { color: var(--destructive); }
+        .tlist-summary .st-ok { color: #3fb950; }
+        .tlist-summary .st-empty { color: var(--faint); font-style: italic; }
         .tlist-table { width: 100%; border-collapse: collapse; font-size: 12px; }
         .tlist-table th {
             text-align: left; padding: 7px 12px; font-size: 10px; font-weight: 600;
@@ -958,6 +994,9 @@ function _writeUrlState() {
     if (ymdh) params.set('ymdh', ymdh);  else params.delete('ymdh');
     if (key) params.set('key', key);     else params.delete('key');
     if (model) params.set('model', model); else params.delete('model');
+    // 当前选中的会话：写进 URL 后分享链接可直接定位到这条对话。
+    const _sk = window._kfSessionKey || '';
+    if (_sk) params.set('session', _sk); else params.delete('session');
     const qs = params.toString();
     history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
 }
@@ -970,6 +1009,8 @@ function _restoreUrlState() {
         ymdh: params.get('ymdh') || '',
         key: params.get('key') || '',
         model: params.get('model') || '',
+        // 分享链接定位用：打开时自动选中该会话
+        session: params.get('session') || '',
     };
 }
 
@@ -1536,6 +1577,42 @@ async function _loadAggFallback(min, params) {
     _updateRefreshTime(data.last_refresh_ts);
 }
 
+/**
+ * 按 session_key 自动选中会话（分享链接 ?session=xxx 的落地逻辑）。
+ *
+ * 列表是流式收集 + 分页渲染的，目标会话可能还没进内存或还没渲染出来，所以：
+ *   1. 先在本内存里找；
+ *   2. 找不到就等（轮询），期间列表继续收集；
+ *   3. 找到了就 loadMore 渲染到它所在的位置并选中；
+ *   4. 超时后提示用户，不静默失败。
+ */
+function _autoSelectSession(sessionKey, attempt) {
+    attempt = attempt || 0;
+    const MAX_ATTEMPTS = 40;      // 40 × 500ms ≈ 20s
+    const idx = aggChains.findIndex(c => c && c.session_key === sessionKey);
+    if (idx >= 0) {
+        // 渲染到该条所在窗口
+        while (renderedCount <= idx && renderedCount < aggChains.length) {
+            _renderAggWindow(false);
+        }
+        const el = fileListEl.querySelectorAll('.file-item')[idx];
+        if (el) {
+            el.scrollIntoView({ block: 'center' });
+            selectAggChain(idx, el);
+        } else {
+            // DOM 只保留部分窗口，退化为直接选数据
+            selectAggChain(idx, document.createElement('div'));
+        }
+        return;
+    }
+    if (attempt >= MAX_ATTEMPTS) {
+        document.getElementById('loadStatus').textContent =
+            '未找到 URL 指定的会话（可能已被清理或不在当前时间目录）';
+        return;
+    }
+    setTimeout(() => _autoSelectSession(sessionKey, attempt + 1), 500);
+}
+
 function updateLoadStatus() {
     // 显示态用 renderedCount（DOM 中实际渲染的条数），内存里 aggChains 可能远多于此。
     const shown = renderedCount || fileListEl.querySelectorAll('.file-item').length;
@@ -1828,19 +1905,64 @@ function _kfCurrentChain() {
 let _diffBaseFile = null;
 
 /** 把任意 content 结构压成可比较的纯文本。 */
-function _diffText(content) {
-    if (content == null) return '';
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-        return content.map(b => {
-            if (typeof b === 'string') return b;
-            if (!b || typeof b !== 'object') return JSON.stringify(b);
-            if (b.type === 'tool_use') return `[tool_use: ${b.name || ''}]\n${JSON.stringify(b.input || {}, null, 2)}`;
-            if (b.type === 'tool_result') return typeof b.content === 'string' ? b.content : JSON.stringify(b.content || '', null, 2);
-            return b.text || b.thinking || JSON.stringify(b, null, 2);
-        }).join('\n');
+/**
+ * 把一条消息归一化成可比较的纯文本。
+ *
+ * 关键：同一个语义在两种 harness 里有两种写法，必须归一化后再比较——
+ *   ① Anthropic 形态：tool_use 作为 content 里的 block
+ *      content = [{type:'text',text:'...'}, {type:'tool_use',name,input}]
+ *   ② OpenAI 形态：正文在 content，工具调用在独立的 tool_calls 字段
+ *      content = '...', tool_calls = [{function:{name,arguments}}]
+ * 只比较 content 会把 ① 和 ② 判成「修改」，而它们其实是同一条消息。
+ */
+function _diffText(msg) {
+    if (msg == null) return '';
+    if (typeof msg === 'string') return msg;
+    const content = msg.content;
+    const parts = [];
+
+    if (typeof content === 'string') {
+        if (content) parts.push(content);
+    } else if (Array.isArray(content)) {
+        content.forEach(b => {
+            if (typeof b === 'string') { parts.push(b); return; }
+            if (!b || typeof b !== 'object') { parts.push(JSON.stringify(b)); return; }
+            if (b.type === 'tool_use') {
+                parts.push(`[tool_use: ${b.name || ''}]\n${_stableJson(b.input || {})}`);
+            } else if (b.type === 'tool_result') {
+                parts.push(typeof b.content === 'string' ? b.content : _stableJson(b.content || ''));
+            } else if (b.type === 'thinking') {
+                parts.push(String(b.thinking || ''));
+            } else {
+                parts.push(b.text || JSON.stringify(b));
+            }
+        });
+    } else if (content != null) {
+        parts.push(JSON.stringify(content));
     }
-    return JSON.stringify(content, null, 2);
+
+    // OpenAI 形态：tool_calls 独立字段，转成与 tool_use block 一致的文本
+    const calls = msg.tool_calls;
+    if (Array.isArray(calls) && calls.length) {
+        calls.forEach(tc => {
+            const fn = (tc && tc.function) || tc || {};
+            let args = fn.arguments;
+            if (typeof args === 'string') {
+                try { args = JSON.parse(args); } catch (e) { /* 保留原串 */ }
+            }
+            parts.push(`[tool_use: ${fn.name || ''}]\n${_stableJson(args || {})}`);
+        });
+    }
+
+    return parts.join('\n');
+}
+
+/** 键序无关的 JSON 序列化，避免同内容因键序不同被判成差异。 */
+function _stableJson(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    if (Array.isArray(v)) return '[' + v.map(_stableJson).join(',') + ']';
+    const keys = Object.keys(v).sort();
+    return '{' + keys.map(k => JSON.stringify(k) + ':' + _stableJson(v[k])).join(',') + '}';
 }
 
 /** 词级 diff：返回 [左HTML, 右HTML]。对齐 chat-log-viewer 的 _word_diff_html。 */
@@ -1918,7 +2040,7 @@ function _renderDiffInPanel(src, dst, aMsgs, bMsgs, apiKey) {
     let nAdd = 0, nDel = 0, nMod = 0, nSame = 0;
     for (let i = 0; i < maxLen; i++) {
         const a = aMsgs[i], b = bMsgs[i];
-        if (a && b && _diffText(a.content) === _diffText(b.content)) { nSame++; }
+        if (a && b && _diffText(a) === _diffText(b)) { nSame++; }
         else if (!a) nAdd++;
         else if (!b) nDel++;
         else nMod++;
@@ -1960,8 +2082,8 @@ function _renderDiffInPanel(src, dst, aMsgs, bMsgs, apiKey) {
 
     for (let i = 0; i < maxLen; i++) {
         const a = aMsgs[i], b = bMsgs[i];
-        const at = a ? _diffText(a.content) : '';
-        const bt = b ? _diffText(b.content) : '';
+        const at = a ? _diffText(a) : '';
+        const bt = b ? _diffText(b) : '';
         if (a && b && at === bt) { sameStreak++; continue; }
         flushSame();
 
@@ -2028,32 +2150,8 @@ function _openTraceList(triggerEl) {
         d.keyframe.traces.forEach(x => { kfTraces[x.filename] = x; });
     }
 
-    const rows = d.traces.map((t, i) => {
-        const frame = kfByFile[t.filename];
-        const kft = kfTraces[t.filename];
-        const ts = (t.ts || '').replace(/_/g, ' ').slice(0, 19);
-        const turns = (kft && kft.turns != null) ? kft.turns : '';
-        const seg = frame ? frame.index : '';
-        const isMut = frame && frame.boundary !== 'start' && frame.boundary !== 'continuation' && frame.boundary !== 'tail_truncate';
-        const rowCls = [
-            frame ? 'kf' : '',
-            isMut ? 'mutation' : '',
-            t.filename === d.latest_file ? 'current' : '',
-        ].filter(Boolean).join(' ');
-        const badge = frame ? `<span class="tlist-badge${isMut ? ' mut' : ''}">&#9670;</span>` : '';
-        const failMark = t.success === false ? ' <span style="color:var(--destructive)" title="失败">&#x2716;</span>' : '';
-        return `<tr class="${rowCls}">
-            <td class="ts">${esc(ts)}</td>
-            <td class="name">${badge}${esc(t.filename)}${failMark}</td>
-            <td class="turns">${turns === '' ? '—' : turns + ' 轮'}</td>
-            <td class="turns">${seg === '' ? '—' : seg}</td>
-            <td class="act">
-                <a class="tlist-link" onclick="_pickTrace('${esc(t.filename)}')">查看</a>
-                <span class="tlist-sep">|</span>
-                <a class="tlist-link" title="与当前查看的文件对比" onclick="_diffTrace('${esc(t.filename)}','${esc(d.api_key)}','${esc(d.leaf_path)}')">&#8646; 对比</a>
-            </td>
-        </tr>`;
-    }).join('');
+    // 分页状态挂在 window 上：翻页只重绘 tbody，不重建弹窗
+    window._tlistState = { page: 0, size: TRACE_PAGE_SIZE, data: d, kfByFile, kfTraces };
 
     const modal = document.createElement('div');
     modal.id = 'traceListModal';
@@ -2069,14 +2167,130 @@ function _openTraceList(triggerEl) {
             <div class="tlist-scroll">
                 <table class="tlist-table">
                     <thead><tr>
-                        <th>时间</th><th>文件名</th><th>轮次</th><th>段</th><th>操作</th>
+                        <th>时间</th><th>文件名</th><th title="该请求的 messages 条数">消息数</th><th>段</th><th>操作</th>
                     </tr></thead>
-                    <tbody>${rows}</tbody>
+                    <tbody id="tlistBody"></tbody>
                 </table>
             </div>
+            <div class="tlist-pager" id="tlistPager"></div>
+            <div class="tlist-summary" id="tlistSummary"></div>
         </div>`;
     document.body.appendChild(modal);
     document.addEventListener('keydown', _tlistEscHandler);
+    _renderTracePage();
+}
+
+// 每页条数：会话动辄上百个 trace，一次全渲染会把弹窗撑爆且卡顿
+const TRACE_PAGE_SIZE = 20;
+
+/** 只重绘表格与分页条（翻页不重建弹窗）。 */
+function _renderTracePage() {
+    const st = window._tlistState;
+    if (!st) return;
+    const d = st.data, kfByFile = st.kfByFile, kfTraces = st.kfTraces;
+    const total = d.traces.length;
+    const pages = Math.max(1, Math.ceil(total / st.size));
+    if (st.page >= pages) st.page = pages - 1;
+    if (st.page < 0) st.page = 0;
+    const start = st.page * st.size;
+    const slice = d.traces.slice(start, start + st.size);
+
+    const rows = slice.map((t) => {
+        const frame = kfByFile[t.filename];
+        const kft = kfTraces[t.filename];
+        const ts = (t.ts || '').replace(/_/g, ' ').slice(0, 19);
+        // 「消息数」= 该请求的 messages 长度。分析结果里有精确值就用它，
+        // 否则回退到列表接口的 msg_count。
+        const msgLen = (kft && kft.messages != null) ? kft.messages
+                     : (t.msg_count != null ? t.msg_count : '');
+        const seg = frame ? frame.index : '';
+        const isMut = frame && frame.boundary !== 'start' && frame.boundary !== 'continuation' && frame.boundary !== 'tail_truncate';
+        const rowCls = [
+            frame ? 'kf' : '',
+            isMut ? 'mutation' : '',
+            t.filename === d.latest_file ? 'current' : '',
+        ].filter(Boolean).join(' ');
+        const badge = frame ? `<span class="tlist-badge${isMut ? ' mut' : ''}">&#9670;</span>` : '';
+        const failMark = t.success === false ? ' <span style="color:var(--destructive)" title="失败">&#x2716;</span>' : '';
+        return `<tr class="${rowCls}">
+            <td class="ts">${esc(ts)}</td>
+            <td class="name">${badge}${esc(t.filename)}${failMark}</td>
+            <td class="turns">${msgLen === '' ? '—' : msgLen + ' 条'}</td>
+            <td class="turns">${seg === '' ? '—' : seg}</td>
+            <td class="act">
+                <a class="tlist-link" onclick="_pickTrace('${esc(t.filename)}')">查看</a>
+                <span class="tlist-sep">|</span>
+                <a class="tlist-link" title="与当前查看的文件对比" onclick="_diffTrace('${esc(t.filename)}','${esc(d.api_key)}','${esc(d.leaf_path)}')">&#8646; 对比</a>
+            </td>
+        </tr>`;
+    }).join('');
+
+    const body = document.getElementById('tlistBody');
+    if (body) body.innerHTML = rows || '<tr><td colspan="5" style="text-align:center;color:var(--faint)">无数据</td></tr>';
+
+    const pager = document.getElementById('tlistPager');
+    if (pager) {
+        pager.innerHTML = `
+            <button onclick="_tlistGoto(0)" ${st.page === 0 ? 'disabled' : ''}>&#171; 首页</button>
+            <button onclick="_tlistGoto(${st.page - 1})" ${st.page === 0 ? 'disabled' : ''}>上一页</button>
+            <button onclick="_tlistGoto(${st.page + 1})" ${st.page >= pages - 1 ? 'disabled' : ''}>下一页</button>
+            <button onclick="_tlistGoto(${pages - 1})" ${st.page >= pages - 1 ? 'disabled' : ''}>末页 &#187;</button>
+            <span class="page-info">第 ${start + 1}–${Math.min(start + st.size, total)} 条 / 共 ${total} 条 · 第 ${st.page + 1} / ${pages} 页</span>`;
+    }
+    _renderTraceSummary();
+}
+
+function _tlistGoto(page) {
+    const st = window._tlistState;
+    if (!st) return;
+    st.page = page;
+    _renderTracePage();
+}
+
+/** 分析结论：放在列表下方；没有分析时给一行提示。 */
+function _renderTraceSummary() {
+    const el = document.getElementById('tlistSummary');
+    if (!el) return;
+    const d = window._tlistState ? window._tlistState.data : null;
+    const kf = d && d.keyframe;
+    let html = '<div class="st-title">分析结论</div>';
+
+    if (!kf || kf.status === 'none') {
+        el.innerHTML = html + '<div class="st-empty">尚未分析</div>';
+        return;
+    }
+    if (kf.status === 'pending' || kf.status === 'running') {
+        el.innerHTML = html + '<div class="st-empty">分析中…</div>';
+        return;
+    }
+    if (kf.status === 'failed') {
+        const err = (kf.summary || {}).error || '';
+        el.innerHTML = html + `<div class="st-bad">分析失败${err ? '：' + esc(err) : ''}</div>`;
+        return;
+    }
+
+    const s = kf.summary || {};
+    const mutCls = s.has_mutation ? 'st-bad' : 'st-ok';
+    const mutTxt = s.has_mutation ? `${s.break_count} 处突变` : '无突变';
+    html += '<div class="st-row">'
+        + `<span><span class="st-k">分段</span> <span class="st-v">${s.frame_count || 0}</span></span>`
+        + `<span><span class="st-k">请求</span> <span class="st-v">${s.trace_total || 0}</span></span>`
+        + `<span><span class="st-k">最多轮次</span> <span class="st-v">${s.turns || 0}</span></span>`
+        + `<span><span class="st-k">上下文</span> <span class="st-v ${mutCls}">${mutTxt}</span></span>`
+        + '</div>';
+
+    const frames = kf.frames || [];
+    if (frames.length) {
+        html += '<div style="margin-top:8px">';
+        frames.forEach(f => {
+            const isMut = f.boundary !== 'start' && f.boundary !== 'continuation' && f.boundary !== 'tail_truncate';
+            html += `<div style="margin:2px 0"><span class="st-k">第 ${f.index} 段</span> `
+                 + `<span class="st-v ${isMut ? 'st-bad' : ''}">${esc(f.boundary)}</span> `
+                 + `<span class="st-k">· ${f.traces} 个请求 · ${f.messages} 条消息</span></div>`;
+        });
+        html += '</div>';
+    }
+    el.innerHTML = html;
 }
 
 function _closeTraceList() {
@@ -2138,6 +2352,11 @@ function renderDetailPanel(data) {
     }
     if (data.models && data.models.length) {
         html += `<div class="detail-item"><div class="detail-label">模型</div><div class="detail-value">${data.models.map(esc).join(', ')}</div></div>`;
+    }
+    // 会话标识：同一会话的所有请求共享这个 session_key，排查时可直接对照 DB / 导出。
+    if (data.session_key) {
+        html += `<div class="detail-item"><div class="detail-label">Session ID</div>`
+             + `<div class="detail-value" style="font-family:ui-monospace,monospace;font-size:11.5px;word-break:break-all;user-select:all" title="点击可选中复制">${esc(data.session_key)}</div></div>`;
     }
     html += `<div class="detail-item"><div class="detail-label">消息数</div><div class="detail-value">${data.message_count || 0}</div></div>`;
     if (data.first_time) {
@@ -2732,6 +2951,11 @@ loadLogDirs().then(() => {
     } else {
         fileListEl.innerHTML = '<div class="cv-sidebar-tip">请选择时间目录</div>';
         document.getElementById('loadStatus').textContent = '';
+    }
+    // 分享链接定位：URL 带 ?session=xxx 时，列表加载完自动选中该会话。
+    // 列表是分页/流式收集的，目标可能在后续页里，故带重试。
+    if (_urlState && _urlState.session) {
+        _autoSelectSession(_urlState.session);
     }
     const _params = new URLSearchParams(window.location.search);
     const _urlFile = _params.get('file');

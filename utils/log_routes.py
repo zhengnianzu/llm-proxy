@@ -1120,6 +1120,8 @@ def _build_agg_items(preloaded: List[Tuple[dict, str]], with_traces: bool = Fals
             # 跨叶合并用的链标识（api_key||q1_hash）。缺失时由 _merge_chain_segments
             # 回退到 (api_key, q1_preview) 分组。
             "chain_lookup": session.get("chain_lookup", "") or "",
+            # 会话标识：前端把选中会话写进 URL(?session=...)，分享链接可直接定位。
+            "session_key": session.get("session_key", "") or sk,
         }
         if with_traces:
             payload["trace_list"] = trace_list
