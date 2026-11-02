@@ -465,6 +465,9 @@
                 <div class="mb-3">
                     <label class="form-label small">OBS 路径前缀</label>
                     <input type="text" class="input input-sm" v-model="obsPrefix" placeholder="obs://bucket/path（可选，留空仅本地复制）">
+                    <div v-if="copyNoObsWarn" class="text-warning" style="font-size:.72rem;margin-top:2px;">
+                        {{ copyNoObsWarn }}
+                    </div>
                 </div>
                 <div v-if="obsPrefix" class="obs-preview">
                     目标: {{ obsPrefix.replace(/\/+$/, '') }}/{{ obsSubFor(exportMode) }}/{{ config.env_key }}/{{ modalKey.key_slot }}/ex-{{ nowTag }}/
@@ -681,6 +684,8 @@ new Vue({
         // 默认开——数据按小时分目录存放，不聚合会把同一段对话拆成多条产物。
         // 处理器不支持 file_dirs / 只选了一个目录时后端自动回退，不报错。
         mergeHours: true,
+        // 「复制」原任务无 OBS 目标时的提示（见 duplicateTask）
+        copyNoObsWarn: '',
         exportMode: 'reformat',
         taskWorkers: 8,
         taskDirWorkers: 8,
@@ -1208,11 +1213,15 @@ new Vue({
             this.forceExport = false;
             // 跨小时聚合默认开（见 data.mergeHours 的说明）
             this.mergeHours = true;
+            // OBS 前缀每次打开都回到配置里的 obs_base：否则被清空过的表单值会
+            // 一直留在这个标签页里，后续每个新任务都静默变成「仅本地复制」。
+            this.obsPrefix = (this.config && this.config.obs_base) || '';
             // 默认方式：配置里第一个产合并文件的模式（无则第一个）
             this.exportMode = this._defaultExportMode();
             this.taskWorkers = 8;
             this.taskDirWorkers = 8;
             this.taskName = '';
+            this.copyNoObsWarn = '';
             // 每次打开重置 Modal 自己的筛选，避免残留上次的条件
             this.mKeyFilter = '';
             this.mModelFilter = '';
@@ -1485,7 +1494,15 @@ new Vue({
 
             // OBS 前缀：记录里存的是完整 obs_dst（<prefix>/<obs_sub>/<env>/<slot>/ex-<tag>/），
             // 按 obs_sub 长度降序匹配切出前缀，逻辑与后端 retry 一致。
-            this.obsPrefix = this._obsPrefixFromDst(r.obs_dst);
+            // 原记录的 obs_dst 为空（当初就只做了本地复制，或创建后从未启动）时，
+            // 不能把空前缀带进新任务 —— 那会让「复制」静默变成又一次仅本地导出。
+            // 此时回落到配置的 obs_base，并在界面提示。
+            var inheritedPrefix = this._obsPrefixFromDst(r.obs_dst);
+            var fallbackPrefix = (this.config && this.config.obs_base) || '';
+            this.obsPrefix = inheritedPrefix || fallbackPrefix;
+            this.copyNoObsWarn = (!inheritedPrefix && !!fallbackPrefix)
+                ? '原任务没有 OBS 目标（当初仅本地复制）。已按配置补上 OBS 前缀，请确认后再启动；不需要上传请手动清空。'
+                : '';
 
             this.exportMode = r.mode || this._defaultExportMode();
             this.taskWorkers = r.workers || 0;

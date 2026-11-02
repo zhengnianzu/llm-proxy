@@ -1751,6 +1751,9 @@ async function selectAggChain(idx, el) {
             window._kfSessionKey = (_tracesRes && _tracesRes.session_key) || '';
             // 绝对叶子路径由后端返回（logDir 只是相对 dir_key，worker 读不到文件）
             window._kfLeafPath = (_tracesRes && _tracesRes.leaf_path) || '';
+            // session_key 只有异步取回明细后才知道，此时补写一次 URL，
+            // 否则分享链接里永远没有 session 参数。
+            _writeUrlState();
             _paintDetail(window._kfTraceList, data._usage);
             if (window._kfSessionKey) {
                 _loadKeyframeAnalysis(chain, logDir);
