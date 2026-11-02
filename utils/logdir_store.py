@@ -176,6 +176,37 @@ def init_db(db_dir: str):
             _conn.execute(
                 "ALTER TABLE leaf_status ADD COLUMN archived_at TEXT NOT NULL DEFAULT ''"
             )
+        # 关键帧分析结果表：对话浏览器里对「单个会话」按需提交的关键帧分析。
+        # 与 leaf_status 解耦——一叶多会话，一叶一行放不下；重复分析直接覆盖。
+        # 主键 (leaf_path, session_key) 就是会话的唯一定位。
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS keyframe_analysis (
+                leaf_path    TEXT NOT NULL,
+                session_key  TEXT NOT NULL,
+                api_key      TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
+                requested_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                started_at   TEXT,
+                finished_at  TEXT,
+                error        TEXT NOT NULL DEFAULT '',
+                trace_total  INTEGER NOT NULL DEFAULT 0,
+                frame_count  INTEGER NOT NULL DEFAULT 0,
+                break_count  INTEGER NOT NULL DEFAULT 0,
+                turns        INTEGER NOT NULL DEFAULT 0,
+                has_mutation INTEGER NOT NULL DEFAULT 0,
+                frames_json  TEXT NOT NULL DEFAULT '[]',
+                traces_json  TEXT NOT NULL DEFAULT '[]'
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keyframe_status ON keyframe_analysis(status)"
+        )
+        # 迁移：老库没有 traces_json 列则补上（逐 trace 的轮次/所属段，供关联列表展示）
+        _kf_cols = {r[1] for r in _conn.execute("PRAGMA table_info(keyframe_analysis)").fetchall()}
+        if "traces_json" not in _kf_cols:
+            _conn.execute(
+                "ALTER TABLE keyframe_analysis ADD COLUMN traces_json TEXT NOT NULL DEFAULT '[]'"
+            )
         _conn.commit()
 
 
@@ -358,6 +389,26 @@ def has_any(root_id: str) -> bool:
             "SELECT 1 FROM leaf_status WHERE root_id = ? LIMIT 1", (root_id,)
         ).fetchone()
     return row is not None
+
+
+def all_leaf_stats() -> list:
+    """返回全部 root 的叶子快照 [{root_id, dir_key, leaf_path, stats_json}, ...]。
+
+    供「按 key 补全 mtime 目录分布」使用。数据源与 `key_to_leaves` 同构：
+    `leaf_status.stats_json` 是同步 / 重算阶段按 index.jsonl 或叶子内 index.db 算好的
+    「{api_key}|{date} -> {total,qualified}」，由 session worker 按 sync_rowid 水位
+    持续纠偏，**不会**像 `.stats_index.json` 那样把某个小时冻结在写入中途的旧快照上。
+    一次全表读实测约 50~80ms。
+    """
+    if not _ready():
+        return []
+    with _lock:
+        rows = _conn.execute(
+            "SELECT root_id, dir_key, leaf_path, stats_json FROM leaf_status "
+            "WHERE dir_key != '' AND stats_json != ''"
+        ).fetchall()
+    return [{"root_id": r[0], "dir_key": r[1], "leaf_path": r[2], "stats_json": r[3]}
+            for r in rows]
 
 
 def key_to_leaves() -> dict:
@@ -774,6 +825,138 @@ def set_leaf_token_stats(root_id: str, dir_key: str, *, leaf_path: str = "",
     upsert_leaf(root_id, dir_key, leaf_path=leaf_path,
                 idx_size=idx_size, idx_mtime=idx_mtime,
                 token_stats_json=token_stats_json)
+
+
+# ── 关键帧分析（对话浏览器的「分析」按钮）────────────────────────────────
+
+
+def upsert_keyframe_request(leaf_path: str, session_key: str, api_key: str = "",
+                            force: bool = False) -> str:
+    """登记一次关键帧分析请求。返回当前状态。
+
+    去重规则（避免连点按钮重复排队）：
+      - running            → 直接返回 'running'，不重复入队
+      - pending            → 直接返回 'pending'
+      - done / failed      → force=False 时返回 'done'/'failed'（前端直接用缓存）；
+                             force=True 时重置为 pending 重新分析
+
+    返回：'pending' | 'running' | 'done' | 'failed'
+    """
+    if not _ready() or not leaf_path or not session_key:
+        return "failed"
+    with _lock:
+        row = _conn.execute(
+            "SELECT status FROM keyframe_analysis WHERE leaf_path = ? AND session_key = ?",
+            (leaf_path, session_key),
+        ).fetchone()
+        now = _now()
+        if row is None:
+            _conn.execute(
+                "INSERT INTO keyframe_analysis "
+                "(leaf_path, session_key, api_key, status, requested_at) "
+                "VALUES (?,?,?,'pending',?)",
+                (leaf_path, session_key, api_key or "", now),
+            )
+            _conn.commit()
+            return "pending"
+
+        status = (row["status"] or "").strip()
+        if status in ("pending", "running"):
+            return status
+        if not force:
+            return status or "done"
+
+        _conn.execute(
+            "UPDATE keyframe_analysis SET status='pending', requested_at=?, "
+            "started_at=NULL, finished_at=NULL, error='' "
+            "WHERE leaf_path = ? AND session_key = ?",
+            (now, leaf_path, session_key),
+        )
+        _conn.commit()
+        return "pending"
+
+
+def claim_keyframe_request() -> Optional[dict]:
+    """worker 领取一条待分析请求：最老的 pending → running。
+
+    用 UPDATE ... WHERE 一次性原子置位，changes() 判定是否抢到；跨进程靠 SQLite
+    行级串行，多 worker 下二次领取会落空（该行已非 pending）。
+    """
+    if not _ready():
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT * FROM keyframe_analysis WHERE status = 'pending' "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        cur = _conn.execute(
+            "UPDATE keyframe_analysis SET status='running', started_at=? "
+            "WHERE leaf_path = ? AND session_key = ? AND status = 'pending'",
+            (_now(), row["leaf_path"], row["session_key"]),
+        )
+        _conn.commit()
+        if cur.rowcount != 1:
+            return None
+        return dict(row)
+
+
+def finish_keyframe_request(leaf_path: str, session_key: str, *, status: str,
+                            frames_json: str = "[]", traces_json: str = "[]",
+                            trace_total: int = 0,
+                            frame_count: int = 0, break_count: int = 0,
+                            turns: int = 0, has_mutation: bool = False,
+                            error: str = "") -> None:
+    """写回分析结果（成功或失败）。"""
+    if not _ready() or not leaf_path or not session_key:
+        return
+    with _lock:
+        _conn.execute(
+            "UPDATE keyframe_analysis SET status=?, finished_at=?, error=?, "
+            "trace_total=?, frame_count=?, break_count=?, turns=?, "
+            "has_mutation=?, frames_json=?, traces_json=? "
+            "WHERE leaf_path = ? AND session_key = ?",
+            (status, _now(), error or "", int(trace_total), int(frame_count),
+             int(break_count), int(turns), 1 if has_mutation else 0,
+             frames_json or "[]", traces_json or "[]", leaf_path, session_key),
+        )
+        _conn.commit()
+
+
+def get_keyframe_analysis(leaf_path: str, session_key: str) -> Optional[dict]:
+    """读一条分析结果；没有记录返回 None。frames/traces 已解析成 list。"""
+    if not _ready() or not leaf_path or not session_key:
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT * FROM keyframe_analysis WHERE leaf_path = ? AND session_key = ?",
+            (leaf_path, session_key),
+        ).fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    for key, field in (("frames", "frames_json"), ("traces", "traces_json")):
+        try:
+            out[key] = _json.loads(out.get(field) or "[]")
+        except (ValueError, TypeError):
+            out[key] = []
+        out.pop(field, None)
+    return out
+
+
+def reset_stale_keyframe_requests() -> int:
+    """把超时未完成的 running 请求退回 pending（worker 崩溃/重启后的清理）。"""
+    if not _ready():
+        return 0
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE keyframe_analysis SET status='pending', started_at=NULL "
+            "WHERE status='running' AND (started_at IS NULL OR "
+            "  datetime(started_at) < datetime('now','localtime','-30 minutes'))"
+        )
+        _conn.commit()
+        return cur.rowcount or 0
 
 
 # ── 数据源表（「数据管理」表 1）───────────────────────────────────────────

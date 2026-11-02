@@ -105,6 +105,18 @@ modes:
     formats: ["newapi"]
     public: true
 
+  key_frame_export:
+    label: "关键帧导出（上下文连续性分段，原始 JSON）"
+    mode_label: "关键帧导出"
+    step: "关键帧分段"
+    obs_sub: "session_keyframes"
+    local_dir: "logs_session_keyframes"
+    pipeline: "reformat"
+    processor: "utils.eval.keyframe_export:keyframe_export"
+    profile: auto
+    formats: ["newapi"]
+    public: true
+
   eval:
     label: "质检模式（reformat+分析，出报告）"
     mode_label: "质检"

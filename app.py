@@ -1880,6 +1880,37 @@ def export_view_api_session_traces(key: str = "", filename: str = "", chain_look
                                                chain_lookup=chain_lookup))
 
 
+@app.get("/export/view/api/session-keyframes")
+def export_view_api_session_keyframes(key: str = "", leaf_path: str = "", session_key: str = "",
+                                      access_key: str = Query(default="", alias="access-key")):
+    """读某会话的关键帧分析结果（对话浏览器的「分析」按钮）。"""
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import get_keyframe_analysis_payload
+    return JSONResponse(get_keyframe_analysis_payload(leaf_path, session_key))
+
+
+@app.post("/export/view/api/session-keyframes/analyze")
+async def export_view_api_session_keyframes_analyze(request: Request, key: str = "",
+                                                    access_key: str = Query(default="", alias="access-key")):
+    """提交一次关键帧分析（写 pending 行，由 keyframe worker 异步执行）。"""
+    err, resolved_key = _check_public_view(access_key, key)
+    if err:
+        return err
+    from utils.log_routes import submit_keyframe_analysis
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    return JSONResponse(submit_keyframe_analysis(
+        resolved_key, str(body.get("leaf_path") or ""), str(body.get("session_key") or ""),
+        force=bool(body.get("force")),
+    ))
+
+
 @app.get("/export/view/api/file/download")
 def export_view_api_file_download(key: str = "", filename: str = "", log_dir: str = "",
                                   access_key: str = Query(default="", alias="access-key")):

@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from utils.log_paths import build_index_path, get_log_dir
@@ -859,7 +859,16 @@ def _export_key_leaves(roots, env_dir: str, api_key: str) -> List[str]:
     mts = []
     for row in stats.get("rows", []):
         if row.get("api_key") == api_key:
-            mts = sorted(row.get("mtime_cells", {}).keys(), reverse=True)
+            # 用 leaf_status 快照补齐目录（与 /export/submit、/api/export/keys 同口径）：
+            # 扫盘统计的 .stats_index.json 会永久沿用冻结在写入中途的小时快照，
+            # 该小时后到的 key 会整小时缺席（见 export_routes._merge_mtime_cells_from_leaf_db）。
+            try:
+                from utils.export_routes import _merge_mtime_cells_from_leaf_db
+                cells = _merge_mtime_cells_from_leaf_db(
+                    env_dir, {api_key: row.get("mtime_cells", {})})
+                mts = sorted(cells.get(api_key, {}).keys(), reverse=True)
+            except Exception:  # noqa: BLE001
+                mts = sorted(row.get("mtime_cells", {}).keys(), reverse=True)
             break
     if not mts:
         # 新 key（第一条会话刚写入）尚未进入 stats_index 的 rows —— 不能返回 []，
@@ -1183,6 +1192,61 @@ def _stamp_chain_lookup(pairs: List[Tuple[dict, str]]) -> None:
                     s["chain_lookup"] = hit
 
 
+def get_keyframe_analysis_payload(leaf_path: str, session_key: str) -> Dict[str, Any]:
+    """读某会话的关键帧分析结果，供对话浏览器渲染。
+
+    返回 ``{"status": "none"|"pending"|"running"|"done"|"failed", "summary": {...}, "frames": [...], "traces": [...]}``。
+    没有记录时 status='none'，前端只显示「分析」按钮。
+
+    traces 是逐 trace 的展示信息（messages/turns/segment），供关联列表每条显示
+    轮次与所属段——不放进 frames，因为 frames 只描述段的边界。
+    """
+    empty = {"status": "none", "summary": {}, "frames": [], "traces": []}
+    if not leaf_path or not session_key:
+        return empty
+    try:
+        import utils.logdir_store as _lds
+        rec = _lds.get_keyframe_analysis(leaf_path, session_key)
+    except Exception:  # noqa: BLE001
+        return empty
+    if rec is None:
+        return empty
+
+    frames = rec.get("frames") or []
+    summary = {
+        "trace_total": rec.get("trace_total", 0),
+        "frame_count": rec.get("frame_count", 0),
+        "break_count": rec.get("break_count", 0),
+        "turns": rec.get("turns", 0),
+        "has_mutation": bool(rec.get("has_mutation")),
+        "finished_at": rec.get("finished_at") or "",
+        "error": rec.get("error") or "",
+    }
+    return {
+        "status": rec.get("status") or "none",
+        "summary": summary,
+        "frames": frames,
+        "traces": rec.get("traces") or [],
+    }
+
+
+def submit_keyframe_analysis(api_key: str, leaf_path: str, session_key: str,
+                             force: bool = False) -> Dict[str, Any]:
+    """登记一次关键帧分析请求，由 keyframe worker 异步执行。
+
+    去重在 logdir_store.upsert_keyframe_request 里：正在跑/排队中不重复入队；
+    已有结果时直接返回缓存状态，force=True 才重新分析。
+    """
+    if not leaf_path or not session_key:
+        return {"status": "failed", "error": "missing leaf_path or session_key"}
+    try:
+        import utils.logdir_store as _lds
+        status = _lds.upsert_keyframe_request(leaf_path, session_key, api_key, force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "failed", "error": str(exc)[:200]}
+    return {"status": status, "leaf_path": leaf_path, "session_key": session_key}
+
+
 def session_traces_payload(roots, env_dir: str, api_key: str, filename: str,
                            chain_lookup: str = "") -> Dict[str, Any]:
     """返回某个会话（由其某个请求文件名定位）的完整 trace 明细列表。
@@ -1216,7 +1280,7 @@ def session_traces_payload(roots, env_dir: str, api_key: str, filename: str,
 
     traces = _traces_in(leaf, session_key)
     if not chain_lookup:
-        return {"items": traces, "session_key": session_key}
+        return {"items": traces, "session_key": session_key, "leaf_path": leaf}
 
     # 跨叶扇出：只看该 key 落到过的叶子，不做全量扫盘。
     leaves: List[str] = []
@@ -1257,7 +1321,9 @@ def session_traces_payload(roots, env_dir: str, api_key: str, filename: str,
             seen.add(fn)
         uniq.append(t)
     uniq.sort(key=lambda t: str(t.get("ts") or ""))
-    return {"items": uniq, "session_key": session_key}
+    # leaf_path 一并返回：关键帧分析要按绝对路径读文件，前端只有相对 dir_key
+    # （log_dir 是 "261029/26102906" 这种形式，worker 无法据此拼出文件位置）。
+    return {"items": uniq, "session_key": session_key, "leaf_path": leaf}
 
 
 # ---------------------------------------------------------------------------
@@ -2263,12 +2329,36 @@ def register_log_routes(app: FastAPI) -> None:
             if _root_format(target) == "newapi":
                 sk = nidb.session_key_for_file(target, filename)
                 if sk:
+                    # leaf_path 必须返回绝对路径：关键帧分析按它读文件，
+                    # 且 log_dir 只是相对 dir_key，前端拿不到真实目录。
                     return JSONResponse({
                         "items": nidb.get_traces_for_session(target, sk),
                         "session_key": sk,
+                        "leaf_path": target,
                     })
         return JSONResponse(session_traces_payload(_all_roots(), _env_dir, api_key, filename,
                                                    chain_lookup=chain_lookup))
+
+    @app.get("/logs/session-keyframes")
+    def logs_session_keyframes(leaf_path: str = "", session_key: str = ""):
+        """读某会话的关键帧分析结果（内部页「关联列表」旁的分析按钮）。"""
+        return JSONResponse(get_keyframe_analysis_payload(leaf_path, session_key))
+
+    @app.post("/logs/session-keyframes/analyze")
+    async def logs_session_keyframes_analyze(request: Request):
+        """提交一次关键帧分析，由 keyframe worker 异步执行。"""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        return JSONResponse(submit_keyframe_analysis(
+            str(body.get("api_key") or ""),
+            str(body.get("leaf_path") or ""),
+            str(body.get("session_key") or ""),
+            force=bool(body.get("force")),
+        ))
 
     # --- 旧路由（别名，向后兼容） ---
 

@@ -397,6 +397,94 @@ def _existing_roots_for(env_dir) -> list:
     return [r for r in _all_roots_for(env_dir) if Path(r).is_dir()]
 
 
+def _leaf_db_mtime_cells(env_dir) -> dict:
+    """从 leaf_status 一次性构建 {api_key: {mtime_key: {total, qualified}}}。
+
+    与 `_merge_mtime_cells_from_leaf_db` 的区别：这里是**整表**读取（一次约 80ms），
+    供一次响应里要处理成百上千个 key 的列表页使用；逐个 key 调 merge 会读 N 次全表。
+    """
+    out: dict = {}
+    try:
+        import utils.logdir_store as _lds
+        from utils.logs_config import get_root_id
+        if not _lds._ready():
+            return out
+        roots = _existing_roots_for(env_dir)
+        if not roots:
+            return out
+        multi = len(roots) > 1
+        wanted = set()
+        for root in roots:
+            try:
+                wanted.add(get_root_id(root, str(env_dir)))
+            except Exception:  # noqa: BLE001
+                continue
+        if not wanted:
+            return out
+        for row in _lds.all_leaf_stats():
+            rid = row.get("root_id") or ""
+            dk = row.get("dir_key") or ""
+            if rid not in wanted or not dk:
+                continue
+            try:
+                buckets = json.loads(row.get("stats_json") or "")
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(buckets, dict):
+                continue
+            mt = f"{rid}/{dk}" if multi else dk
+            for bucket_key, counts in buckets.items():
+                api_key = bucket_key.rpartition("|")[0]
+                t = counts.get("total", 0)
+                if not api_key or t <= 0:
+                    continue
+                cell = out.setdefault(api_key, {}).setdefault(mt, {"total": 0, "qualified": 0})
+                if cell["total"] <= 0:
+                    cell["total"] = t
+                    cell["qualified"] = counts.get("qualified", 0)
+    except Exception:  # noqa: BLE001
+        logger.debug("leaf-db mtime 索引构建失败，按原统计返回", exc_info=True)
+    return out
+
+
+def _merged_mtime_cells(cells: dict, extra: Optional[dict]) -> dict:
+    """把 leaf_status 的目录格子并进扫盘统计的格子，返回新 dict。
+
+    只**补缺**、不覆盖：两侧都是「session 数」，但口径随 index.db 构建进度不同，
+    混用会让页面数字来回跳。已存在的格子保持扫盘值。
+    """
+    out = {k: dict(v) for k, v in (cells or {}).items()}
+    for mt, c in (extra or {}).items():
+        cell = out.setdefault(mt, {"total": 0, "qualified": 0})
+        if cell.get("total", 0) <= 0:
+            cell["total"] = c.get("total", 0)
+            cell["qualified"] = c.get("qualified", 0)
+    return out
+
+
+def _merge_mtime_cells_from_leaf_db(env_dir, cells: dict) -> dict:
+    """用 leaf_status 快照补全 {api_key: {mtime_key: {total, qualified}}}，返回新 dict。
+
+    **为什么需要这一步**：导出目录列表唯一来源是 build_stats_multi 的 mtime_cells，
+    而它的扫盘快路径（.stats_index.json）会对历史叶子做 frozen 短路，只看
+    `stats_sync_rowid`。某小时目录若在 index.jsonl 还在写时就被冻结，那个小时里
+    **之后才出现**的 key 会永久缺席 mtime_cells —— 导出于是静默少一个目录
+    （现场实例：key-Nufb 首次出现在 f1563a05/261030/26103000 是 00:53，而该叶快照
+    冻结于 00:11，导出只有 01~10，00 点整小时丢失）。
+
+    leaf_status.stats_json 由 session worker 按 sync_rowid 水位维护、会自愈，所以
+    用它按 key 补齐。leaf_status 不可用（未初始化 / 读失败）时原样返回，行为与
+    改动前一致。
+    """
+    out = {k: dict(v) for k, v in (cells or {}).items()}
+    idx = _leaf_db_mtime_cells(env_dir)
+    if not idx:
+        return out
+    for api_key in out:
+        out[api_key] = _merged_mtime_cells(out[api_key], idx.get(api_key))
+    return out
+
+
 def _resolve_mt_for(env_dir, mt: str) -> Optional[str]:
     """把 mtime key（<root_id>/<rel> 或裸 <rel>）解析为叶子目录绝对路径。
 
@@ -1585,6 +1673,8 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         all_models = sorted({m for dist in model_stats.values() for m in dist})
 
         db_keys_list = list_keys()
+        # leaf_status 的 key→目录索引整表只建一次（逐 key 调用会读 N 次全表）。
+        _leaf_mtime_idx = _leaf_db_mtime_cells(env_dir)
 
         # 名称/slot/创建时间：直接用 DB key 列表按后 4 位匹配（多 root 不复用单 env 的 key_meta 缓存）
         def _match_meta(api_key: str):
@@ -1612,7 +1702,11 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
                 "created_at": created_at,
                 "total_sessions": row["row_total"],
                 "qualified_sessions": row["row_qualified"],
-                "mtime_distribution": row.get("mtime_cells", {}),
+                # 用 leaf_status 快照补齐「该 key 落在哪些小时目录」：扫盘统计的
+                # .stats_index.json 会把冻结在写入中途的小时快照永久沿用，
+                # 导致该小时后到的 key 在目录列表里缺席（见 _leaf_db_mtime_cells）。
+                "mtime_distribution": _merged_mtime_cells(
+                    row.get("mtime_cells", {}), _leaf_mtime_idx.get(api_key)),
                 "model_distribution": model_stats.get(api_key, {}),
                 "records": records,
             })
@@ -2298,7 +2392,12 @@ def register_export_routes(app: FastAPI, logs_dir: str) -> None:
         mtime_dirs = []
         for row in stats.get("rows", []):
             if row["api_key"] == api_key:
-                mtime_dirs = sorted(row.get("mtime_cells", {}).keys(), reverse=True)
+                # 用 leaf_status 快照补齐目录：扫盘统计的 .stats_index.json 会把
+                # 冻结在写入中途的小时快照永久沿用，该小时后到的 key 会缺席
+                # （见 _merge_mtime_cells_from_leaf_db）。
+                cells = _merge_mtime_cells_from_leaf_db(
+                    env_dir, {api_key: row.get("mtime_cells", {})})
+                mtime_dirs = sorted(cells.get(api_key, {}).keys(), reverse=True)
                 break
         if not mtime_dirs:
             return JSONResponse({"detail": "No session data found for this key"}, status_code=404)

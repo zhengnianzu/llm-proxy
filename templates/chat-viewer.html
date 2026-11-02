@@ -175,6 +175,92 @@
         .trace-item-ts { color: var(--muted-foreground); font-size: 10px; }
         .trace-item-model { color: #6366f1; font-size: 10px; margin-left: 4px; }
         .dark .trace-item-model { color: #a5b4fc; }
+        .trace-item-turns { color: var(--muted-foreground); font-size: 10px; margin-left: 4px; }
+        .trace-diff-btn {
+            color: var(--muted-foreground); font-size: 11px; margin-left: 5px;
+            text-decoration: none; padding: 0 3px; border-radius: 3px;
+        }
+        .trace-diff-btn:hover { color: var(--primary); background: var(--muted); }
+        .trace-item.diff-base { border-color: var(--primary); }
+        /* 关联列表弹窗（表格形态） */
+        .tlist-modal {
+            position: fixed; inset: 0; z-index: 9000; display: flex;
+            align-items: center; justify-content: center; padding: 24px;
+            background: rgba(0,0,0,.55); backdrop-filter: blur(2px);
+        }
+        .tlist-panel {
+            background: var(--background); border: 1px solid var(--border);
+            border-radius: 10px; width: min(1000px, 100%); max-height: 88vh;
+            display: flex; flex-direction: column; overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0,0,0,.5);
+        }
+        .tlist-head {
+            font-size: 13px; font-weight: 600; color: var(--foreground);
+            padding: 12px 16px; border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; gap: 12px;
+        }
+        .tlist-sub { font-size: 11px; color: var(--muted-foreground); font-weight: 400; }
+        .tlist-scroll { overflow: auto; padding: 4px 0 8px; }
+        .tlist-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .tlist-table th {
+            text-align: left; padding: 7px 12px; font-size: 10px; font-weight: 600;
+            color: var(--muted-foreground); text-transform: uppercase; letter-spacing: .05em;
+            border-bottom: 1px solid var(--border); position: sticky; top: 0;
+            background: var(--background); z-index: 1;
+        }
+        .tlist-table td {
+            padding: 7px 12px; border-bottom: 1px solid var(--border);
+            color: var(--foreground); vertical-align: middle;
+        }
+        .tlist-table tr:hover td { background: var(--muted); }
+        .tlist-table tr.current td { background: var(--accent); }
+        .tlist-table tr.kf td { font-weight: 700; }
+        .tlist-table tr.kf.mutation td:first-child { box-shadow: inset 3px 0 0 var(--destructive); }
+        .tlist-table td.name { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
+        .tlist-table td.ts { color: var(--muted-foreground); font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap; }
+        .tlist-table td.turns { color: var(--muted-foreground); white-space: nowrap; }
+        .tlist-table td.act { text-align: center; white-space: nowrap; }
+        .tlist-badge { color: var(--primary); font-size: 10px; margin-right: 4px; }
+        .tlist-badge.mut { color: var(--destructive); }
+        .tlist-link { color: var(--primary); text-decoration: none; cursor: pointer; }
+        .tlist-link:hover { text-decoration: underline; }
+        .tlist-sep { color: var(--border); margin: 0 5px; }
+        /* 对比结果：渲染在中间浏览窗口，沿用消息气泡风格，只在外框标识 */
+        .diff-bar {
+            position: sticky; top: 0; z-index: 5; background: var(--background);
+            border-bottom: 2px solid var(--border); padding: 8px 14px;
+            font-size: 12px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+        }
+        .diff-bar .badge { padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 700; }
+        .diff-bar .badge-src { background: #6e40c933; color: #a371f7; border: 1px solid #6e40c966; }
+        .diff-bar .badge-dst { background: #1f6feb33; color: #79b8ff; border: 1px solid #1f6feb66; }
+        .diff-bar .fname { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted-foreground); }
+        .diff-bar .diff-close {
+            margin-left: auto; cursor: pointer; border: 1px solid var(--border);
+            background: transparent; color: var(--muted-foreground); border-radius: 4px;
+            font-size: 11px; padding: 2px 10px;
+        }
+        .diff-bar .diff-close:hover { color: var(--foreground); border-color: var(--primary); }
+        /* 每条差异：只给整个对话框加边框标识，内部文字保持原样式不着色 */
+        .msg-row.diff-add .msg-bubble { border: 2px solid #3fb950; }
+        .msg-row.diff-del .msg-bubble { border: 2px solid #f85149; }
+        .msg-row.diff-mod .msg-bubble { border: 2px solid #d29922; }
+        .diff-tagrow { font-size: 10px; font-weight: 700; margin-bottom: 4px; }
+        .diff-tagrow.add { color: #3fb950; }
+        .diff-tagrow.del { color: var(--destructive); }
+        .diff-tagrow.mod { color: #d29922; }
+        .diff-gap { text-align: center; color: var(--faint); font-size: 11px; padding: 6px 0; }
+        /* 关键帧：段的代表文件，加粗高亮便于快速定位 */
+        .trace-item.keyframe { font-weight: 700; border-color: var(--border); background: var(--muted); }
+        .trace-item.keyframe .kf-badge { color: var(--primary); font-size: 10px; margin-right: 4px; }
+        .trace-item.keyframe.mutation { border-color: var(--destructive); }
+        .trace-item.keyframe.mutation .kf-badge { color: var(--destructive); }
+        .kf-meta { color: var(--muted-foreground); font-size: 10px; margin-left: 6px; font-weight: 500; }
+        /* 分析完成后标题变红，提示已有关键帧数据可看 */
+        .trace-toggle.kf-ready { color: var(--destructive); }
+        .trace-toggle.kf-ready:hover { color: var(--destructive); }
+        .trace-toggle .kf-state { margin-left: auto; font-size: 10px; font-weight: 500; opacity: .8; }
+        .kf-summary { font-size: 10px; color: var(--muted-foreground); padding: 2px 8px 4px; }
 
         /* ========= Metadata bar ========= */
         .metadata {
@@ -1530,7 +1616,7 @@ async function selectAggChain(idx, el) {
 
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     // 先用列表里已有的标量把详情面板画出来（不含「关联列表」），内容与明细并行加载。
-    const _paintDetail = function(traceList, usage) {
+    const _paintDetail = function(traceList, usage, keyframe) {
         const _failedTrace = (traceList || []).find(function(t) { return t.success === false; });
         renderDetailPanel({
             api_key: chain.api_key || '',
@@ -1545,6 +1631,11 @@ async function selectAggChain(idx, el) {
             has_failure: chain.has_failure || false,
             debug_file: _failedTrace ? _failedTrace.debug_file || '' : '',
             total_attempts: _failedTrace ? _failedTrace.total_attempts || 1 : 1,
+            keyframe: keyframe || null,
+            // 关键帧分析要绝对路径：logDir 只是相对 dir_key（"261029/26102906"），
+            // 后端 session-traces 返回的 leaf_path 才是可读文件的真实目录。
+            leaf_path: window._kfLeafPath || logDir || '',
+            session_key: window._kfSessionKey || '',
         });
     };
     _paintDetail([], null);
@@ -1556,14 +1647,14 @@ async function selectAggChain(idx, el) {
     // file_count 对不上了。
     const _chainQ = chain.chain_lookup
         ? `&chain_lookup=${encodeURIComponent(chain.chain_lookup)}` : '';
+    // 注意这里返回**整个响应**而不是只取 items：关键帧分析需要 session_key 定位会话。
     const _tracesPromise = (chain.file_count > 1 || chain.has_failure)
         ? fetch(`${_apiPrefix()}/session-traces?filename=${encodeURIComponent(chain.latest_file || '')}`
                 + `${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`
                 + `&api_key=${encodeURIComponent(chain.api_key || '')}${_chainQ}${_sharedParams()}`)
             .then(r => r.ok ? r.json() : null)
-            .then(d => (d && d.items) || null)
             .catch(() => null)
-        : Promise.resolve([]);
+        : Promise.resolve(null);
 
     if (chain.latest_file) {
         try {
@@ -1574,8 +1665,19 @@ async function selectAggChain(idx, el) {
             data._req_file = chain.latest_file;
             data._log_dir = logDir || '';
             renderMessages(data, `${chain.q1_preview || chain.latest_file}  (${chain.file_count} 个文件)`);
-            const traceList = await _tracesPromise;
-            _paintDetail(traceList, data._usage);
+            const _tracesRes = await _tracesPromise;
+            // 关键帧重绘时要用同一份 trace 列表与 chain，存到模块级状态。
+            // 注意 _kfSessionKey 必须在 _paintDetail 之前赋值——按钮的 data-session
+            // 是在渲染时读这个全局变量，赋值晚了按钮上就是空值。
+            window._kfTraceList = (_tracesRes && _tracesRes.items) || [];
+            window._kfChain = chain;
+            window._kfSessionKey = (_tracesRes && _tracesRes.session_key) || '';
+            // 绝对叶子路径由后端返回（logDir 只是相对 dir_key，worker 读不到文件）
+            window._kfLeafPath = (_tracesRes && _tracesRes.leaf_path) || '';
+            _paintDetail(window._kfTraceList, data._usage);
+            if (window._kfSessionKey) {
+                _loadKeyframeAnalysis(chain, logDir);
+            }
         } catch(e) {
             showError(`加载失败：${e.message}`);
         }
@@ -1613,9 +1715,402 @@ async function selectFile(item, el) {
     }
 }
 
+// ── 关键帧分析（「关联列表」旁的分析按钮） ───────────────────────────────
+// 结果存在 log_dir.db，页面重绘时从后端重新取，不依赖前端状态。
+// 提交后按 pending/running → done 轮询，最多约 12 秒。
+let _kfPollTimer = null;
+
+async function _loadKeyframeAnalysis(chain, logDir) {
+    const sk = window._kfSessionKey;
+    if (!sk) return;
+    // leaf_path 必须是**绝对路径**：DB 里存的是绝对叶子路径，而 logDir 只是
+    // 相对 dir_key（"261029/26102906"），用它查永远 miss → 每次都像没缓存。
+    const q = `leaf_path=${encodeURIComponent(window._kfLeafPath || '')}&session_key=${encodeURIComponent(sk)}${_sharedParams()}`;
+    try {
+        const r = await fetch(`${_apiPrefix()}/session-keyframes?${q}`);
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data.status === 'pending' || data.status === 'running') {
+            _kfPaint(chain, logDir, data);
+            _scheduleKfPoll(chain, logDir, 0);
+        } else if (data.status === 'done') {
+            _kfPaint(chain, logDir, data);
+        } else {
+            // 没有记录 / 上次失败 → 自动提交分析（不再需要点按钮）
+            _autoSubmitKeyframe(chain, logDir, data && data.status === 'failed');
+        }
+    } catch (e) { /* 加载失败不影响主内容 */ }
+}
+
+async function _autoSubmitKeyframe(chain, logDir, isRetry) {
+    const sk = window._kfSessionKey;
+    if (!sk) return;
+    // 自动分析此前失败的会话只重试一次，避免每次点击都重跑一个坏会话。
+    if (isRetry && window._kfRetried === sk) return;
+    if (isRetry) window._kfRetried = sk;
+
+    // 先画成「分析中」，让标题立刻有反馈
+    _kfPaint(chain, logDir, { status: 'pending', summary: {}, frames: [] });
+    try {
+        const _qToken = _sharedParams().replace(/^&/, '');
+        const url = `${_apiPrefix()}/session-keyframes/analyze${_qToken ? '?' + _qToken : ''}`;
+        const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                leaf_path: window._kfLeafPath || '',
+                session_key: sk,
+                api_key: chain.api_key || '',
+                force: false,
+            }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const res = await r.json();
+        if (res.status === 'done') {
+            // 已有缓存（force=false 时不会重新排队），直接再取一次结果
+            const q = `leaf_path=${encodeURIComponent(window._kfLeafPath || '')}&session_key=${encodeURIComponent(sk)}${_sharedParams()}`;
+            const r2 = await fetch(`${_apiPrefix()}/session-keyframes?${q}`);
+            if (r2.ok) _kfPaint(chain, logDir, await r2.json());
+        } else {
+            _scheduleKfPoll(chain, logDir, 0);
+        }
+    } catch (e) {
+        _kfPaint(chain, logDir, { status: 'failed', summary: { error: e.message }, frames: [] });
+    }
+}
+
+function _kfPaint(chain, logDir, keyframe) {
+    renderDetailPanel({
+        api_key: chain.api_key || '',
+        models: chain.models || (chain.model ? [chain.model] : []),
+        message_count: chain.message_count || 0,
+        first_time: chain.first_time || '',
+        last_time: chain.last_time || '',
+        file_count: chain.file_count || 1,
+        trace_list: window._kfTraceList || [],
+        latest_file: chain.latest_file || '',
+        usage: null,
+        has_failure: chain.has_failure || false,
+        debug_file: '',
+        total_attempts: 1,
+        keyframe: keyframe,
+        leaf_path: window._kfLeafPath || logDir || '',
+        session_key: window._kfSessionKey || '',
+    });
+}
+
+function _scheduleKfPoll(chain, logDir, n) {
+    if (_kfPollTimer) clearTimeout(_kfPollTimer);
+    if (n >= 40) return;
+    _kfPollTimer = setTimeout(async () => {
+        const sk = window._kfSessionKey;
+        // 同 _loadKeyframeAnalysis：必须用绝对 leaf_path，否则查不到 DB 里的记录
+        const q = `leaf_path=${encodeURIComponent(window._kfLeafPath || '')}&session_key=${encodeURIComponent(sk)}${_sharedParams()}`;
+        try {
+            const r = await fetch(`${_apiPrefix()}/session-keyframes?${q}`);
+            if (!r.ok) return;
+            const data = await r.json();
+            _kfPaint(chain, logDir, data);
+            if (data.status === 'pending' || data.status === 'running') {
+                _scheduleKfPoll(chain, logDir, n + 1);
+            }
+        } catch (e) { /* 忽略，下一轮再试 */ }
+    }, 300);
+}
+
+function _kfCurrentChain() {
+    return window._kfChain || null;
+}
+
+// ── 两个 trace 文件的消息级 diff ──────────────────────────────────────────
+// 以「当前正在查看的文件」为基准（左侧），被点击的关联文件为对比（右侧）。
+// 只做客户端比较：两个文件都已能通过 /file 取到完整 messages，无需后端参与。
+let _diffBaseFile = null;
+
+/** 把任意 content 结构压成可比较的纯文本。 */
+function _diffText(content) {
+    if (content == null) return '';
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        return content.map(b => {
+            if (typeof b === 'string') return b;
+            if (!b || typeof b !== 'object') return JSON.stringify(b);
+            if (b.type === 'tool_use') return `[tool_use: ${b.name || ''}]\n${JSON.stringify(b.input || {}, null, 2)}`;
+            if (b.type === 'tool_result') return typeof b.content === 'string' ? b.content : JSON.stringify(b.content || '', null, 2);
+            return b.text || b.thinking || JSON.stringify(b, null, 2);
+        }).join('\n');
+    }
+    return JSON.stringify(content, null, 2);
+}
+
+/** 词级 diff：返回 [左HTML, 右HTML]。对齐 chat-log-viewer 的 _word_diff_html。 */
+function _wordDiffHtml(a, b) {
+    const esc2 = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    const aw = String(a).split(/(\s+)/).filter(x => x !== '');
+    const bw = String(b).split(/(\s+)/).filter(x => x !== '');
+    // 超长文本直接整块标记，避免 O(n²) 卡死页面
+    if (aw.length > 4000 || bw.length > 4000) {
+        return [`<span class="diff-del">${esc2(a)}</span>`, `<span class="diff-ins">${esc2(b)}</span>`];
+    }
+    // 简单 LCS：只求长度，回溯出匹配对
+    const n = aw.length, m = bw.length;
+    const dp = Array.from({length: n + 1}, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+            dp[i][j] = aw[i] === bw[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+    let i = 0, j = 0;
+    const L = [], R = [];
+    const pushLeft = (t, cls) => L.push(cls ? `<span class="${cls}">${esc2(t)}</span>` : esc2(t));
+    const pushRight = (t, cls) => R.push(cls ? `<span class="${cls}">${esc2(t)}</span>` : esc2(t));
+    while (i < n && j < m) {
+        if (aw[i] === bw[j]) { pushLeft(aw[i]); pushRight(bw[j]); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { pushLeft(aw[i], 'diff-del'); i++; }
+        else { pushRight(bw[j], 'diff-ins'); j++; }
+    }
+    while (i < n) { pushLeft(aw[i++], 'diff-del'); }
+    while (j < m) { pushRight(bw[j++], 'diff-ins'); }
+    return [L.join(''), R.join('')];
+}
+
+async function _fetchFileMessages(filename, apiKey, leafPath) {
+    const logDir = currentLogDir();
+    const p = `filename=${encodeURIComponent(filename)}${logDir ? '&log_dir=' + encodeURIComponent(logDir) : ''}`;
+    const r = await fetch(`${_apiPrefix()}/file?${p}${_sharedParams()}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    return data.messages || [];
+}
+
+async function _diffTrace(filename, apiKey, leafPath) {
+    // 方向约定（按用户口径）：**当前浏览的文件是「目标」**，
+    // 表格里点选的那条是「源」——即用选中文件的内容去对照当前浏览的版本。
+    const dst = _diffBaseFile || (window._kfChain && window._kfChain.latest_file) || '';
+    const src = filename;
+    if (!dst) { showError('没有可对比的当前文件'); return; }
+    if (src === dst) { showError('源文件与目标文件相同'); return; }
+
+    _closeTraceList();
+    chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>对比中…</p></div>';
+    try {
+        const [aMsgs, bMsgs] = await Promise.all([
+            _fetchFileMessages(src, apiKey, leafPath),
+            _fetchFileMessages(dst, apiKey, leafPath),
+        ]);
+        _renderDiffInPanel(src, dst, aMsgs, bMsgs, apiKey);
+    } catch (e) {
+        showError(`对比失败：${e.message}`);
+    }
+}
+
+/**
+ * 对比结果渲染到中间浏览窗口。
+ *
+ * 视觉规则（按用户要求）：消息内容保持原有气泡样式，**不给文字加任何底色**；
+ * 只在整条气泡的**外边框**上区分类型——新增绿、删除红、修改黄。
+ * 相同消息折叠成一行计数，避免几百条消息把差异淹没。
+ */
+function _renderDiffInPanel(src, dst, aMsgs, bMsgs, apiKey) {
+    chatPanel.innerHTML = '';
+
+    const maxLen = Math.max(aMsgs.length, bMsgs.length);
+    let nAdd = 0, nDel = 0, nMod = 0, nSame = 0;
+    for (let i = 0; i < maxLen; i++) {
+        const a = aMsgs[i], b = bMsgs[i];
+        if (a && b && _diffText(a.content) === _diffText(b.content)) { nSame++; }
+        else if (!a) nAdd++;
+        else if (!b) nDel++;
+        else nMod++;
+    }
+
+    // 顶部条：标识源/目标 + 统计 + 关闭
+    const bar = document.createElement('div');
+    bar.className = 'diff-bar';
+    bar.innerHTML = `<span class="badge badge-src">源</span><span class="fname">${esc(src)}</span>`
+        + `<span style="color:var(--faint)">&#8594;</span>`
+        + `<span class="badge badge-dst">目标</span><span class="fname">${esc(dst)}</span>`
+        + `<span style="color:var(--muted-foreground);font-size:11px">共 ${maxLen} 条 · `
+        + `<span style="color:#3fb950">新增 ${nAdd}</span> / `
+        + `<span style="color:var(--destructive)">删除 ${nDel}</span> / `
+        + `<span style="color:#d29922">修改 ${nMod}</span> / `
+        + `相同 ${nSame}</span>`
+        + `<button class="diff-close" onclick="_closeDiffView('${esc(src)}','${esc(apiKey || '')}')">关闭对比</button>`;
+    chatPanel.appendChild(bar);
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'padding: 4px 0 40px;';
+    chatPanel.appendChild(wrap);
+
+    if (nSame === maxLen) {
+        wrap.innerHTML = '<div class="empty-state"><p>两个文件的消息内容完全相同（仅元数据不同）</p></div>';
+        return;
+    }
+
+    let sameStreak = 0;
+    const flushSame = () => {
+        if (sameStreak > 0) {
+            const g = document.createElement('div');
+            g.className = 'diff-gap';
+            g.textContent = `… ${sameStreak} 条相同消息（已折叠）…`;
+            wrap.appendChild(g);
+            sameStreak = 0;
+        }
+    };
+
+    for (let i = 0; i < maxLen; i++) {
+        const a = aMsgs[i], b = bMsgs[i];
+        const at = a ? _diffText(a.content) : '';
+        const bt = b ? _diffText(b.content) : '';
+        if (a && b && at === bt) { sameStreak++; continue; }
+        flushSame();
+
+        // 新增：渲染目标那条；删除：渲染源那条；修改：两条都渲染（先源后目标）
+        if (!a) {
+            wrap.appendChild(_diffMsgRow(b, 'add', '新增（仅目标有）', i));
+        } else if (!b) {
+            wrap.appendChild(_diffMsgRow(a, 'del', '删除（仅源有）', i));
+        } else {
+            wrap.appendChild(_diffMsgRow(a, 'del', '修改 · 源', i));
+            wrap.appendChild(_diffMsgRow(b, 'mod', '修改 · 目标', i));
+        }
+    }
+    flushSame();
+
+    // 复用现有消息渲染样式；气泡外框由 diff-add/del/mod 类标识
+    applyToolMode(wrap, _toolModeState);
+}
+
+/** 渲染一条差异消息：外层套 .msg-row，靠父类着色边框，内部仍是标准气泡。 */
+function _diffMsgRow(msg, kind, label, index) {
+    const holder = document.createElement('div');
+    holder.className = 'diff-row-holder';
+    const tag = document.createElement('div');
+    tag.className = 'diff-tagrow ' + kind;
+    tag.textContent = `#${index} ${label}`;
+    holder.appendChild(tag);
+
+    // 用现有渲染器画一个单条消息，再给它的 msg-row 加类型类
+    const tmp = document.createElement('div');
+    renderChatMessages(tmp, [msg], { showToolMode: false, toolModeState: _toolModeState });
+    const row = tmp.querySelector('.msg-row');
+    if (row) {
+        row.classList.add(kind === 'add' ? 'diff-add' : kind === 'del' ? 'diff-del' : 'diff-mod');
+        holder.appendChild(row);
+    } else {
+        holder.appendChild(tmp);
+    }
+    return holder;
+}
+
+function _closeDiffView(src, apiKey) {
+    const el = document.querySelector('.trace-item.active');
+    if (el) loadTraceFile(el, src, apiKey);
+    else if (src) loadTraceFile(null, src, apiKey);
+}
+
+// ── 关联列表弹窗（表格形态） ──────────────────────────────────────────────
+// 列表用表格呈现：时间 / 文件名 / 轮次 / 段 / 对比。点某行切换到该文件，
+// 点「对比」把它的内容与当前查看的文件做 diff，结果渲染到中间浏览窗口。
+
+function _openTraceList(triggerEl) {
+    const d = window._traceListData;
+    if (!d || !d.traces || !d.traces.length) return;
+    _closeTraceList();
+
+    // 关键帧信息：frames 描述段边界，traces 是逐条轮次
+    const kfByFile = {};
+    if (d.keyframe && d.keyframe.frames) {
+        d.keyframe.frames.forEach(f => { kfByFile[f.filename] = f; });
+    }
+    const kfTraces = {};
+    if (d.keyframe && d.keyframe.traces) {
+        d.keyframe.traces.forEach(x => { kfTraces[x.filename] = x; });
+    }
+
+    const rows = d.traces.map((t, i) => {
+        const frame = kfByFile[t.filename];
+        const kft = kfTraces[t.filename];
+        const ts = (t.ts || '').replace(/_/g, ' ').slice(0, 19);
+        const turns = (kft && kft.turns != null) ? kft.turns : '';
+        const seg = frame ? frame.index : '';
+        const isMut = frame && frame.boundary !== 'start' && frame.boundary !== 'continuation' && frame.boundary !== 'tail_truncate';
+        const rowCls = [
+            frame ? 'kf' : '',
+            isMut ? 'mutation' : '',
+            t.filename === d.latest_file ? 'current' : '',
+        ].filter(Boolean).join(' ');
+        const badge = frame ? `<span class="tlist-badge${isMut ? ' mut' : ''}">&#9670;</span>` : '';
+        const failMark = t.success === false ? ' <span style="color:var(--destructive)" title="失败">&#x2716;</span>' : '';
+        return `<tr class="${rowCls}">
+            <td class="ts">${esc(ts)}</td>
+            <td class="name">${badge}${esc(t.filename)}${failMark}</td>
+            <td class="turns">${turns === '' ? '—' : turns + ' 轮'}</td>
+            <td class="turns">${seg === '' ? '—' : seg}</td>
+            <td class="act">
+                <a class="tlist-link" onclick="_pickTrace('${esc(t.filename)}')">查看</a>
+                <span class="tlist-sep">|</span>
+                <a class="tlist-link" title="与当前查看的文件对比" onclick="_diffTrace('${esc(t.filename)}','${esc(d.api_key)}','${esc(d.leaf_path)}')">&#8646; 对比</a>
+            </td>
+        </tr>`;
+    }).join('');
+
+    const modal = document.createElement('div');
+    modal.id = 'traceListModal';
+    modal.className = 'tlist-modal';
+    modal.addEventListener('click', ev => { if (ev.target === modal) _closeTraceList(); });
+    modal.innerHTML = `
+        <div class="tlist-panel">
+            <div class="tlist-head">
+                关联列表
+                <span class="tlist-sub">${d.traces.length} 个请求文件 · 点「对比」与当前查看的文件做差异</span>
+                <button class="diff-close" style="margin-left:auto" onclick="_closeTraceList()">关闭 (Esc)</button>
+            </div>
+            <div class="tlist-scroll">
+                <table class="tlist-table">
+                    <thead><tr>
+                        <th>时间</th><th>文件名</th><th>轮次</th><th>段</th><th>操作</th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    document.addEventListener('keydown', _tlistEscHandler);
+}
+
+function _closeTraceList() {
+    const m = document.getElementById('traceListModal');
+    if (m) m.remove();
+    document.removeEventListener('keydown', _tlistEscHandler);
+}
+
+function _tlistEscHandler(ev) {
+    if (ev.key === 'Escape') _closeTraceList();
+}
+
+/** 弹窗里点「查看」：切到该文件并关闭弹窗。 */
+function _pickTrace(filename) {
+    _closeTraceList();
+    const d = window._traceListData || {};
+    loadTraceFile(null, filename, d.api_key || '');
+}
+
+
+
 async function loadTraceFile(el, filename, apiKey) {
-    document.querySelectorAll('#traceList .trace-item').forEach(t => t.classList.remove('active'));
-    el.classList.add('active');
+    // 关联列表已改为弹窗表格，不再有 #traceList .trace-item 元素；
+    // 这里仍然兼容 el 为 null 的调用（弹窗里点「查看」）。
+    if (el) {
+        document.querySelectorAll('#traceList .trace-item').forEach(t => {
+            t.classList.remove('active');
+            t.classList.remove('diff-base');
+        });
+        el.classList.add('active');
+        el.classList.add('diff-base');
+    }
+    // 记住当前查看的文件作为 diff 基准（弹窗里「对比」以它为源）
+    _diffBaseFile = filename;
     chatPanel.innerHTML = '<div class="empty-state"><span class="spinner"></span><p>加载中…</p></div>';
     try {
         const logDir = currentLogDir();
@@ -1666,21 +2161,33 @@ function renderDetailPanel(data) {
         }
     }
     if (data.trace_list && data.trace_list.length > 1) {
+        const kf = data.keyframe && data.keyframe.status === 'done' ? data.keyframe : null;
+        const kfBusy = data.keyframe && (data.keyframe.status === 'pending' || data.keyframe.status === 'running');
+        const kfDoneCls = kf ? ' kf-ready' : '';
+        // 关联列表改为点击弹窗（表格形态）；摘要仍留在详情面板里
         html += `<div class="trace-section">`;
-        html += `<div class="trace-toggle" onclick="this.querySelector('.trace-chevron').classList.toggle('open');this.nextElementSibling.classList.toggle('open')">`;
+        html += `<div class="trace-toggle${kfDoneCls}" onclick="_openTraceList(this)">`;
         html += `<span class="trace-chevron">&#9654;</span> 关联列表 (${data.trace_list.length})`;
+        if (kfBusy) html += `<span class="kf-state">分析中…</span>`;
+        else if (kf) html += `<span class="kf-state">已分析</span>`;
         html += `</div>`;
-        html += `<div class="trace-list" id="traceList">`;
-        data.trace_list.forEach((t, i) => {
-            const ts = (t.ts || '').replace(/_/g, ' ').slice(0, 19);
-            html += `<div class="trace-item${t.filename === data.latest_file ? ' active' : ''}" data-filename="${esc(t.filename)}" onclick="loadTraceFile(this, '${esc(t.filename)}', '${esc(data.api_key || '')}')">`;
-            html += `<div>${esc(t.filename)}${t.success === false ? ' <span style="color:var(--destructive)" title="失败">&#x2716;</span>' : ''}</div>`;
-            html += `<div><span class="trace-item-ts">${esc(ts)}</span>`;
-            if (t.model) html += `<span class="trace-item-model">${esc(t.model)}</span>`;
-            if (t.debug_file) html += ` <a href="#" onclick="event.stopPropagation();loadDebugFile('${esc(t.debug_file)}');return false" style="font-size:10px;color:var(--primary)">[日志]</a>`;
-            html += `</div></div>`;
-        });
-        html += `</div></div>`;
+        if (kf && kf.summary) {
+            const s = kf.summary;
+            html += `<div class="kf-summary">共 ${s.frame_count} 段 · ${s.trace_total} 次请求 · 最多 ${s.turns} 轮`
+                  + (s.break_count ? ` · <span style="color:var(--destructive)">${s.break_count} 处突变</span>` : ' · 无突变')
+                  + `</div>`;
+        } else if (data.keyframe && data.keyframe.status === 'failed') {
+            html += `<div class="kf-summary" style="color:var(--destructive)">分析失败：${esc((data.keyframe.summary || {}).error || '')}</div>`;
+        }
+        html += `</div>`;
+        // 表格数据挂在全局，供弹窗读取（详情面板会重绘，DOM 上的数据拿不到）
+        window._traceListData = {
+            traces: data.trace_list,
+            keyframe: data.keyframe || null,
+            latest_file: data.latest_file || '',
+            api_key: data.api_key || '',
+            leaf_path: data.leaf_path || '',
+        };
     }
     if (data.usage) {
         const u = data.usage;
