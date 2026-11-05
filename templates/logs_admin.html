@@ -1019,7 +1019,7 @@
                     <tbody>
                         <tr v-for="d in bkQueueRows" :key="d.dir_path"
                             :class="{'row-working': bkQueue.running === d.dir_path
-                                                || bkClearingRunning === d.dir_path}">
+                                                || bkClearingSet.has(d.dir_path)}">
                             <td><input type="checkbox" v-model="bkChecked" :value="d.dir_path"></td>
                             <td>
                                 <div class="mono" style="font-weight:600;">{{ bkLeafLabel(d) }}</div>
@@ -1037,7 +1037,7 @@
                             </td>
                             <td>
                                 <span :class="['badge', bkBadge(d.status)]">{{ bkStatusLabel(d.status) }}</span>
-                                <span v-if="bkClearingRunning === d.dir_path"
+                                <span v-if="bkClearingSet.has(d.dir_path)"
                                       class="badge badge-warn" style="margin-left:4px;"
                                       :title="'clear_worker 正在删除本地目录'">
                                     <span class="dot" style="background:currentColor;display:inline-block;
@@ -1490,12 +1490,23 @@ new Vue({
             return new Set(this.bkQueue.queued || []);
         },
         // 正在清理 / 待清理（来自 clear_worker 的独立队列）
+        // clear 支持多实例（CLEAR_CONCURRENCY），同一时刻可能有多个 running，
+        // 所以用集合判断而非单个字符串。
         bkClearingRunning: function() {
             return (this.bkQueue.clear && this.bkQueue.clear.running) || '';
         },
+        bkClearingSet: function() {
+            var c = this.bkQueue.clear || {};
+            var list = c.runnings;
+            if (!list || !list.length) {
+                // 兼容旧后端：只有单个 running 字段
+                return new Set(c.running ? [c.running] : []);
+            }
+            return new Set(list);
+        },
         bkClearSet: function() {
             var c = this.bkQueue.clear || {};
-            // paths 含 running + queued；running 单独用 bkClearingRunning 优先显示
+            // paths 含 running + queued；running 单独用 bkClearingSet 优先显示
             return new Set(c.paths || []);
         },
         // 分布图当前粒度的数据源（后端三种粒度都返回，前端切换不发请求）

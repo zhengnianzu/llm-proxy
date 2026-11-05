@@ -61,6 +61,18 @@ RM_TIMEOUT = int(os.getenv("CLEAR_WORKER_RM_TIMEOUT", "14400") or 14400)
 # obsutil / watch_worker 打开（NFS v3 hard,nolock），属瞬时冲突，手动 rm
 # 同一个文件立刻就能成功。失败任务会被排到队尾，隔一段时间再碰就过了。
 MAX_CLEAR_ATTEMPTS = int(os.getenv("CLEAR_WORKER_MAX_ATTEMPTS", "3") or 3)
+# EPERM 的**原位**重试次数与间隔。
+#
+# 实测：这个 NFS 挂载上删除「有进程打开着」的文件会直接返回 EPERM
+# （本地 ext4 会等句柄释放，NFSv3 服务端直接拒绝）。冲突窗口通常只有几秒
+# —— obsutil 读完这个文件就关句柄了。而排队重试要等整个队列（数百项、
+# 数小时）才轮到，等于把一个秒级问题拖成整轮重跑（rm 要重新 walk 几十万文件）。
+#
+# 所以先在本进程内短退避重试；仍失败才走队列重试链路（保留最终兜底）。
+RM_INPLACE_RETRIES = int(os.getenv("CLEAR_WORKER_INPLACE_RETRIES", "3") or 3)
+RM_INPLACE_DELAY = float(os.getenv("CLEAR_WORKER_INPLACE_DELAY", "15") or 15)
+# 判定为「句柄占用类」错误的关键字（大小写不敏感）
+_EPERM_MARKERS = ("operation not permitted", "permission denied")
 
 
 def _handle_signal(signum, frame):
@@ -86,11 +98,46 @@ def _setup_logging() -> None:
                         handlers=[logging.FileHandler(log_file, encoding="utf-8")])
 
 
+def _pid_alive(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _other_clear_alive(svc_dir: str) -> bool:
+    """除自己外，是否还有其它 clear_worker 实例在跑。
+
+    clear 支持多实例并行（CLEAR_CONCURRENCY），pid 文件为
+    clear_worker.pid / clear_worker.1.pid / clear_worker.2.pid ...
+    """
+    import glob
+    me = os.getpid()
+    for p in glob.glob(os.path.join(str(svc_dir), "clear_worker*.pid")):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                pid = int((f.read() or "").strip() or 0)
+        except (OSError, ValueError):
+            continue
+        if pid and pid != me and _pid_alive(pid):
+            return True
+    return False
+
+
 def _init_env() -> str:
     svc_dir = get_service_log_dir()
     backup_store.init_db(svc_dir)
     logdir_store.init_db(svc_dir)
-    n = backup_store.reset_clear_on_startup()
+    # 重置「上次中断的 running」只是一次性恢复动作，**多实例时必须加守卫**：
+    # 后启动的实例若无条件执行，会把先启动实例正在删的任务打回 queued，
+    # 两个进程同时 rm 同一个目录，EPERM 冲突概率大增。
+    if _other_clear_alive(svc_dir):
+        n = 0
+    else:
+        n = backup_store.reset_clear_on_startup()
     st = backup_store.clear_queue_stats()
     logger.info("clear_worker 启动 svc_dir=%s 重置中断任务=%d 队列=%d 超时=%ds",
                 svc_dir, n, st["queued"], RM_TIMEOUT)
@@ -124,6 +171,17 @@ def _safe_to_delete(dir_path: str, local_path: str, root_hint: str = "") -> tupl
     if not info.get("has_obs") or not info.get("obs_path"):
         return False, "未确认已上传 OBS（has_obs/obs_path 不满足）"
     return True, ""
+
+
+def _is_eperm(err: str) -> bool:
+    """错误是否属于「文件正被打开」类（NFSv3 下删除会返回 EPERM）。
+
+    实测：本地打开句柄后 os.remove 同一文件会稳定报
+    `PermissionError: [Errno 1] Operation not permitted`，而句柄释放后
+    手动 rm 立刻成功。这是**瞬时**冲突，适合原位重试。
+    """
+    e = (err or "").lower()
+    return any(m in e for m in _EPERM_MARKERS)
 
 
 def _do_rm(local_path: str) -> tuple:
@@ -173,6 +231,31 @@ def run_once() -> bool:
         return True
 
     ok, err = _do_rm(local_path)
+    # EPERM 类错误（文件正被 obsutil / watch_worker 打开）冲突窗口只有几秒，
+    # 先原位短退避重试；rm -rf 幂等，第二轮只处理剩余文件，开销很小。
+    # 其它错误（超时、磁盘满）直接走队列重试链路。
+    if not ok and _is_eperm(err):
+        for i in range(1, max(0, RM_INPLACE_RETRIES) + 1):
+            logger.info("清理遇到句柄占用 #%s，原位重试 %d/%d（%.0fs 后）",
+                        job.get("id"), i, RM_INPLACE_RETRIES, RM_INPLACE_DELAY)
+            _sleep(RM_INPLACE_DELAY)
+            if _shutdown_requested:
+                break
+            if not os.path.exists(local_path):
+                ok, err = True, ""
+                break
+            ok, err = _do_rm(local_path)
+            if ok:
+                backup_store.append_log(
+                    dir_path,
+                    f"文件占用已释放，原位重试 {i} 次后清理成功",
+                    event="deleted")
+                logger.info("清理完成（原位重试 %d 次）#%s %s",
+                            i, job.get("id"), local_path)
+                break
+            if not _is_eperm(err):
+                break
+
     if ok:
         backup_store.mark_backed_up(dir_path)
         backup_store.set_deleted(dir_path)

@@ -1419,7 +1419,12 @@ _WORKER_SPECS = {
     "backup": WorkerSpec("backup", "src.backup.worker", "backup_services"),
     # 本地清理：只删本地目录，与上传彻底分离。删除在 NFS 上可能无限阻塞，
     # 独立进程 + 独立队列可以避免卡住上传流水线，也便于分别统计。
-    "clear": WorkerSpec("clear", "src.backup.clear_worker", "clear_services"),
+    # 支持多实例并行（CLEAR_CONCURRENCY）：单叶平均 8.4 万文件，NFS 上每个
+    # unlink 一次 RPC，单实例吞吐约 100 叶/天，追不上入队速度
+    # （实测 11-05 入队 300/天 vs 完成 80/天，积压 525 个）。
+    # claim_next_clear 已是跨进程原子领取，多实例直接可用。
+    "clear": WorkerSpec("clear", "src.backup.clear_worker", "clear_services",
+                        instances_env="CLEAR_CONCURRENCY"),
     # 关键帧分析：对话浏览器里按会话提交的「分析」请求，切关键帧后把结果写回
     # log_dir.db。独立进程是因为分析一个会话要逐个读 trace 文件（NFS，最多上百个），
     # 放在 Web 请求里会让页面卡十几秒。

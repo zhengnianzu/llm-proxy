@@ -1828,7 +1828,7 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
             from utils.backup_store import clear_queue_stats
             clear_stats = clear_queue_stats()
         except Exception:  # noqa: BLE001
-            clear_stats = {"queued": 0, "running": "", "failed": 0}
+            clear_stats = {"queued": 0, "running": "", "runnings": [], "failed": 0}
 
         return JSONResponse({
             "running": running,

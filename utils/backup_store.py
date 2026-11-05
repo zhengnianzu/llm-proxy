@@ -909,17 +909,23 @@ def list_clear_queue() -> List[dict]:
 
 
 def clear_queue_stats() -> dict:
-    """清理队列概况。paths 供前端在队列表格里标出「正在清理」的行。"""
+    """清理队列概况。paths 供前端在队列表格里标出「正在清理」的行。
+
+    runnings 是**多个**并行 clear_worker 实例各自正在删的目录（clear 支持
+    CLEAR_CONCURRENCY 多实例，同一时刻可能有好几个 running）。
+    running 保留为第一个，兼容只认单个的老前端。
+    """
     with _lock:
         rows = _conn.execute(
             "SELECT dir_path, state FROM backup_clear_queue "
             "WHERE state IN ('queued','running') ORDER BY id").fetchall()
         failed = _conn.execute(
             "SELECT COUNT(*) AS n FROM backup_clear_queue WHERE state='failed'").fetchone()["n"]
-    running = next((r["dir_path"] for r in rows if r["state"] == "running"), "")
+    runnings = [r["dir_path"] for r in rows if r["state"] == "running"]
     return {
         "queued": sum(1 for r in rows if r["state"] == "queued"),
-        "running": running,
+        "running": runnings[0] if runnings else "",
+        "runnings": runnings,
         "failed": int(failed),
         # 前端用来判断某一行是否正在清理（含排队中）
         "paths": [r["dir_path"] for r in rows],
