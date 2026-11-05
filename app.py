@@ -342,6 +342,15 @@ def _is_monitor_auth_enabled() -> bool:
     return bool(os.getenv("MONITOR_USERNAME", "").strip())
 
 
+def _is_registration_enabled() -> bool:
+    """自助注册开关，默认关闭。关闭后 /register 返回 404（页面上也不给入口）。
+
+    账号改由管理员在 /users 页面或 POST /api/users 创建。要临时开放自助注册，
+    设 MONITOR_REGISTRATION_ENABLED=true（或 1/yes/on）。
+    """
+    return _env_enabled("MONITOR_REGISTRATION_ENABLED", default=False)
+
+
 def _is_monitor_login_valid(username: str, password: str) -> tuple[bool, str, str]:
     expected_user = os.getenv("MONITOR_USERNAME", "").strip()
     expected_password = os.getenv("MONITOR_PASSWORD", "")
@@ -605,6 +614,7 @@ async def monitor_login_page(request: Request, next: str = "/", add: str = ""):
             "next_path": _normalize_next_path(next),
             "error": "",
             "success": "注册成功，请登录" if registered else "",
+            "show_register_link": _is_registration_enabled(),
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -676,10 +686,17 @@ async def list_accounts(request: Request):
     return JSONResponse({"accounts": accounts, "current": current})
 
 
+def _register_disabled_response():
+    """自助注册关闭时的统一响应：对外表现为路由不存在。"""
+    return JSONResponse({"detail": "Not Found"}, status_code=404, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/register")
 async def register_page(request: Request):
     if not _is_monitor_auth_enabled():
         return RedirectResponse(url="/", status_code=303)
+    if not _is_registration_enabled():
+        return _register_disabled_response()
     from utils.user_store import has_users
     no_db_users = not has_users()
     return templates.TemplateResponse(
@@ -694,6 +711,8 @@ async def register_page(request: Request):
 async def register_submit(request: Request):
     if not _is_monitor_auth_enabled():
         return RedirectResponse(url="/", status_code=303)
+    if not _is_registration_enabled():
+        return _register_disabled_response()
     body_bytes = await request.body()
     form = parse_qs(body_bytes.decode("utf-8"), keep_blank_values=True)
     username = (form.get("username", [""])[0]).strip()

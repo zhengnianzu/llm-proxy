@@ -81,9 +81,11 @@
             <button type="submit" class="btn btn-primary btn-login">登录</button>
         </form>
 
+        {% if show_register_link %}
         <div style="margin-top: 16px; text-align: center; font-size: 0.9rem; color: var(--muted-foreground);">
             没有账号？<a href="/register" style="color: var(--primary); text-decoration: none; font-weight: 600;">注册账号</a>
         </div>
+        {% endif %}
     </div>
 </div>
 </body>

@@ -261,6 +261,58 @@
         .tlist-link { color: var(--primary); text-decoration: none; cursor: pointer; }
         .tlist-link:hover { text-decoration: underline; }
         .tlist-sep { color: var(--border); margin: 0 5px; }
+
+        /* ── 对比槽：显式列出「当前文件（目标）」与「对比文件（源）」 ───────── */
+        .tlist-slots {
+            display: flex; align-items: stretch; gap: 10px;
+            padding: 10px 16px 11px; border-bottom: 1px solid var(--border);
+            background: var(--muted);
+        }
+        .tlist-slot {
+            flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+            padding: 6px 10px; border-radius: 6px; background: var(--background);
+            border: 1px solid var(--border); border-left-width: 3px;
+        }
+        .tlist-slot.dst { border-left-color: #3fb950; }
+        .tlist-slot.src { border-left-color: var(--destructive); }
+        .tlist-slot .slot-k {
+            font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .05em; display: flex; align-items: center; gap: 5px;
+        }
+        .tlist-slot.dst .slot-k { color: #3fb950; }
+        .tlist-slot.src .slot-k { color: var(--destructive); }
+        .tlist-slot .slot-v {
+            font-family: ui-monospace, monospace; font-size: 11px; color: var(--foreground);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .tlist-slot .slot-v.empty { color: var(--faint); font-style: italic; font-family: inherit; }
+        .tlist-slot .slot-x {
+            margin-left: auto; cursor: pointer; color: var(--faint);
+            font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0;
+        }
+        .tlist-slot .slot-x:hover { color: var(--destructive); }
+        .tlist-run {
+            align-self: center; white-space: nowrap; font-size: 12px; font-weight: 600;
+            padding: 8px 16px; border-radius: 6px; cursor: pointer;
+            border: 1px solid var(--primary); background: var(--primary);
+            color: #fff; transition: opacity .15s;
+        }
+        .tlist-run:disabled {
+            opacity: .35; cursor: not-allowed;
+            background: transparent; color: var(--faint); border-color: var(--border);
+        }
+        .tlist-run:not(:disabled):hover { opacity: .85; }
+        /* 行内标记：该行已被选入某个槽 */
+        .tlist-table tr.role-dst td:first-child { box-shadow: inset 3px 0 0 #3fb950; }
+        .tlist-table tr.role-src td:first-child { box-shadow: inset 3px 0 0 var(--destructive); }
+        .tlist-table tr.role-dst td.name { color: #3fb950; }
+        .tlist-table tr.role-src td.name { color: var(--destructive); }
+        .tlist-role {
+            font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+            margin-left: 4px; vertical-align: 1px;
+        }
+        .tlist-role.dst { color: #3fb950; background: rgba(63,185,80,.14); }
+        .tlist-role.src { color: var(--destructive); background: rgba(248,81,73,.14); }
         /* 对比结果：渲染在中间浏览窗口，沿用消息气泡风格，只在外框标识 */
         .diff-bar {
             position: sticky; top: 0; z-index: 5; background: var(--background);
@@ -2031,12 +2083,12 @@ async function _fetchFileMessages(filename, apiKey, leafPath) {
     return data.messages || [];
 }
 
-async function _diffTrace(filename, apiKey, leafPath) {
-    // 方向约定（按用户口径）：**当前浏览的文件是「目标」**，
-    // 表格里点选的那条是「源」——即用选中文件的内容去对照当前浏览的版本。
-    const dst = _diffBaseFile || (window._kfChain && window._kfChain.latest_file) || '';
-    const src = filename;
+async function _diffTrace(srcFile, apiKey, leafPath, dstFile) {
+    // 方向约定（按用户口径）：**当前文件是「目标」（绿）**，表格里选中的是「源」（红）。
+    const dst = dstFile || _diffBaseFile || (window._kfChain && window._kfChain.latest_file) || '';
+    const src = srcFile;
     if (!dst) { showError('没有可对比的当前文件'); return; }
+    if (!src) { showError('没有选择对比文件'); return; }
     if (src === dst) { showError('源文件与目标文件相同'); return; }
 
     _closeTraceList();
@@ -2176,8 +2228,16 @@ function _openTraceList(triggerEl) {
         d.keyframe.traces.forEach(x => { kfTraces[x.filename] = x; });
     }
 
-    // 分页状态挂在 window 上：翻页只重绘 tbody，不重建弹窗
-    window._tlistState = { page: 0, size: TRACE_PAGE_SIZE, data: d, kfByFile, kfTraces };
+    // 分页状态挂在 window 上：翻页只重绘 tbody，不重建弹窗。
+    // 对比槽也在这里：dst = 当前查看的文件（目标/绿），src = 待对比的文件（源/红）。
+    // 注意 dst 不能跟着 _diffBaseFile 走 —— 后者是「当前浏览」，而这里要的是
+    // 打开弹窗那一刻的基准，否则用户点「查看」切文件后槽位会莫名跳走。
+    const curFile = _diffBaseFile || (window._kfChain && window._kfChain.latest_file) || d.latest_file || '';
+    window._tlistState = {
+        page: 0, size: TRACE_PAGE_SIZE, data: d, kfByFile, kfTraces,
+        dst: curFile,
+        src: (window._tlistSrc && window._tlistSrc !== curFile) ? window._tlistSrc : '',
+    };
 
     const modal = document.createElement('div');
     modal.id = 'traceListModal';
@@ -2187,9 +2247,10 @@ function _openTraceList(triggerEl) {
         <div class="tlist-panel">
             <div class="tlist-head">
                 关联列表
-                <span class="tlist-sub">${d.traces.length} 个请求文件 · 点「对比」与当前查看的文件做差异</span>
+                <span class="tlist-sub">${d.traces.length} 个请求文件 · 点「设为当前」/「设为对比」，再点「执行对比」</span>
                 <button class="diff-close" style="margin-left:auto" onclick="_closeTraceList()">关闭 (Esc)</button>
             </div>
+            <div class="tlist-slots" id="tlistSlots"></div>
             <div class="tlist-scroll">
                 <table class="tlist-table">
                     <thead><tr>
@@ -2231,23 +2292,34 @@ function _renderTracePage() {
                      : (t.msg_count != null ? t.msg_count : '');
         const seg = frame ? frame.index : '';
         const isMut = frame && frame.boundary !== 'start' && frame.boundary !== 'continuation' && frame.boundary !== 'tail_truncate';
+        const isDst = t.filename === st.dst;
+        const isSrc = t.filename === st.src;
         const rowCls = [
             frame ? 'kf' : '',
             isMut ? 'mutation' : '',
-            t.filename === d.latest_file ? 'current' : '',
+            isDst ? 'role-dst' : '',
+            isSrc ? 'role-src' : '',
         ].filter(Boolean).join(' ');
         const badge = frame ? `<span class="tlist-badge${isMut ? ' mut' : ''}">&#9670;</span>` : '';
         const failMark = t.success === false ? ' <span style="color:var(--destructive)" title="失败">&#x2716;</span>' : '';
+        // 槽位标记：让「哪一行被选成了当前/对比」在表格里一眼可见
+        const roleMark = (isDst ? '<span class="tlist-role dst">当前</span>' : '')
+                       + (isSrc ? '<span class="tlist-role src">对比</span>' : '');
+        const fn = esc(t.filename);
+        // 三段操作互相独立：查看=把该文件载入浏览窗口并置为「当前文件」，
+        // 设为对比=只占用源槽位，执行对比=在槽位就绪后才可用（在首行）。
+        const pickDst = isDst
+            ? `<span class="tlist-link" style="opacity:.4;cursor:default" title="已是当前文件">查看</span>`
+            : `<a class="tlist-link" title="载入浏览窗口，并设为「当前文件（目标）」" onclick="_pickTrace('${fn}')">查看</a>`;
+        const pickSrc = isSrc
+            ? '<span class="tlist-link" style="opacity:.4;cursor:default" title="已是对比文件">设为对比</span>'
+            : `<a class="tlist-link" title="设为「对比文件（源）」" onclick="_tlistPickSrc('${fn}')">设为对比</a>`;
         return `<tr class="${rowCls}">
             <td class="ts">${esc(ts)}</td>
-            <td class="name">${badge}${esc(t.filename)}${failMark}</td>
+            <td class="name">${badge}${fn}${roleMark}${failMark}</td>
             <td class="turns">${msgLen === '' ? '—' : msgLen + ' 条'}</td>
             <td class="turns">${seg === '' ? '—' : seg}</td>
-            <td class="act">
-                <a class="tlist-link" onclick="_pickTrace('${esc(t.filename)}')">查看</a>
-                <span class="tlist-sep">|</span>
-                <a class="tlist-link" title="与当前查看的文件对比" onclick="_diffTrace('${esc(t.filename)}','${esc(d.api_key)}','${esc(d.leaf_path)}')">&#8646; 对比</a>
-            </td>
+            <td class="act">${pickDst}<span class="tlist-sep">|</span>${pickSrc}</td>
         </tr>`;
     }).join('');
 
@@ -2263,7 +2335,75 @@ function _renderTracePage() {
             <button onclick="_tlistGoto(${pages - 1})" ${st.page >= pages - 1 ? 'disabled' : ''}>末页 &#187;</button>
             <span class="page-info">第 ${start + 1}–${Math.min(start + st.size, total)} 条 / 共 ${total} 条 · 第 ${st.page + 1} / ${pages} 页</span>`;
     }
+    _renderTlistSlots();
     _renderTraceSummary();
+}
+
+/**
+ * 对比槽：把「当前文件（目标，绿）」与「对比文件（源，红）」显式列在表格首行，
+ * 右侧是「执行对比」按钮。三段操作互相独立——设当前、设对比、执行，不再一键触发。
+ */
+function _renderTlistSlots() {
+    const st = window._tlistState;
+    const el = document.getElementById('tlistSlots');
+    if (!st || !el) return;
+    const ready = !!(st.dst && st.src && st.dst !== st.src);
+    const dstEmpty = !st.dst;
+    const srcEmpty = !st.src;
+    el.innerHTML = `
+        <div class="tlist-slot dst">
+            <div class="slot-k">当前文件（目标）
+                ${dstEmpty ? '' : `<span class="slot-x" title="清空" onclick="_tlistPickDst('')">&#10005;</span>`}
+            </div>
+            <div class="slot-v${dstEmpty ? ' empty' : ''}" title="${esc(st.dst)}">${dstEmpty ? '未选择' : esc(st.dst)}</div>
+        </div>
+        <button class="tlist-run" ${ready ? '' : 'disabled'}
+            title="${ready ? '以「对比文件」为源、「当前文件」为目标执行差异预览' : '需要先分别选定当前文件与对比文件（且不能相同）'}"
+            onclick="_tlistRunDiff()">&#8646; 执行对比</button>
+        <div class="tlist-slot src">
+            <div class="slot-k">对比文件（源）
+                ${srcEmpty ? '' : `<span class="slot-x" title="清空" onclick="_tlistPickSrc('')">&#10005;</span>`}
+            </div>
+            <div class="slot-v${srcEmpty ? ' empty' : ''}" title="${esc(st.src)}">${srcEmpty ? '未选择（在下方列表点「设为对比」）' : esc(st.src)}</div>
+        </div>`;
+}
+
+/** 设为「当前文件」（目标）：只更新槽位，不切换浏览窗口。 */
+function _tlistPickDst(filename) {
+    const st = window._tlistState;
+    if (!st) return;
+    st.dst = filename || '';
+    if (st.src && st.src === st.dst) st.src = '';
+    _renderTlistSlots();
+    _renderTraceTableOnly();
+}
+
+/** 设为「对比文件」（源）：只更新槽位，不立即拉取内容。 */
+function _tlistPickSrc(filename) {
+    const st = window._tlistState;
+    if (!st) return;
+    st.src = filename || '';
+    if (st.dst && st.src === st.dst) st.dst = '';
+    window._tlistSrc = st.src || '';   // 下次重开弹窗时保留
+    _renderTlistSlots();
+    _renderTraceTableOnly();
+}
+
+/** 只重绘 tbody（槽位变化时用，避免整页重排）。 */
+function _renderTraceTableOnly() {
+    const st = window._tlistState;
+    if (!st) return;
+    // 复用整页渲染保证行样式/角色标记一致；分页状态不变，开销可忽略（单页 20 行）
+    _renderTracePage();
+}
+
+/** 执行对比：源=对比文件，目标=当前文件，结果渲染到中间浏览窗口。 */
+function _tlistRunDiff() {
+    const st = window._tlistState;
+    if (!st || !st.dst || !st.src) return;
+    if (st.dst === st.src) { showError('当前文件与对比文件相同'); return; }
+    const d = st.data || {};
+    _diffTrace(st.src, d.api_key || '', d.leaf_path || '', st.dst);
 }
 
 function _tlistGoto(page) {
