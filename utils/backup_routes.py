@@ -1615,10 +1615,11 @@ def register_backup_routes(app: FastAPI, logs_dir: str, port: str = "") -> None:
         # 键与 mtime_tag 同构（YYMMDD…），字符串比较即可，不需要解析。
         from_raw = (request.query_params.get("from") or "").strip()
         to_raw = (request.query_params.get("to") or "").strip()
-        # 默认隐藏「已清理」：那些本地已删、OBS 归档完成，放进工作队列只会
-        # 稀释真正要看的内容。显式传 status=backed_up 时才显示。
-        hide_cleaned = (request.query_params.get("hide_cleaned", "1") not in
-                        ("0", "false", "no"))
+        # 是否隐藏「已清理（backed_up）」。默认 **显示全部**：这些是备份已完成、
+        # 本地已删的历史记录，用户要能看到「哪些备份过了」。
+        # 仅当前端显式传 hide_cleaned=1 时才隐藏（勾选「只看待处理」复选框）。
+        hide_cleaned = (request.query_params.get("hide_cleaned", "0") in
+                        ("1", "true", "yes"))
         paged = bool(page_raw or size_raw)
         _newapi_root = _extra_root_for_env(env_name) if env_name else None
 

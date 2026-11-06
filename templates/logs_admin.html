@@ -965,6 +965,11 @@
                             <option value="pending_delete">待删除</option>
                             <option value="missing">本地缺失</option>
                         </select>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:.78rem; white-space:nowrap; cursor:pointer;"
+                               title="隐藏已备份清理的历史记录，只看待备份 / 处理中的叶子">
+                            <input type="checkbox" v-model="bkHideCleaned" @change="bkApplyFilter" style="width:auto;">
+                            只看待处理
+                        </label>
                         <button class="btn btn-outline btn-sm" @click="bkToggleOrder">
                             {{ bkOrder === 'asc' ? '↑ 时间从旧到新' : '↓ 时间从新到旧' }}
                         </button>
@@ -1408,6 +1413,7 @@ new Vue({
         bkQueue: { running: '', queued: [], queue_len: 0, auto_submit: false, candidates: null },
         bkEnv: '',
         bkStatus: '',
+        bkHideCleaned: false,   // 「只看待处理」：隐藏已清理的历史记录，默认不勾
         bkOrder: 'asc',      // 时间从旧到新
         // 分布图联动的时间窗口：点柱子后写入，队列表格只显示该区间
         bkRange: { from: '', to: '', label: '', key: '' },
@@ -2052,7 +2058,10 @@ new Vue({
                   + '&order=' + encodeURIComponent(this.bkOrder);
             if (this.bkEnv) q += '&env_name=' + encodeURIComponent(this.bkEnv);
             if (this.bkStatus) q += '&status=' + encodeURIComponent(this.bkStatus);
-            // 分布图联动：只显示被点中的时间窗口。没选时由后端默认隐藏已清理行。
+            // 「只看待处理」：勾选后隐藏已清理（backed_up）的历史记录。
+            // 默认不勾 —— 列表展示全部，含已备份清理的历史。
+            if (this.bkHideCleaned) q += '&hide_cleaned=1';
+            // 分布图联动：只显示被点中的时间窗口。
             if (this.bkRange && (this.bkRange.from || this.bkRange.to)) {
                 if (this.bkRange.from) q += '&from=' + encodeURIComponent(this.bkRange.from);
                 if (this.bkRange.to) q += '&to=' + encodeURIComponent(this.bkRange.to);
