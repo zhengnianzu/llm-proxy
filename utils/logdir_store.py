@@ -201,6 +201,34 @@ def init_db(db_dir: str):
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_keyframe_status ON keyframe_analysis(status)"
         )
+        # 动作决策分析结果表：把会话里的工具调用抽成一条有序「动作链」，供
+        # /history/trajectory 画决策图。与 keyframe_analysis 同构但语义不同：
+        #   keyframe 判「上下文连不连续」（compaction/restart 等边界）
+        #   action   判「每个动作成没成」（成功/失败/失败原因/是否已修复）
+        # 两者独立提交、互不影响，共用同一套 claim/finish 异步管线。
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS action_analysis (
+                leaf_path    TEXT NOT NULL,
+                session_key  TEXT NOT NULL,
+                api_key      TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
+                requested_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                started_at   TEXT,
+                finished_at  TEXT,
+                error        TEXT NOT NULL DEFAULT '',
+                trace_total  INTEGER NOT NULL DEFAULT 0,
+                action_total INTEGER NOT NULL DEFAULT 0,
+                fail_total   INTEGER NOT NULL DEFAULT 0,
+                repaired_total INTEGER NOT NULL DEFAULT 0,
+                turns        INTEGER NOT NULL DEFAULT 0,
+                actions_json TEXT NOT NULL DEFAULT '[]',
+                traces_json  TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (leaf_path, session_key)
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_status ON action_analysis(status)"
+        )
         # 迁移：老库没有 traces_json 列则补上（逐 trace 的轮次/所属段，供关联列表展示）
         _kf_cols = {r[1] for r in _conn.execute("PRAGMA table_info(keyframe_analysis)").fetchall()}
         if "traces_json" not in _kf_cols:
@@ -1011,6 +1039,132 @@ def reset_stale_keyframe_requests() -> int:
     with _lock:
         cur = _conn.execute(
             "UPDATE keyframe_analysis SET status='pending', started_at=NULL "
+            "WHERE status='running' AND (started_at IS NULL OR "
+            "  datetime(started_at) < datetime('now','localtime','-30 minutes'))"
+        )
+        _conn.commit()
+        return cur.rowcount or 0
+
+
+# ── 动作决策分析（/history/trajectory 的动作决策图）──────────────────────
+# 与上面的关键帧分析是平行的两套：表不同、worker 不同、互不影响。
+
+
+def upsert_action_request(leaf_path: str, session_key: str, api_key: str = "",
+                          force: bool = False) -> str:
+    """登记一次动作分析请求。返回当前状态。
+
+    与 upsert_keyframe_request 同构：
+      - running / pending  → 原样返回，不重复入队
+      - done / failed      → force=False 直接用缓存，force=True 重跑
+
+    返回：'pending' | 'running' | 'done' | 'failed'
+    """
+    if not _ready() or not leaf_path or not session_key:
+        return "failed"
+    with _lock:
+        row = _conn.execute(
+            "SELECT status FROM action_analysis WHERE leaf_path = ? AND session_key = ?",
+            (leaf_path, session_key),
+        ).fetchone()
+        now = _now()
+        if row is None:
+            _conn.execute(
+                "INSERT INTO action_analysis "
+                "(leaf_path, session_key, api_key, status, requested_at) "
+                "VALUES (?,?,?,'pending',?)",
+                (leaf_path, session_key, api_key or "", now),
+            )
+            _conn.commit()
+            return "pending"
+
+        status = (row["status"] or "").strip()
+        if status in ("pending", "running"):
+            return status
+        if not force:
+            return status or "done"
+
+        _conn.execute(
+            "UPDATE action_analysis SET status='pending', requested_at=?, "
+            "started_at=NULL, finished_at=NULL, error='' "
+            "WHERE leaf_path = ? AND session_key = ?",
+            (now, leaf_path, session_key),
+        )
+        _conn.commit()
+        return "pending"
+
+
+def claim_action_request() -> Optional[dict]:
+    """worker 领取一条待分析请求：最老的 pending → running（跨进程原子）。"""
+    if not _ready():
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT * FROM action_analysis WHERE status = 'pending' "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        cur = _conn.execute(
+            "UPDATE action_analysis SET status='running', started_at=? "
+            "WHERE leaf_path = ? AND session_key = ? AND status = 'pending'",
+            (_now(), row["leaf_path"], row["session_key"]),
+        )
+        _conn.commit()
+        if cur.rowcount != 1:
+            return None
+        return dict(row)
+
+
+def finish_action_request(leaf_path: str, session_key: str, *, status: str,
+                          actions_json: str = "[]", traces_json: str = "[]",
+                          trace_total: int = 0, action_total: int = 0,
+                          fail_total: int = 0, repaired_total: int = 0,
+                          turns: int = 0, error: str = "") -> None:
+    """写回动作分析结果（成功或失败）。"""
+    if not _ready() or not leaf_path or not session_key:
+        return
+    with _lock:
+        _conn.execute(
+            "UPDATE action_analysis SET status=?, finished_at=?, error=?, "
+            "trace_total=?, action_total=?, fail_total=?, repaired_total=?, "
+            "turns=?, actions_json=?, traces_json=? "
+            "WHERE leaf_path = ? AND session_key = ?",
+            (status, _now(), error or "", int(trace_total), int(action_total),
+             int(fail_total), int(repaired_total), int(turns),
+             actions_json or "[]", traces_json or "[]", leaf_path, session_key),
+        )
+        _conn.commit()
+
+
+def get_action_analysis(leaf_path: str, session_key: str) -> Optional[dict]:
+    """读一条动作分析结果；没有记录返回 None。actions/traces 已解析成 list。"""
+    if not _ready() or not leaf_path or not session_key:
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT * FROM action_analysis WHERE leaf_path = ? AND session_key = ?",
+            (leaf_path, session_key),
+        ).fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    for key, field_name in (("actions", "actions_json"), ("traces", "traces_json")):
+        try:
+            out[key] = _json.loads(out.get(field_name) or "[]")
+        except (ValueError, TypeError):
+            out[key] = []
+        out.pop(field_name, None)
+    return out
+
+
+def reset_stale_action_requests() -> int:
+    """把超时未完成的 running 请求退回 pending（worker 崩溃/重启后的清理）。"""
+    if not _ready():
+        return 0
+    with _lock:
+        cur = _conn.execute(
+            "UPDATE action_analysis SET status='pending', started_at=NULL "
             "WHERE status='running' AND (started_at IS NULL OR "
             "  datetime(started_at) < datetime('now','localtime','-30 minutes'))"
         )

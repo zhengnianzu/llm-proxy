@@ -1358,6 +1358,26 @@ def session_key_for_file(leaf_dir: str, filename: str) -> Optional[str]:
         conn.close()
 
 
+def get_session_api_key(leaf_dir: str, session_key: str) -> str:
+    """取某个会话所属的 api_key（sessions.api_key）。
+
+    用于在「同名 session_key 出现在多个来源叶子」时消歧：分享链接里带了 key，
+    就只认 api_key 也匹配的那个叶子。查不到返回空串。
+    """
+    if not session_key or not _db_exists(leaf_dir):
+        return ""
+    conn = _connect(leaf_dir)
+    try:
+        row = conn.execute(
+            "SELECT api_key FROM sessions WHERE session_key = ? LIMIT 1", (session_key,)
+        ).fetchone()
+        return (row["api_key"] or "") if row else ""
+    except sqlite3.Error:
+        return ""
+    finally:
+        conn.close()
+
+
 def get_session_keys_by_chain(leaf_dir: str, chain_lookup: str) -> List[str]:
     """按链标识取出本叶子里属于同一段逻辑对话的 session_key 列表。
 

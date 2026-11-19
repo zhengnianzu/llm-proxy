@@ -1430,6 +1430,12 @@ _WORKER_SPECS = {
     # 放在 Web 请求里会让页面卡十几秒。
     "keyframe": WorkerSpec("keyframe", "src.keyframe.worker", "keyframe_services",
                            instances_env="KEYFRAME_CONCURRENCY"),
+    # 动作决策分析：把会话里的工具调用抽成一条有序动作链（成功/失败/原因/是否
+    # 已修复），供 /history/trajectory 画决策图。与 keyframe 是平行的两套——
+    # 前者判上下文连续性，后者判动作成败，表与 worker 都独立。
+    # 同样要读全部 trace 文件（NFS），故独立进程。
+    "actions": WorkerSpec("actions", "src.actions.worker", "action_services",
+                          instances_env="ACTIONS_CONCURRENCY"),
 }
 
 
@@ -1755,6 +1761,23 @@ def cmd_keyframe_worker(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_actions_worker(args: argparse.Namespace) -> int:
+    """动作决策分析 worker（/history/trajectory 的动作决策图）。"""
+    spec = _WORKER_SPECS["actions"]
+    action = args.actions_action
+    if action == "start":
+        return _worker_start(spec, args)
+    if action == "stop":
+        return _worker_stop(spec, args)
+    if action == "logs":
+        return _worker_logs(spec, args)
+    if action == "status":
+        return _print_worker_services(spec, load_state())
+    if action == "list":
+        return _print_worker_services(spec, load_state())
+    return 1
+
+
 def _start_all_workers(args: argparse.Namespace) -> None:
     """随 app 一起拉起导出 / 回填 / 实时索引 / session 预热 / 备份归档五个独立 worker。
 
@@ -1762,7 +1785,7 @@ def _start_all_workers(args: argparse.Namespace) -> None:
     导出会一直停在 queued、回填停在 pending、new-api 叶子不再实时同步、统计快照
     不再后台补算、备份队列停在 queued。默认随 `app start` 启动，`--no-workers` 可关闭。
     """
-    for name in ("export", "backfill", "watch", "session", "backup", "clear", "keyframe"):
+    for name in ("export", "backfill", "watch", "session", "backup", "clear", "keyframe", "actions"):
         try:
             _worker_start(_WORKER_SPECS[name], args)
         except Exception as e:
@@ -1771,7 +1794,7 @@ def _start_all_workers(args: argparse.Namespace) -> None:
 
 def _stop_all_workers(args: argparse.Namespace) -> None:
     """随 app 一起停止全部 worker（各自幂等：未在跑则跳过）。"""
-    for name in ("export", "backfill", "watch", "session", "backup", "clear", "keyframe"):
+    for name in ("export", "backfill", "watch", "session", "backup", "clear", "keyframe", "actions"):
         try:
             _worker_stop(_WORKER_SPECS[name], args)
         except Exception as e:
@@ -1925,6 +1948,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_worker_subparser(subparsers, "backup", "backup_action", cmd_backup_worker)
     _add_worker_subparser(subparsers, "clear", "clear_action", cmd_clear_worker)
     _add_worker_subparser(subparsers, "keyframe", "keyframe_action", cmd_keyframe_worker)
+    _add_worker_subparser(subparsers, "actions", "actions_action", cmd_actions_worker)
 
     # --- key subcommands ---
     p_key = subparsers.add_parser("key", help="API key management (list/add/del/stop/start/config)")

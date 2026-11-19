@@ -6,6 +6,7 @@
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -1249,6 +1250,56 @@ def submit_keyframe_analysis(api_key: str, leaf_path: str, session_key: str,
     return {"status": status, "leaf_path": leaf_path, "session_key": session_key}
 
 
+def get_action_analysis_payload(leaf_path: str, session_key: str) -> Dict[str, Any]:
+    """读某会话的动作决策分析结果，供 /history/trajectory 渲染。
+
+    返回 ``{"status": "none"|"pending"|"running"|"done"|"failed", "summary": {...},
+    "actions": [...], "traces": [...]}``。没有记录时 status='none'。
+
+    actions 是**跨 trace 合并后**的一条全局动作链（同一会话每条 trace 都带完整
+    历史，逐条拼接会重复十几倍）；traces 是逐 trace 的展示信息（动作数/失败数）。
+    """
+    empty = {"status": "none", "summary": {}, "actions": [], "traces": []}
+    if not leaf_path or not session_key:
+        return empty
+    try:
+        import utils.logdir_store as _lds
+        rec = _lds.get_action_analysis(leaf_path, session_key)
+    except Exception:  # noqa: BLE001
+        return empty
+    if rec is None:
+        return empty
+
+    summary = {
+        "trace_total": rec.get("trace_total", 0),
+        "action_total": rec.get("action_total", 0),
+        "fail_total": rec.get("fail_total", 0),
+        "repaired_total": rec.get("repaired_total", 0),
+        "turns": rec.get("turns", 0),
+        "finished_at": rec.get("finished_at") or "",
+        "error": rec.get("error") or "",
+    }
+    return {
+        "status": rec.get("status") or "none",
+        "summary": summary,
+        "actions": rec.get("actions") or [],
+        "traces": rec.get("traces") or [],
+    }
+
+
+def submit_action_analysis(api_key: str, leaf_path: str, session_key: str,
+                           force: bool = False) -> Dict[str, Any]:
+    """登记一次动作分析请求，由 actions worker 异步执行。"""
+    if not leaf_path or not session_key:
+        return {"status": "failed", "error": "missing leaf_path or session_key"}
+    try:
+        import utils.logdir_store as _lds
+        status = _lds.upsert_action_request(leaf_path, session_key, api_key, force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "failed", "error": str(exc)[:200]}
+    return {"status": status, "leaf_path": leaf_path, "session_key": session_key}
+
+
 def session_traces_payload(roots, env_dir: str, api_key: str, filename: str,
                            chain_lookup: str = "") -> Dict[str, Any]:
     """返回某个会话（由其某个请求文件名定位）的完整 trace 明细列表。
@@ -2359,6 +2410,169 @@ def register_log_routes(app: FastAPI) -> None:
             str(body.get("api_key") or ""),
             str(body.get("leaf_path") or ""),
             str(body.get("session_key") or ""),
+            force=bool(body.get("force")),
+        ))
+
+    def _leaf_for_source_ymdh(source: str, ymdh: str) -> str:
+        """把 URL 里的 source + ymdh 解析成**绝对**叶子路径。
+
+        页面只有 source（root_id）和 ymdh（8 位小时段，如 26110718），而
+        action_analysis 表按绝对 leaf_path 建键。数据库里登记过的叶子优先取
+        （与列表页同源，避免扫盘）；查不到再退回在 root 下探 <day>/<ymdh>。
+        """
+        if not ymdh:
+            return ""
+        if source:
+            day = ymdh[:6]
+            for leaf in _source_leaves(source):
+                if os.path.basename(os.path.normpath(leaf)) != ymdh:
+                    continue
+                # 同一 ymdh 可能在不同日期层重复，优先同一月份目录下的那个
+                if os.path.basename(os.path.dirname(os.path.normpath(leaf))) == day:
+                    return leaf
+            for leaf in _source_leaves(source):
+                if os.path.basename(os.path.normpath(leaf)) == ymdh:
+                    return leaf
+        # DB 里没有（新叶/未登记）：在该 root 下直接探 <day>/<ymdh>
+        from utils.logs_config import get_root_id
+        for root in _all_roots():
+            if source and get_root_id(root, _env_dir) != source:
+                continue
+            cand = os.path.join(root, ymdh[:6], ymdh)
+            if os.path.isdir(cand):
+                return cand
+        return ""
+
+    # 会话键是 ISO 时间戳（如 2026-11-12T05:00:11.271+08:00），可直接推出叶子
+    # 的日期层与小时段。分享链接里常常只有 session（没有 source/ymdh）——
+    # 例如 /history/trajectory?session=...&key=...，这时全靠它反推。
+    _SESSION_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T_ ](\d{2})")
+
+    def _ymdh_from_session(session: str) -> str:
+        """从会话键推导 8 位小时段（YYMMDDHH）；不是时间戳形态就返回空串。"""
+        m = _SESSION_TS_RE.match((session or "").strip())
+        if not m:
+            return ""
+        year, month, day, hour = m.groups()
+        return f"{year[2:]}{month}{day}{hour}"
+
+    def _leaf_candidates(source: str, ymdh: str) -> List[str]:
+        """按 ymdh 拼出可能的叶子目录（只做 isdir，不扫盘，不读 DB）。
+
+        各来源的模板不一致，实测两种布局都存在：<root>/<YYMMDD>/<YYMMDDHH>
+        与 <root>/<YYMMDDHH>。两种都试。
+        """
+        if not ymdh:
+            return []
+        day = ymdh[:6]
+        from utils.logs_config import get_root_id
+        out: List[str] = []
+        seen = set()
+        for root in _all_roots():
+            if source and get_root_id(root, _env_dir) != source:
+                continue
+            for cand in (os.path.join(root, day, ymdh), os.path.join(root, ymdh)):
+                if not os.path.isdir(cand):
+                    continue
+                key = os.path.normpath(cand)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(cand)
+        return out
+
+    def _leaf_for_session(source: str, ymdh: str, session: str,
+                          api_key: str = "") -> str:
+        """把会话定位到**绝对**叶子路径，尽量不依赖 URL 里的 source/ymdh。
+
+        同一个 session_key 在不同来源下可能重名（实测 26111205 这一小时里
+        jumper-001 / jumper-003 / proxy-004 三个叶子各有一条 05:00:11 开头的
+        会话，只差毫秒），所以候选叶子必须**打开 index.db 验证该会话确实在里面**，
+        不能拿第一个命中的目录就用。api_key 有值时只接受 api_key 也匹配的。
+        """
+        if not session:
+            return ""
+        if not ymdh:
+            ymdh = _ymdh_from_session(session)
+        if not ymdh:
+            return ""
+        cands = _leaf_candidates(source, ymdh)
+        if not cands:
+            # 拼路径没命中：退回已登记叶子（模板特殊或日期层更深的情形）
+            fallback = _leaf_for_source_ymdh(source, ymdh)
+            cands = [fallback] if fallback else []
+        if not cands:
+            return ""
+
+        for leaf in cands:
+            try:
+                traces = nidb.get_traces_for_session(leaf, session)
+            except Exception:  # noqa: BLE001
+                traces = []
+            if not traces:
+                continue
+            if api_key:
+                try:
+                    owner = nidb.get_session_api_key(leaf, session)
+                except Exception:  # noqa: BLE001
+                    owner = ""
+                if owner and owner != api_key:
+                    continue
+            return leaf
+
+        # 一条都没验证到：只有在候选唯一时才认（该叶可能还没建索引）
+        return cands[0] if len(cands) == 1 else ""
+
+    @app.get("/logs/session-actions")
+    def logs_session_actions(leaf_path: str = "", session_key: str = "",
+                             source: str = "", ymdh: str = "", session: str = "",
+                             key: str = ""):
+        """读某会话的动作决策分析结果（/history/trajectory 的动作决策图）。
+
+        三种定位方式（从精确到宽松）：
+          - leaf_path + session_key：绝对叶子路径（内部/直连，DB 里存的就是它）
+          - source + ymdh + session：页面 URL 的完整参数
+          - session (+ key)：分享链接的常见形态，由 session_key 的时间戳反推叶子
+
+        leaf_path 必须是**绝对路径**：action_analysis 表按绝对叶子路径建键，而
+        前端手上的 log_dir 只是相对 dir_key（"261029/26102906"），用它查永远 miss。
+        """
+        sk = session_key or session
+        leaf = leaf_path or _leaf_for_session(source, ymdh, sk, api_key=key)
+        payload = get_action_analysis_payload(leaf, sk)
+        # 把解析结果一并返回：前端提交分析时要带上绝对 leaf_path
+        payload["leaf_path"] = leaf
+        payload["session_key"] = sk
+        return JSONResponse(payload)
+
+    @app.post("/logs/session-actions/analyze")
+    async def logs_session_actions_analyze(request: Request):
+        """提交一次动作分析，由 actions worker 异步执行。
+
+        定位口径与 GET /logs/session-actions 一致：优先用 leaf_path；否则由
+        source/ymdh 或 session（自带时间戳）解析成绝对叶子。分享链接里通常只有
+        session + key，必须支持这种形态，否则「重新分析」会报 missing leaf_path。
+        """
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        sk = str(body.get("session_key") or body.get("session") or "")
+        api_key = str(body.get("api_key") or body.get("key") or "")
+        leaf = str(body.get("leaf_path") or "")
+        if not leaf:
+            leaf = _leaf_for_session(
+                str(body.get("source") or ""),
+                str(body.get("ymdh") or ""),
+                sk,
+                api_key=api_key,
+            )
+        return JSONResponse(submit_action_analysis(
+            api_key,
+            leaf,
+            sk,
             force=bool(body.get("force")),
         ))
 

@@ -1,0 +1,662 @@
+{% extends "_layout.html" %}
+{% set active_page = 'history' %}
+
+{% block title %}服务代理监控系统 - 动作决策图{% endblock %}
+{% block mobile_title %}动作决策图{% endblock %}
+
+{% block head_extra %}
+    <meta name="referrer" content="same-origin" />
+{% endblock %}
+
+{% block page_styles %}
+    /* 满屏布局：主区画布尽量大，左栏放会话与动作列表 */
+    .main-content { padding: 0 !important; display: flex; flex-direction: column; height: 100vh; }
+
+    .td-header {
+        background: var(--card);
+        padding: 10px 20px;
+        border-bottom: 1px solid var(--border);
+        box-shadow: var(--shadow-sm);
+        display: flex; align-items: center; gap: 12px;
+        flex-shrink: 0; flex-wrap: wrap;
+    }
+    .td-header h1 { font-size: 17px; font-weight: 600; color: var(--foreground); white-space: nowrap; }
+    .td-header .spacer { flex: 1; }
+    .td-btn {
+        padding: 5px 12px; border-radius: var(--radius);
+        border: 1px solid var(--input-border); background: var(--card);
+        color: var(--foreground); font-size: 13px; cursor: pointer; white-space: nowrap;
+    }
+    .td-btn:hover { background: var(--muted); }
+    .td-btn:disabled { opacity: .45; cursor: default; }
+    .td-btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+    .td-body { flex: 1; display: flex; min-height: 0; }
+
+    /* ── 左栏 ── */
+    .td-side {
+        width: 320px; flex-shrink: 0; display: flex; flex-direction: column;
+        border-right: 1px solid var(--border); background: var(--card); min-height: 0;
+    }
+    .td-side-scroll { flex: 1; overflow-y: auto; padding: 12px; }
+    .td-q1 {
+        font-size: 12.5px; line-height: 1.6; color: var(--foreground);
+        background: var(--muted); border-radius: var(--radius);
+        padding: 10px; margin-bottom: 12px; word-break: break-word;
+    }
+    .td-kv { display: flex; justify-content: space-between; font-size: 12.5px; padding: 3px 0; }
+    .td-kv .k { color: var(--muted-foreground); }
+    .td-kv .v { font-weight: 600; }
+    .td-section-title {
+        font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+        color: var(--muted-foreground); margin: 16px 0 6px;
+    }
+    .td-trace-item {
+        font-size: 12px; padding: 5px 8px; border-radius: var(--radius);
+        cursor: pointer; display: flex; justify-content: space-between; gap: 8px;
+    }
+    .td-trace-item:hover { background: var(--muted); }
+    .td-trace-item .f { color: var(--primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── 画布 ── */
+    .td-canvas-wrap { flex: 1; position: relative; overflow: hidden; background: var(--background); }
+    #tdCanvas { width: 100%; height: 100%; display: block; cursor: grab; }
+    #tdCanvas.dragging { cursor: grabbing; }
+
+    .td-empty {
+        position: absolute; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 12px;
+        color: var(--muted-foreground); font-size: 13.5px; text-align: center; padding: 20px;
+    }
+    .td-spinner {
+        width: 22px; height: 22px; border: 2px solid var(--border);
+        border-top-color: var(--primary); border-radius: 50%;
+        animation: tdspin .8s linear infinite;
+    }
+    @keyframes tdspin { to { transform: rotate(360deg); } }
+
+    /* ── 右侧详情抽屉 ── */
+    .td-drawer {
+        width: 0; flex-shrink: 0; overflow: hidden;
+        border-left: 1px solid var(--border); background: var(--card);
+        transition: width .18s ease; display: flex; flex-direction: column;
+    }
+    .td-drawer.open { width: 420px; }
+    .td-drawer-head {
+        padding: 10px 14px; border-bottom: 1px solid var(--border);
+        display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+    }
+    .td-drawer-head .t { font-size: 13px; font-weight: 600; flex: 1; }
+    .td-drawer-body { flex: 1; overflow-y: auto; padding: 12px 14px; font-size: 12.5px; }
+    .td-field { margin-bottom: 12px; }
+    .td-field .lbl { font-size: 11px; font-weight: 700; color: var(--muted-foreground); margin-bottom: 4px; }
+    .td-pre {
+        background: var(--muted); border-radius: var(--radius); padding: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+        line-height: 1.55; white-space: pre-wrap; word-break: break-all;
+        max-height: 320px; overflow-y: auto;
+    }
+
+    /* ── 图例 ── */
+    .td-legend {
+        position: absolute; left: 14px; bottom: 14px; display: flex; gap: 14px;
+        background: color-mix(in srgb, var(--card) 92%, transparent);
+        border: 1px solid var(--border); border-radius: var(--radius);
+        padding: 7px 12px; font-size: 11.5px; color: var(--muted-foreground);
+        backdrop-filter: blur(4px);
+    }
+    .td-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+    .td-legend .ok i { background: #16a34a; }
+    .td-legend .bad i { background: #dc2626; }
+    .td-legend .fix i { background: #f59e0b; }
+    .td-legend .unk i { background: #9ca3af; }
+{% endblock %}
+
+{% block content %}
+<div class="td-header">
+    <h1>动作决策图</h1>
+    <span id="tdStatus" style="font-size:12.5px;color:var(--muted-foreground)"></span>
+    <div class="spacer"></div>
+    <button class="td-btn" onclick="tdZoom(1.3)">放大 +</button>
+    <button class="td-btn" onclick="tdZoom(1/1.3)">缩小 −</button>
+    <button class="td-btn" onclick="tdReset()">适应窗口</button>
+    <button class="td-btn" onclick="tdToggleFailOnly()" id="tdFailBtn">只看失败</button>
+    <button class="td-btn primary" onclick="tdReanalyze()" id="tdReBtn">重新分析</button>
+    <a class="td-btn" href="/history" id="tdBackLink">← 对话浏览</a>
+</div>
+
+<div class="td-body">
+    <aside class="td-side">
+        <div class="td-side-scroll">
+            <div id="tdMeta"></div>
+            <div class="td-section-title">关联列表</div>
+            <div id="tdTraces"></div>
+        </div>
+    </aside>
+
+    <div class="td-canvas-wrap" id="tdWrap">
+        <svg id="tdCanvas" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div class="td-empty" id="tdEmpty">
+            <div class="td-spinner"></div>
+            <p id="tdEmptyText">正在加载会话…</p>
+        </div>
+        <div class="td-legend">
+            <span class="ok"><i></i>成功</span>
+            <span class="bad"><i></i>失败</span>
+            <span class="fix"><i></i>已定位并修复</span>
+            <span class="unk"><i></i>无结果</span>
+        </div>
+    </div>
+
+    <aside class="td-drawer" id="tdDrawer">
+        <div class="td-drawer-head">
+            <span class="t" id="tdDrawerTitle">动作详情</span>
+            <button class="td-btn" onclick="tdCloseDrawer()">关闭</button>
+        </div>
+        <div class="td-drawer-body" id="tdDrawerBody"></div>
+    </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ============================================================
+// 状态
+// ============================================================
+const tdParams = new URLSearchParams(window.location.search);
+const tdSource = tdParams.get('source') || '';
+const tdYmdh   = tdParams.get('ymdh') || '';
+const tdSession = tdParams.get('session') || '';
+const tdKey    = tdParams.get('key') || '';
+
+let tdState = {
+    status: 'none',
+    actions: [],
+    traces: [],
+    summary: {},
+    leaf_path: '',
+    session_key: tdSession,
+};
+let tdFailOnly = false;
+let tdView = { x: 0, y: 0, k: 1 };   // 平移 + 缩放
+let tdDrag = null;
+let tdPollTimer = null;
+let tdLayout = [];                   // 布局结果，供点击命中与重绘
+
+const tdCanvas = document.getElementById('tdCanvas');
+const tdWrap = document.getElementById('tdWrap');
+
+// ============================================================
+// 接口
+// ============================================================
+function tdQuery() {
+    const p = new URLSearchParams();
+    if (tdState.leaf_path) p.set('leaf_path', tdState.leaf_path);
+    if (tdState.session_key) p.set('session_key', tdState.session_key);
+    if (!p.has('leaf_path')) {
+        if (tdSource) p.set('source', tdSource);
+        if (tdYmdh) p.set('ymdh', tdYmdh);
+        if (tdSession) p.set('session', tdSession);
+    }
+    return p.toString();
+}
+
+async function tdFetchState() {
+    const r = await fetch('/logs/session-actions?' + tdQuery(), { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+}
+
+async function tdSubmitAnalysis(force) {
+    const body = {
+        leaf_path: tdState.leaf_path || '',
+        session_key: tdState.session_key || tdSession,
+        source: tdSource,
+        ymdh: tdYmdh,
+        session: tdSession,
+        force: !!force,
+    };
+    const r = await fetch('/logs/session-actions/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+}
+
+// ============================================================
+// 加载与轮询（沿用对话浏览页的关键帧轮询节奏）
+// ============================================================
+async function tdLoad(force) {
+    tdSetEmpty('正在加载会话…', true);
+    try {
+        const data = await tdFetchState();
+        tdState = Object.assign(tdState, data);
+        if (data.status === 'done') {
+            tdApply(data);
+            return;
+        }
+        if (data.status === 'pending' || data.status === 'running') {
+            tdSetHeader('分析中…');
+            tdSetEmpty('正在抽取动作链…', true);
+            tdSchedulePoll(0);
+            return;
+        }
+        if (data.status === 'failed') {
+            tdSetHeader('上次分析失败');
+            tdSetEmpty('分析失败：' + ((data.summary || {}).error || '') + '（点右上「重新分析」重试）', false);
+            return;
+        }
+        // status === 'none'：还没分析过，自动提交一次
+        const res = await tdSubmitAnalysis(force);
+        if (res.status === 'done') {
+            tdApply(await tdFetchState());
+        } else if (res.status === 'failed') {
+            tdSetHeader('提交失败');
+            tdSetEmpty('提交分析失败：' + (res.error || ''), false);
+        } else {
+            tdSetHeader('分析中…');
+            tdSetEmpty('正在抽取动作链…', true);
+            tdSchedulePoll(0);
+        }
+    } catch (e) {
+        tdSetHeader('加载失败');
+        tdSetEmpty('加载失败：' + e.message, false);
+    }
+}
+
+function tdSchedulePoll(n) {
+    if (tdPollTimer) clearTimeout(tdPollTimer);
+    if (n >= 60) { tdSetEmpty('分析超时，请稍后刷新重试。', false); return; }
+    tdPollTimer = setTimeout(async () => {
+        try {
+            const data = await tdFetchState();
+            tdState = Object.assign(tdState, data);
+            if (data.status === 'done') { tdApply(data); return; }
+            if (data.status === 'failed') {
+                tdSetHeader('分析失败');
+                tdSetEmpty('分析失败：' + ((data.summary || {}).error || ''), false);
+                return;
+            }
+            tdSchedulePoll(n + 1);
+        } catch (e) {
+            tdSchedulePoll(n + 1);
+        }
+    }, 400);
+}
+
+async function tdReanalyze() {
+    if (!confirm('重新分析会丢弃当前结果并重新读取该会话的全部 trace 文件，确定继续？')) return;
+    try {
+        tdSetEmpty('正在重新分析…', true);
+        await tdSubmitAnalysis(true);
+        tdSchedulePoll(0);
+    } catch (e) {
+        tdSetHeader('提交失败');
+        tdSetEmpty('提交失败：' + e.message, false);
+    }
+}
+
+// ============================================================
+// 渲染入口
+// ============================================================
+function tdApply(data) {
+    const s = data.summary || {};
+    tdState.actions = data.actions || [];
+    tdState.traces = data.traces || [];
+    tdState.summary = s;
+    tdSetHeader(
+        `${s.trace_total || 0} 个请求 · ${s.action_total || 0} 个动作 · `
+        + `${s.fail_total || 0} 次失败`
+        + (s.repaired_total ? ` · ${s.repaired_total} 处已定位修复` : '')
+    );
+    tdRenderMeta();
+    tdRenderTraces();
+    if (!tdState.actions.length) {
+        tdSetEmpty('该会话没有可展示的工具调用动作。', false);
+        return;
+    }
+    document.getElementById('tdEmpty').style.display = 'none';
+    tdDraw();
+}
+
+function tdRenderMeta() {
+    const el = document.getElementById('tdMeta');
+    const s = tdState.summary || {};
+    const failPct = s.action_total ? Math.round((s.fail_total / s.action_total) * 1000) / 10 : 0;
+    el.innerHTML = `
+        <div class="td-kv"><span class="k">Session</span>
+            <span class="v" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all">${tdEsc(tdState.session_key || '—')}</span></div>
+        <div class="td-kv"><span class="k">请求数</span><span class="v">${s.trace_total || 0}</span></div>
+        <div class="td-kv"><span class="k">动作数</span><span class="v">${s.action_total || 0}</span></div>
+        <div class="td-kv"><span class="k">成功</span><span class="v">${(s.action_total || 0) - (s.fail_total || 0)}</span></div>
+        <div class="td-kv"><span class="k">失败</span>
+            <span class="v" style="color:${s.fail_total ? '#dc2626' : 'inherit'}">${s.fail_total || 0} (${failPct}%)</span></div>
+        ${s.repaired_total ? `<div class="td-kv"><span class="k">已定位修复</span><span class="v" style="color:#f59e0b">${s.repaired_total}</span></div>` : ''}
+    `;
+}
+
+function tdRenderTraces() {
+    const el = document.getElementById('tdTraces');
+    const traces = tdState.traces || [];
+    if (!traces.length) { el.innerHTML = '<div style="font-size:12px;color:var(--muted-foreground)">无</div>'; return; }
+    el.innerHTML = traces.map(t => {
+        const fn = tdEsc(t.filename || '');
+        const bad = (t.fail || 0) > 0;
+        return `<div class="td-trace-item" title="${fn}">
+            <span class="f">${fn}</span>
+            <span style="white-space:nowrap;color:${bad ? '#dc2626' : 'var(--muted-foreground)'}">${t.actions || 0} 动作${bad ? ' · ' + t.fail + ' 失败' : ''}</span>
+        </div>`;
+    }).join('');
+}
+
+// ============================================================
+// 布局：把动作链排成行。
+// 同一「目的一组」的连续重试放同一行，失败与下一次尝试之间画回退弧。
+// 判定「同一组」的口径：连续动作里出现失败，则失败之后紧邻的若干动作视为重试，
+// 直到出现第一个成功动作为止（这一组收口）。这是启发式，但符合 agent 的
+// 「试 → 败 → 换个方式再试 → 成」结构。
+// ============================================================
+const TD_NODE_W = 190, TD_NODE_H = 62, TD_GAP_X = 46, TD_GAP_Y = 84, TD_PAD = 40;
+// 每行最多放几个节点。不带这个上限时，连续成功的一段会全部挤在同一行（实测
+// 该会话前 40 个动作全在一行，宽 9756px，缩放后小到看不清）。换行只是视觉折行，
+// 不改变「组」的语义。
+const TD_MAX_COLS = 12;
+
+function tdGroup(actions) {
+    // 返回 [{rowActions: [...], hasFail: bool}]
+    // 语义分组：失败 → 收口一行；失败后的第一次成功 → 收口一行（这一组是「重试并成功」）。
+    const raw = [];
+    let cur = [];
+    let retrying = false;
+    for (const a of actions) {
+        cur.push(a);
+        if (!a.ok) {
+            retrying = true;
+            raw.push({ rowActions: cur, hasFail: true });
+            cur = [];
+            continue;
+        }
+        if (retrying) {
+            raw.push({ rowActions: cur, hasFail: false });
+            cur = [];
+            retrying = false;
+        }
+    }
+    if (cur.length) raw.push({ rowActions: cur, hasFail: false });
+
+    // 视觉换行：超过 TD_MAX_COLS 的组切成多行。hasFail 只标在真正的最后一节上，
+    // 这样回退弧仍然从「失败节点」画向下一组，而不会从折行处画。
+    const rows = [];
+    for (const r of raw) {
+        const parts = [];
+        for (let i = 0; i < r.rowActions.length; i += TD_MAX_COLS) {
+            parts.push(r.rowActions.slice(i, i + TD_MAX_COLS));
+        }
+        parts.forEach((part, pi) => {
+            rows.push({
+                rowActions: part,
+                hasFail: r.hasFail && pi === parts.length - 1,
+                wrapped: pi > 0,
+            });
+        });
+    }
+    return rows;
+}
+
+function tdDraw() {
+    const all = tdState.actions || [];
+    const actions = tdFailOnly ? all.filter(a => !a.ok) : all;
+
+    // 视图尺寸
+    const vw = tdWrap.clientWidth || 900;
+    const vh = tdWrap.clientHeight || 600;
+
+    const rows = tdGroup(actions);
+    let maxCols = 0;
+    rows.forEach(r => { maxCols = Math.max(maxCols, r.rowActions.length); });
+    const contentW = TD_PAD * 2 + Math.max(1, maxCols) * (TD_NODE_W + TD_GAP_X);
+    const contentH = TD_PAD * 2 + Math.max(1, rows.length) * (TD_NODE_H + TD_GAP_Y);
+
+    tdCanvas.setAttribute('viewBox', `0 0 ${vw} ${vh}`);
+    tdCanvas.setAttribute('width', vw);
+    tdCanvas.setAttribute('height', vh);
+
+    // 初次渲染时做「适应窗口」，之后保留用户缩放
+    if (!tdDraw._fitted) {
+        const k = Math.min(vw / contentW, vh / contentH, 1);
+        tdView = { x: (vw - contentW * k) / 2, y: (vh - contentH * k) / 2, k };
+        tdDraw._fitted = true;
+    }
+
+    const parts = [];
+    const defs = [
+        `<defs>
+            <marker id="tdArrow" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+            <marker id="tdArrowBad" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+            </marker>
+        </defs>`,
+    ];
+    parts.push(`<g transform="translate(${tdView.x},${tdView.y}) scale(${tdView.k})">`);
+    tdLayout = [];
+
+    rows.forEach((row, ri) => {
+        const y = TD_PAD + ri * (TD_NODE_H + TD_GAP_Y);
+        row.rowActions.forEach((a, ci) => {
+            const x = TD_PAD + ci * (TD_NODE_W + TD_GAP_X);
+            tdLayout.push({ x, y, w: TD_NODE_W, h: TD_NODE_H, action: a });
+
+            const fail = !a.ok;
+            const repaired = fail && !!a.repair_hint;
+            const stroke = fail ? '#dc2626' : '#16a34a';
+            const fill = fail ? 'rgba(220,38,38,.06)' : 'rgba(22,163,74,.05)';
+            const dash = fail ? ' stroke-dasharray="5 3"' : '';
+            const idx = a.index;
+
+            // 节点
+            parts.push(
+                `<g class="td-node" style="cursor:pointer" data-i="${a.index}">`
+                + `<rect x="${x}" y="${y}" width="${TD_NODE_W}" height="${TD_NODE_H}" rx="7"
+                     fill="${fill}" stroke="${stroke}" stroke-width="1.5"${dash}/>
+                   <text x="${x + 10}" y="${y + 20}" font-size="11" font-weight="700"
+                         fill="${stroke}" font-family="ui-monospace,monospace">#${idx} ${tdEsc(a.name)}</text>
+                   <text x="${x + 10}" y="${y + 38}" font-size="10.5" fill="var(--foreground)"
+                         font-family="ui-monospace,monospace">${tdEsc(tdShort(a.args_preview, 26))}</text>
+                   <text x="${x + 10}" y="${y + 53}" font-size="10" fill="${fail ? '#dc2626' : 'var(--muted-foreground)'}"
+                         font-family="ui-monospace,monospace">${fail ? '✗ ' + tdEsc(tdShort(a.fail_text, 24)) : '✓ 成功'}</text>`
+                + (repaired ? `<circle cx="${x + TD_NODE_W - 10}" cy="${y + 10}" r="5" fill="#f59e0b"/>` : '')
+                + `</g>`
+            );
+
+            // 同一行内：连到下一个节点
+            if (ci < row.rowActions.length - 1) {
+                const nx = x + TD_NODE_W;
+                const ny = y + TD_NODE_H / 2;
+                const ex = x + TD_NODE_W + TD_GAP_X;
+                parts.push(
+                    `<line x1="${nx}" y1="${ny}" x2="${ex - 7}" y2="${ny}"
+                        stroke="${fail ? '#dc2626' : 'var(--border)'}" stroke-width="1.4"
+                        ${fail ? 'stroke-dasharray="4 3"' : ''}
+                        marker-end="url(#${fail ? 'tdArrowBad' : 'tdArrow'})"
+                        style="color:${fail ? '#dc2626' : 'var(--border)'}"/>`
+                );
+            }
+
+            // 行末失败 → 下一行首个动作：回退弧（红色虚线，表示「换策略重试」）
+            if (fail && ci === row.rowActions.length - 1 && ri < rows.length - 1) {
+                const next = rows[ri + 1].rowActions[0];
+                const sx = x + TD_NODE_W / 2;
+                const sy = y + TD_NODE_H;
+                const ex2 = TD_PAD + TD_NODE_W / 2;
+                const ey2 = TD_PAD + (ri + 1) * (TD_NODE_H + TD_GAP_Y);
+                const my = (sy + ey2) / 2;
+                parts.push(
+                    `<path d="M ${sx} ${sy} C ${sx} ${my}, ${ex2} ${my}, ${ex2} ${ey2 - 7}"
+                        fill="none" stroke="#dc2626" stroke-width="1.4"
+                        stroke-dasharray="4 4" opacity=".75"
+                        marker-end="url(#tdArrowBad)"/>`
+                );
+            }
+        });
+    });
+
+    parts.push('</g>');
+    tdCanvas.innerHTML = defs.join('') + parts.join('');
+    tdBindClicks();
+}
+
+function tdBindClicks() {
+    tdCanvas.querySelectorAll('.td-node').forEach(el => {
+        el.addEventListener('click', ev => {
+            ev.stopPropagation();
+            const i = parseInt(el.getAttribute('data-i'), 10);
+            tdOpenDrawer(i);
+        });
+    });
+}
+
+// ============================================================
+// 缩放 / 平移
+// ============================================================
+function tdZoom(factor, cx, cy) {
+    const vw = tdWrap.clientWidth || 900;
+    const vh = tdWrap.clientHeight || 600;
+    cx = (cx === undefined) ? vw / 2 : cx;
+    cy = (cy === undefined) ? vh / 2 : cy;
+    const k2 = Math.max(0.15, Math.min(4, tdView.k * factor));
+    // 保持鼠标点不动
+    tdView.x = cx - (cx - tdView.x) * (k2 / tdView.k);
+    tdView.y = cy - (cy - tdView.y) * (k2 / tdView.k);
+    tdView.k = k2;
+    tdDraw();
+    tdDraw._fitted = true;
+}
+
+function tdReset() {
+    tdDraw._fitted = false;
+    tdDraw();
+}
+
+tdCanvas.addEventListener('wheel', ev => {
+    if (!tdState.actions.length) return;
+    ev.preventDefault();
+    const rect = tdCanvas.getBoundingClientRect();
+    tdZoom(ev.deltaY < 0 ? 1.12 : 1 / 1.12, ev.clientX - rect.left, ev.clientY - rect.top);
+}, { passive: false });
+
+tdCanvas.addEventListener('mousedown', ev => {
+    if (!tdState.actions.length) return;
+    tdDrag = { sx: ev.clientX, sy: ev.clientY, ox: tdView.x, oy: tdView.y };
+    tdCanvas.classList.add('dragging');
+});
+window.addEventListener('mousemove', ev => {
+    if (!tdDrag) return;
+    tdView.x = tdDrag.ox + (ev.clientX - tdDrag.sx);
+    tdView.y = tdDrag.oy + (ev.clientY - tdDrag.sy);
+    tdDraw();
+});
+window.addEventListener('mouseup', () => {
+    if (!tdDrag) return;
+    tdDrag = null;
+    tdCanvas.classList.remove('dragging');
+});
+
+function tdToggleFailOnly() {
+    tdFailOnly = !tdFailOnly;
+    document.getElementById('tdFailBtn').textContent = tdFailOnly ? '显示全部' : '只看失败';
+    tdDraw._fitted = false;
+    tdDraw();
+}
+
+// ============================================================
+// 详情抽屉
+// ============================================================
+function tdOpenDrawer(i) {
+    const a = (tdState.actions || [])[i];
+    if (!a) return;
+    document.getElementById('tdDrawerTitle').textContent = `#${a.index} ${a.name}`;
+    const fail = a.ok ? '' : `
+        <div class="td-field">
+            <div class="lbl">失败原因（${tdEsc(a.fail_kind || '')}）</div>
+            <div class="td-pre" style="border-left:3px solid #dc2626">${tdEsc(a.fail_text || '(无)')}</div>
+        </div>`;
+    const hint = a.repair_hint ? `
+        <div class="td-field">
+            <div class="lbl">后续自述（已定位并修复）</div>
+            <div class="td-pre" style="border-left:3px solid #f59e0b">${tdEsc(a.repair_hint)}</div>
+        </div>` : '';
+    document.getElementById('tdDrawerBody').innerHTML = `
+        <div class="td-field">
+            <div class="lbl">状态</div>
+            <div>${a.ok ? '✓ 成功' : '✗ 失败'}${a.has_result === false ? '（无结果）' : ''}</div>
+        </div>
+        <div class="td-field">
+            <div class="lbl">参数</div>
+            <div class="td-pre">${tdEsc(a.args_preview || '(无)')}</div>
+        </div>
+        <div class="td-field">
+            <div class="lbl">结果</div>
+            <div class="td-pre">${tdEsc(a.result_preview || '(无)')}</div>
+        </div>
+        ${fail}${hint}
+    `;
+    document.getElementById('tdDrawer').classList.add('open');
+}
+
+function tdCloseDrawer() {
+    document.getElementById('tdDrawer').classList.remove('open');
+}
+
+// ============================================================
+// 小工具
+// ============================================================
+function tdEsc(s) {
+    return String(s === null || s === undefined ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function tdShort(s, n) {
+    s = String(s === null || s === undefined ? '' : s).replace(/\s+/g, ' ');
+    return s.length <= n ? s : s.slice(0, n - 1) + '…';
+}
+function tdSetHeader(t) { document.getElementById('tdStatus').textContent = t; }
+function tdSetEmpty(text, spin) {
+    const el = document.getElementById('tdEmpty');
+    el.style.display = 'flex';
+    el.innerHTML = (spin ? '<div class="td-spinner"></div>' : '') + `<p>${tdEsc(text)}</p>`;
+}
+
+// 窗口尺寸变化：重绘（保留缩放）
+let tdResizeTimer = null;
+window.addEventListener('resize', () => {
+    if (tdResizeTimer) clearTimeout(tdResizeTimer);
+    tdResizeTimer = setTimeout(() => { if (tdState.actions.length) tdDraw(); }, 150);
+});
+
+// 返回链接带上当前参数
+(function () {
+    const p = new URLSearchParams();
+    if (tdSource) p.set('source', tdSource);
+    if (tdYmdh) p.set('ymdh', tdYmdh);
+    if (tdSession) p.set('session', tdSession);
+    if (tdKey) p.set('key', tdKey);
+    const qs = p.toString();
+    document.getElementById('tdBackLink').href = '/history' + (qs ? '?' + qs : '');
+})();
+
+// 启动
+if (!tdSession && !tdSource) {
+    tdSetHeader('缺少参数');
+    tdSetEmpty('URL 需要带 session 参数（可直接从「对话浏览」页的动作决策图入口进入）。', false);
+} else {
+    tdLoad(false);
+}
+</script>
+{% endblock %}

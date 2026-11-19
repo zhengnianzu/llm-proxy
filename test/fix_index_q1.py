@@ -23,6 +23,7 @@ from utils.message_common import (
     _SKIP_PREFIXES,
     _INTERNAL_REQUEST_PATTERNS,
     _SKIP_CLEANED_PREFIXES,
+    _strip_noise,
 )
 
 ROOT = Path(__file__).parent.parent
@@ -34,6 +35,10 @@ def is_noise(text: str) -> bool:
     if any(text.startswith(p) for p in _SKIP_PREFIXES):
         return True
     if any(pat.search(text) for pat in _INTERNAL_REQUEST_PATTERNS):
+        return True
+    # Claude Code 注入的工作区上下文被包在 <system-reminder> 里，旧逻辑会把它整段
+    # 当成 Q1 存进 index.jsonl。剥掉后若什么都不剩，说明这条存量 Q1 纯属噪声。
+    if "<system-reminder>" in text and not _strip_noise(text):
         return True
     cleaned = text.strip()
     if cleaned and any(cleaned.startswith(p) for p in _SKIP_CLEANED_PREFIXES):

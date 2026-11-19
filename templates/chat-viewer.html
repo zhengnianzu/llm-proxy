@@ -2556,6 +2556,29 @@ function renderDetailPanel(data) {
         if (kfBusy) html += `<span class="kf-state">分析中…</span>`;
         else if (kf) html += `<span class="kf-state">已分析</span>`;
         html += `</div>`;
+        // 动作决策图入口：把会话里的工具调用画成决策链（成功/失败/原因/是否已修复）。
+        // 与关键帧分析是两套独立的东西——那边判上下文连续性，这边判动作成败。
+        // 带上 source / ymdh / session，新页面即可自己定位会话。
+        {
+            const _tdp = new URLSearchParams();
+            const _src = _currentRootValue();
+            if (_src) _tdp.set('source', _src);
+            else {
+                const _u = new URLSearchParams(window.location.search).get('source');
+                if (_u) _tdp.set('source', _u);
+            }
+            const _hourEl = document.getElementById('hourSelect');
+            const _ymdh = (_hourEl && _hourEl.value) || new URLSearchParams(window.location.search).get('ymdh') || '';
+            if (_ymdh) _tdp.set('ymdh', _ymdh);
+            const _sk = data.session_key || window._kfSessionKey || '';
+            if (_sk) _tdp.set('session', _sk);
+            const _ke = document.getElementById('filterKey');
+            if (_ke && _ke.value) _tdp.set('key', _ke.value);
+            const _qs = _tdp.toString();
+            html += `<a class="kf-summary" style="display:block;margin-top:6px;color:var(--primary);text-decoration:none;font-size:12px"
+                        href="/history/trajectory${_qs ? '?' + _qs : ''}" title="把会话里的工具调用画成动作决策链">
+                        &#9654; 动作决策图（工具调用成功/失败/修复）→</a>`;
+        }
         if (kf && kf.summary) {
             const s = kf.summary;
             html += `<div class="kf-summary">共 ${s.frame_count} 段 · ${s.trace_total} 次请求 · 最多 ${s.turns} 轮`

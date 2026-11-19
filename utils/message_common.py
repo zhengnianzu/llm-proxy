@@ -26,6 +26,8 @@ _SKIP_PREFIXES = (
     "(session bootstrap)",
     "A new session was started via /new",
     "A new session was started via /reset",
+    # 少数变体没有 <system-reminder> 包裹，直接以这句起头。
+    "As you answer the user's questions",
 )
 
 _SKIP_CLEANED_PREFIXES = (
@@ -57,7 +59,21 @@ _NOISE_PATTERNS = [
     re.compile(r"^System\s*\([^)]*\)\s*:\s*", re.IGNORECASE),
     re.compile(r"^下面就是新任务[^：:]*[：:]\s*"),
     re.compile(r"^任务名[：:][^，,]*[，,]\s*内容[：:]\s*"),
+    # 兜底：日志被截断导致只有开标签、没有闭合标签时，_SYSTEM_REMINDER_RE 的非贪婪
+    # 匹配会失配而整段残留。仅在以开标签起头时吃掉剩余全部。
+    re.compile(r"^\s*<system-reminder>[\s\S]*\Z", re.IGNORECASE),
 ]
+
+# Claude Code 把工作区上下文（gitStatus / attribution 规则）作为首条 user 消息注入，
+# 整体包在 <system-reminder> 里。它常与真实诉求同处一条消息、且可能出现在用户文字
+# 之后，所以不加 ^ 锚、只剥标签块，不丢整条消息；剥空了才由调用方跳到下一条。
+#
+# 替换成换行而非直接删除：真实 payload 里标签紧贴前一段文字（...不对<system-reminder>），
+# 而唯一的分隔符是闭合标签后的那个 \n。若连它一起删掉，前后两段用户文字会被粘成
+# 「...显示不对继续」。留一个 \n 保证分段，首尾多余的空白由 _strip_noise 收尾 strip。
+_SYSTEM_REMINDER_RE = re.compile(
+    r"[ \t]*<system-reminder>[\s\S]*?</system-reminder>[ \t]*\n?", re.IGNORECASE
+)
 
 _COMPACTION_GOAL_RE = re.compile(
     r"## Goal\s*\n(.*?)(?:\n##|\n</summary>|\Z)", re.DOTALL
@@ -122,8 +138,12 @@ def count_real_user_turns(messages: List[dict]) -> int:
         if any(pat.search(raw_text) for pat in _INTERNAL_REQUEST_PATTERNS):
             continue
 
-        cleaned = raw_text.strip()
-        if cleaned and any(cleaned.startswith(p) for p in _SKIP_CLEANED_PREFIXES):
+        cleaned = _strip_noise(raw_text)
+        if not cleaned:
+            # 剥掉 system-reminder / 信封后什么都不剩，不是真实用户轮次。
+            # 与 get_first_user_text 的跳过条件保持一致。
+            continue
+        if any(cleaned.startswith(p) for p in _SKIP_CLEANED_PREFIXES):
             continue
 
         count += 1
@@ -154,6 +174,9 @@ def _strip_noise(text: str) -> str:
     """循环去除已知噪声前缀，直到稳定。"""
     while True:
         prev = text
+        # 先处理成对的 <system-reminder>（替换为换行以保留分段），再跑删除型模式：
+        # 这样未闭合兜底只会碰到真正不成对的标签。
+        text = _SYSTEM_REMINDER_RE.sub("\n", text)
         for pat in _NOISE_PATTERNS:
             text = pat.sub("", text)
         if text == prev:

@@ -1763,6 +1763,21 @@ async def chat_viewer(request: Request):
     )
 
 
+@app.get("/history/trajectory")
+async def trajectory_page(request: Request):
+    """动作决策图：把会话里的工具调用画成一条决策链（成功/失败/修复）。
+
+    沿用 /history 的 source / ymdh / session 三参数语义，用户把 URL 里的
+    /history 改成 /history/trajectory 即可直达。参数本身在页面里由前端读取
+    （与 /history 一致），这里不需要解析。
+    """
+    return templates.TemplateResponse(
+        request,
+        "trajectory.html",
+        context=_ctx(request, "history"),
+    )
+
+
 # --- 公开导出浏览（access-key 验证，风格对齐「对话浏览」） ---
 
 
