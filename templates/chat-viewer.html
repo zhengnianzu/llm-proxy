@@ -2314,12 +2314,19 @@ function _renderTracePage() {
         const pickSrc = isSrc
             ? '<span class="tlist-link" style="opacity:.4;cursor:default" title="已是对比文件">设为对比</span>'
             : `<a class="tlist-link" title="设为「对比文件（源）」" onclick="_tlistPickSrc('${fn}')">设为对比</a>`;
+        // 下载：直连 /file/download，与详情面板「文件」行用的是同一个端点。
+        // export-view 模式下该端点忽略 log_dir、只按 filename + 授权 key 定位，
+        // 所以这里不必传 log_dir（trace 记录里本来也没有）。download 属性让浏览器
+        // 直接存盘而不是在标签页里打开 JSON。
+        const dl = `<a class="tlist-link" title="下载该请求文件（JSON）"`
+                 + ` href="${_apiPrefix()}/file/download?filename=${encodeURIComponent(t.filename)}${_sharedParams()}"`
+                 + ` download>下载</a>`;
         return `<tr class="${rowCls}">
             <td class="ts">${esc(ts)}</td>
             <td class="name">${badge}${fn}${roleMark}${failMark}</td>
             <td class="turns">${msgLen === '' ? '—' : msgLen + ' 条'}</td>
             <td class="turns">${seg === '' ? '—' : seg}</td>
-            <td class="act">${pickDst}<span class="tlist-sep">|</span>${pickSrc}</td>
+            <td class="act">${pickDst}<span class="tlist-sep">|</span>${pickSrc}<span class="tlist-sep">|</span>${dl}</td>
         </tr>`;
     }).join('');
 

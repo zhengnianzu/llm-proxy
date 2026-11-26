@@ -366,11 +366,34 @@ def _iter_openai_sse_chunks(resp_text: str):
             continue
 
 
+def _reasoning_text(obj: dict) -> str:
+    """取消息/delta 里的思考内容，兼容两种字段名。
+
+    多数上游用 `reasoning_content`（DeepSeek/GLM 等），但部分模型（实测
+    openPangu-v22-s1-pro，上游 pangu_ultra_moe，经 57 服务器）只用 `reasoning`。
+    只认前者会让这些模型的思考过程整段丢失，浏览页看不到 thinking 块。
+    `reasoning` 偶尔是对象（{content/text: ...}），一并归一成字符串。
+    """
+    if not isinstance(obj, dict):
+        return ""
+    for key in ("reasoning_content", "reasoning"):
+        v = obj.get(key)
+        if isinstance(v, str) and v:
+            return v
+        if isinstance(v, dict):
+            for k in ("content", "text", "reasoning_content"):
+                t = v.get(k)
+                if isinstance(t, str) and t:
+                    return t
+    return ""
+
+
 def _openai_message_to_blocks(msg: dict) -> list:
     """把 OpenAI 非流式 message（{content, reasoning_content, tool_calls}）
     转成与 Anthropic 一致的 block 列表。"""
     blocks: list = []
-    reasoning = msg.get("reasoning_content")
+    # 兼容 reasoning_content / reasoning 两种字段名（见 _reasoning_text）
+    reasoning = _reasoning_text(msg)
     if reasoning:
         blocks.append({"type": "thinking", "thinking": reasoning})
     text = msg.get("content")
@@ -429,8 +452,10 @@ def parse_openai_response_content(resp_text: str) -> Optional[list]:
         delta = (choices[0] or {}).get("delta") or {}
         if delta.get("content"):
             text_buf += delta["content"]
-        if delta.get("reasoning_content"):
-            reasoning_buf += delta["reasoning_content"]
+        # 兼容 reasoning_content / reasoning（见 _reasoning_text）
+        _r = _reasoning_text(delta)
+        if _r:
+            reasoning_buf += _r
         for tc in delta.get("tool_calls") or []:
             idx = tc.get("index", 0)
             slot = tools.setdefault(idx, {"id": "", "name": "", "args": ""})
@@ -513,8 +538,10 @@ def parse_openai_streaming_response(chunks: List[dict]) -> dict:
         if delta.get("content"):
             message["content"] = (message.get("content") or "") + delta["content"]
 
-        if delta.get("reasoning_content"):
-            message["reasoning_content"] = (message.get("reasoning_content") or "") + delta["reasoning_content"]
+        # 兼容 reasoning_content / reasoning（见 _reasoning_text）
+        _r = _reasoning_text(delta)
+        if _r:
+            message["reasoning_content"] = (message.get("reasoning_content") or "") + _r
 
         if delta.get("tool_calls"):
             for tc in delta["tool_calls"]:
@@ -585,8 +612,10 @@ def _normalize_openai_response(body: dict) -> dict:
         msg = dict(choices[0].get("message") or choices[0].get("delta") or {})
 
     content_blocks = []
-    if msg.get("reasoning_content"):
-        content_blocks.append({"type": "thinking", "thinking": msg["reasoning_content"]})
+    # 兼容 reasoning_content / reasoning（见 _reasoning_text）
+    _r = _reasoning_text(msg)
+    if _r:
+        content_blocks.append({"type": "thinking", "thinking": _r})
     text = msg.get("content")
     if text:
         content_blocks.append({"type": "text", "text": text})

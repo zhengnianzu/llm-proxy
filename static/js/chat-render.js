@@ -481,8 +481,11 @@ function renderChatMessages(container, messages, opts) {
             blocks = [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2) }];
         }
 
-        if (msg.reasoning_content) {
-            blocks = [{ type: 'thinking', thinking: msg.reasoning_content }].concat(blocks);
+        // 兼容 reasoning_content / reasoning：部分模型（如 openPangu）只用后者。
+        // new-api 路径已在后端归一成 thinking block，这里是消息级兜底。
+        var _reasoning = msg.reasoning_content || msg.reasoning;
+        if (_reasoning && typeof _reasoning === 'string') {
+            blocks = [{ type: 'thinking', thinking: _reasoning }].concat(blocks);
         }
 
         var displayRole = role === 'tool' ? 'user' : role;

@@ -440,7 +440,13 @@ def bulk_get(root_id: str) -> List[dict]:
 
 
 def count_summary(root_id: str) -> dict:
-    """{total, built, pending, building, error}；供列表页一次性读，无需全盘 stat。"""
+    """{total, built, pending, building, error}；供列表页一次性读，无需全盘 stat。
+
+    过滤 archived=0：备份侧删掉本地目录后打的归档标记（见 mark_archived）只是说
+    「本地已无数据源」，但 state 仍可能停在 pending。不过滤的话列表页会把几百个
+    已删除的叶子显示成待同步——实测某 root 显示 118 个 pending，其中 118 个全是
+    已归档的幽灵叶子，真实待同步为 0。
+    """
     if not _ready():
         return {"total": 0, "built": 0, "pending": 0, "building": 0, "error": 0}
     with _lock:
@@ -451,7 +457,7 @@ def count_summary(root_id: str) -> dict:
                 COALESCE(SUM(state = 'pending'), 0)               AS pending,
                 COALESCE(SUM(state = 'building'), 0)              AS building,
                 COALESCE(SUM(state = 'error'), 0)                 AS error
-            FROM leaf_status WHERE root_id = ?
+            FROM leaf_status WHERE root_id = ? AND archived = 0
         """, (root_id,)).fetchone()
     return {k: (row[k] or 0) for k in ("total", "built", "pending", "building", "error")}
 
@@ -1905,6 +1911,10 @@ def sync_leaf_detail(limit: int = 200, only_pending: bool = True) -> List[dict]:
 
     only_pending=True 时只返回「还需要同步」的叶子：未构建、有 pending 行、
     或还有没折叠成 session 的新行。这类叶子正是看板上该被关注的对象。
+
+    过滤 archived=0：与 count_summary 同口径。备份侧删掉本地目录后打的归档标记
+    只是说「本地已无数据源」，但 state/pending 字段会停在旧值；不过滤的话看板的
+    「待同步叶子明细」会把几百个已删除的幽灵叶子当成待摄取列出来。
     """
     if not _ready():
         return []
@@ -1912,7 +1922,7 @@ def sync_leaf_detail(limit: int = 200, only_pending: bool = True) -> List[dict]:
         rows = _conn.execute(
             "SELECT root_id, dir_key, leaf_path, state, built, sessions, ingested, "
             "pending, idx_size, synced_at, stats_json, token_stats_json "
-            "FROM leaf_status WHERE leaf_path != '' ORDER BY dir_key DESC"
+            "FROM leaf_status WHERE leaf_path != '' AND archived = 0 ORDER BY dir_key DESC"
         ).fetchall()
         # native 源（本项目格式）不走 newapi 的 ingest/enrich 流程，
         # leaf_status.ingested 对它们恒为 0。若照 newapi 口径算
