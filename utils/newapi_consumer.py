@@ -109,13 +109,16 @@ def _process_entry(entry: dict, leaf: Path,
     user_turns = fields["user_turns"]
     has_res = parsed["assistant_content"] is not None
     full_msg_count = msg_count + (1 if has_res else 0)
+    # 上游 metadata 给的权威会话身份；空则回退 q1_hash
+    sid = parsed.get("session_id") or ""
 
-    lookup_key = f"{api_key}||{q1_hash}"
+    lookup_key = f"sid||{sid}" if sid else f"{api_key}||{q1_hash}"
     sess_key = chain_map.get(lookup_key)
     session = sessions.get(sess_key) if sess_key else None
 
     # 新会话检测：user_turns 回落 ≤1 且低于已记录的峰值 → 另起会话
-    if session is not None and user_turns <= 1 and \
+    # sid 命中时跳过（与 newapi_index_db._agg_one 同口径）
+    if session is not None and not sid and user_turns <= 1 and \
        user_turns < session.get("_max_real_turns", 1):
         suffix = 1
         new_lookup = f"{lookup_key}##session_{suffix}"
@@ -238,13 +241,16 @@ def _process_entry_db(entry, leaf, root_dir, chain_map, sessions, _ss):
     has_res = parsed["assistant_content"] is not None
     full_msg_count = fields["msg_count"] + (1 if has_res else 0)
     user_turns = fields["user_turns"]
+    # 上游 metadata 给的权威会话身份；空则回退 q1_hash
+    sid = parsed.get("session_id") or ""
 
-    lookup_key = f"{api_key}||{fields['q1_hash']}"
+    lookup_key = f"sid||{sid}" if sid else f"{api_key}||{fields['q1_hash']}"
     sess_key = chain_map.get(lookup_key)
     session = sessions.get(sess_key) if sess_key else (
         _ss.get_session(sess_key) if sess_key else None)
 
-    if session is not None and user_turns <= 1 and \
+    # sid 命中时跳过启发式切分（与 newapi_index_db._agg_one 同口径）
+    if session is not None and not sid and user_turns <= 1 and \
        user_turns < session.get("_max_real_turns", 1):
         suffix = 1
         new_lookup = f"{lookup_key}##session_{suffix}"

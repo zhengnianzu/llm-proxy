@@ -1506,9 +1506,14 @@ function _appendAggItem(chain, globalIdx) {
     }
     const preview = taskText.slice(0, 80) || rawText.slice(0, 80);
 
+    // 聚合方式徽标：上游 metadata 给了权威会话身份时标出来，空（按 q1 内容推断）不显示
+    const SRC_LABEL = {session_id: '会话ID', user_id_json: '会话ID(内嵌)', user_id: '用户ID'};
+    const srcLabel = SRC_LABEL[chain.session_src] || '';
+    const srcBadge = srcLabel ? ` · <span style="color:var(--primary)">${esc(srcLabel)}</span>` : '';
+
     el.innerHTML = `
         <div class="file-item-name">${esc(preview || '(空)')}</div>
-        <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${(chain.models || [chain.model]).filter(Boolean).join(', ') || '?'}</div>
+        <div class="file-item-meta">${chain.message_count} 条 · ${chain.file_count} 个文件 · ${(chain.models || [chain.model]).filter(Boolean).join(', ') || '?'}${srcBadge}</div>
         <div class="file-item-meta" style="font-size:10px;color:var(--muted-foreground)">${esc(timestamp || chain.last_time || chain.first_time || '')}</div>
     `;
     el.addEventListener('click', () => selectAggChain(globalIdx, el));
@@ -1784,6 +1789,7 @@ async function selectAggChain(idx, el) {
             debug_file: _failedTrace ? _failedTrace.debug_file || '' : '',
             total_attempts: _failedTrace ? _failedTrace.total_attempts || 1 : 1,
             keyframe: keyframe || null,
+            session_src: chain.session_src || '',
             // 关键帧分析要绝对路径：logDir 只是相对 dir_key（"261029/26102906"），
             // 后端 session-traces 返回的 leaf_path 才是可读文件的真实目录。
             leaf_path: window._kfLeafPath || logDir || '',
@@ -1951,6 +1957,7 @@ function _kfPaint(chain, logDir, keyframe) {
         keyframe: keyframe,
         leaf_path: window._kfLeafPath || logDir || '',
         session_key: window._kfSessionKey || '',
+        session_src: chain.session_src || '',
     });
 }
 
@@ -2532,6 +2539,16 @@ function renderDetailPanel(data) {
              + `<div class="detail-value" style="font-family:ui-monospace,monospace;font-size:11.5px;word-break:break-all;user-select:all" title="点击可选中复制">${esc(data.session_key)}</div></div>`;
     }
     html += `<div class="detail-item"><div class="detail-label">消息数</div><div class="detail-value">${data.message_count || 0}</div></div>`;
+    // 聚合方式：上游 metadata 给的权威身份，还是按 q1 内容推断的
+    if (data.session_src) {
+        const SRC_DESC = {
+            session_id: 'metadata.session_id',
+            user_id_json: 'metadata.user_id 内嵌 session_id',
+            user_id: 'metadata.user_id',
+        };
+        html += `<div class="detail-item"><div class="detail-label">聚合依据</div>`
+             + `<div class="detail-value" style="font-size:11.5px">${esc(SRC_DESC[data.session_src] || data.session_src)}</div></div>`;
+    }
     if (data.first_time) {
         html += `<div class="detail-item"><div class="detail-label">首次时间</div><div class="detail-value">${esc(data.first_time)}</div></div>`;
     }

@@ -148,7 +148,10 @@ CREATE TABLE IF NOT EXISTS requests (
     q1_preview  TEXT,
     chain_key   TEXT,
     has_res     INTEGER,
-    attempts    INTEGER DEFAULT 0   -- enrich 尝试次数；瞬态失败累计到 _MAX_ENRICH_ATTEMPTS 才标死
+    attempts    INTEGER DEFAULT 0,  -- enrich 尝试次数；瞬态失败累计到 _MAX_ENRICH_ATTEMPTS 才标死
+    -- 上游 metadata 给的权威会话身份（见 newapi_format.extract_session_identity）：
+    session_id  TEXT,               -- 空/NULL = 上游没给，聚合回退 q1_hash
+    session_src TEXT                -- session_id | user_id_json | user_id | ''(回退 q1_hash)
 );
 CREATE INDEX IF NOT EXISTS requests_pending ON requests(q1_hash) WHERE q1_hash IS NULL;
 CREATE INDEX IF NOT EXISTS requests_lookup  ON requests(api_key, q1_hash);
@@ -164,7 +167,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_ts         TEXT DEFAULT '',
     has_failure     INTEGER DEFAULT 0,
     best_req_count  INTEGER DEFAULT 0,
-    max_real_turns  INTEGER DEFAULT 0
+    max_real_turns  INTEGER DEFAULT 0,
+    -- 本会话是靠哪种身份聚合出来的（空=q1_hash）。UI 据此显示徽标。
+    session_id      TEXT DEFAULT '',
+    session_src     TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS sessions_last_ts ON sessions(last_ts);
 CREATE INDEX IF NOT EXISTS sessions_api_key ON sessions(api_key);
@@ -228,6 +234,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "attempts" not in cols:
         conn.execute("ALTER TABLE requests ADD COLUMN attempts INTEGER DEFAULT 0")
         conn.commit()
+    # 上游 metadata 会话身份（2026-11 新增）。老库补列后留空，存量行不回填：
+    # session_id 只能在 enrich 解析合并文件时取到，而已 enrich 的行 q1_hash
+    # 非 NULL、不会被重扫，故历史叶子继续按 q1_hash 聚合。
+    for col in ("session_id", "session_src"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
+            conn.commit()
+    scols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    for col in ("session_id", "session_src"):
+        if col not in scols:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT ''")
+            conn.commit()
     # 老库补 traces 去重唯一键。历史库由 rebuild_sessions 的 DELETE+全量插生成，
     # 理论上无重复；万一有（曾被外部工具半途写入），降级为普通索引，不让连接路径报错。
     try:
@@ -384,7 +402,8 @@ def pending_count(leaf_dir: str) -> int:
 
 def _worker_enrich(leaf_dir: str, req_files: List[str]) -> List[tuple]:
     """子进程：解析一批合并文件，算 meta，返回 (req_file, q1_hash, msg_count,
-    user_turns, q1_preview, chain_key, has_res, success, model, ts) 列表。"""
+    user_turns, q1_preview, chain_key, has_res, success, model, ts,
+    session_id, session_src) 列表。"""
     from utils.newapi_format import parse_combined_file, compute_session_fields
     from utils.newapi_consumer import _resolve_combined_path
 
@@ -395,11 +414,11 @@ def _worker_enrich(leaf_dir: str, req_files: List[str]) -> List[tuple]:
         if path is None:
             # 文件缺失/损坏：q1_hash='' 防重扫，msg_count=-1 作解析失败标记
             # （rebuild_sessions 会跳过，等价 _process_entry 的 path/parsed None → return）
-            out.append((req_file, "", -1, 0, "", "", 0, 0, "", ""))
+            out.append((req_file, "", -1, 0, "", "", 0, 0, "", "", "", ""))
             continue
         parsed = parse_combined_file(path)
         if parsed is None:
-            out.append((req_file, "", -1, 0, "", "", 0, 0, "", ""))
+            out.append((req_file, "", -1, 0, "", "", 0, 0, "", "", "", ""))
             continue
         messages = parsed["messages"]
         fields = compute_session_fields(messages)
@@ -415,6 +434,8 @@ def _worker_enrich(leaf_dir: str, req_files: List[str]) -> List[tuple]:
             1 if parsed["success"] else 0,
             parsed["model"] or "",
             parsed["ts"] or "",
+            parsed.get("session_id") or "",
+            parsed.get("session_src") or "",
         ))
     return out
 
@@ -483,9 +504,11 @@ def enrich(leaf_dir: str, workers: int = 8, progress_cb=None,
                     w.executemany(
                         "UPDATE requests SET q1_hash=?, msg_count=?, user_turns=?, q1_preview=?, "
                         "chain_key=?, has_res=?, success=?, model=COALESCE(NULLIF(?,''), model), "
-                        "ts=COALESCE(NULLIF(?,''), ts) WHERE req_file=?",
+                        "ts=COALESCE(NULLIF(?,''), ts), session_id=?, session_src=? "
+                        "WHERE req_file=?",
                         [(r[1], r[2], r[3], _safe_text(r[4]), _safe_text(r[5]), r[6], r[7],
-                          _safe_text(r[8]), _safe_text(r[9]), r[0]) for r in ok_rows],
+                          _safe_text(r[8]), _safe_text(r[9]),
+                          _safe_text(r[10]), _safe_text(r[11]), r[0]) for r in ok_rows],
                     )
                 if fail_rows:
                     # 瞬态失败（合并文件多为「尚未落盘」）：累加 attempts，q1_hash 仍留 NULL 下轮重扫重试；
@@ -591,7 +614,8 @@ def rebuild_sessions(leaf_dir: str) -> int:
         try:
             rows = conn.execute(
                 "SELECT req_file, ts, model, api_key, q1_hash, msg_count, user_turns, "
-                "q1_preview, chain_key, has_res, success FROM requests "
+                "q1_preview, chain_key, has_res, success, session_id, session_src "
+                "FROM requests "
                 "WHERE q1_hash IS NOT NULL AND msg_count >= 0 ORDER BY rowid"
             ).fetchall()
 
@@ -609,12 +633,14 @@ def rebuild_sessions(leaf_dir: str) -> int:
                 has_failure = 1 if any(not t.get("_ok", True) for t in s["trace_list"]) else 0
                 conn.execute(
                     "INSERT INTO sessions(session_key, api_key, q1, models, latest_file, msg_count, "
-                    "first_ts, last_ts, has_failure, best_req_count, max_real_turns) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "first_ts, last_ts, has_failure, best_req_count, max_real_turns, "
+                    "session_id, session_src) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         sk, s["api_key"], s["q1"], json.dumps(s["models"], ensure_ascii=False),
                         s["latest_file"], s["msg_count"], s["first_ts"], s["last_ts"],
                         has_failure, s["_best_req_count"], s["_max_real_turns"],
+                        s.get("session_id", "") or "", s.get("session_src", "") or "",
                     ),
                 )
                 conn.executemany(
@@ -636,6 +662,29 @@ def rebuild_sessions(leaf_dir: str) -> int:
             conn.close()
 
 
+def _lookup_identity(r: sqlite3.Row) -> Tuple[str, str, str]:
+    """返回 (lookup_key, session_id, session_src)。**聚合身份的单一真源。**
+
+    优先级 session_id > user_id > q1_hash（前两者已由
+    newapi_format.extract_session_identity 归一成 requests.session_id，
+    用 session_src 区分来路）：
+
+      sid 非空 → f"sid||{sid}"
+        不带 api_key：上游 session_id 全局唯一，同一会话即便换 key 转发也该并一起。
+        前缀 "sid||" 是命名空间隔离，避免与 q1_hash 形态的 key 撞车，也让存量
+        chain_index 的行天然不冲突。
+      sid 为空 → f"{api_key}||{q1_hash}"（存量口径，一字不改）
+
+    用 `in r.keys()` 兜底：老库刚 ALTER 完或调用方 SELECT 没带这两列时不炸。
+    """
+    keys = r.keys()
+    sid = (r["session_id"] or "") if "session_id" in keys else ""
+    src = (r["session_src"] or "") if "session_src" in keys else ""
+    if sid:
+        return f"sid||{sid}", sid, src
+    return f"{r['api_key'] or ''}||{r['q1_hash'] or ''}", "", ""
+
+
 def _agg_one(r: sqlite3.Row, sessions: Dict[str, Dict[str, Any]],
              chain_map: Dict[str, str]) -> None:
     """处理一条 request 行，就地更新 sessions/chain_map。等价 _process_entry 内存分支。"""
@@ -643,19 +692,20 @@ def _agg_one(r: sqlite3.Row, sessions: Dict[str, Dict[str, Any]],
     model = r["model"] or ""
     filename = os.path.basename(r["req_file"] or "")
     ts = r["ts"] or filename
-    q1_hash = r["q1_hash"] or ""
     msg_count = r["msg_count"] or 0
     user_turns = r["user_turns"] or 0
     has_res = bool(r["has_res"])
     success = bool(r["success"])
     full_msg_count = msg_count + (1 if has_res else 0)
 
-    lookup_key = f"{api_key}||{q1_hash}"
+    lookup_key, sid, src = _lookup_identity(r)
     sess_key = chain_map.get(lookup_key)
     session = sessions.get(sess_key) if sess_key else None
 
     # 新会话检测：user_turns 回落 ≤1 且低于峰值 → 另起 ##session_N
-    if session is not None and user_turns <= 1 and \
+    # sid 命中时跳过：上游 session_id 本身就是权威边界，再按 user_turns 回落
+    # 启发式切分只会把一条真会话切碎。
+    if session is not None and not sid and user_turns <= 1 and \
        user_turns < session.get("_max_real_turns", 1):
         suffix = 1
         new_lookup = f"{lookup_key}##session_{suffix}"
@@ -685,6 +735,8 @@ def _agg_one(r: sqlite3.Row, sessions: Dict[str, Dict[str, Any]],
             "last_ts": ts,
             "_best_req_count": msg_count,
             "_max_real_turns": user_turns,
+            "session_id": sid,
+            "session_src": src,
             "trace_list": [trace_entry],
         }
         chain_map[lookup_key] = sess_key
@@ -698,6 +750,11 @@ def _agg_one(r: sqlite3.Row, sessions: Dict[str, Dict[str, Any]],
             session["latest_file"] = filename
             session["msg_count"] = full_msg_count
             session["_best_req_count"] = msg_count
+        # 身份列惰性补齐：同一会话里先到的行可能还没 metadata
+        if sid and not session.get("session_id"):
+            session["session_id"] = sid
+        if src and not session.get("session_src"):
+            session["session_src"] = src
         session["last_ts"] = ts
         session["trace_list"].append(trace_entry)
 
@@ -730,6 +787,8 @@ def _row_to_session_state(row: sqlite3.Row) -> Dict[str, Any]:
         "last_ts": row["last_ts"] or "",
         "_best_req_count": row["best_req_count"] or 0,
         "_max_real_turns": row["max_real_turns"] or 0,
+        "session_id": (row["session_id"] or "") if "session_id" in row.keys() else "",
+        "session_src": (row["session_src"] or "") if "session_src" in row.keys() else "",
     }
 
 
@@ -743,14 +802,13 @@ def _agg_one_db(conn: sqlite3.Connection, r: sqlite3.Row) -> Tuple[str, bool]:
     model = r["model"] or ""
     filename = os.path.basename(r["req_file"] or "")
     ts = r["ts"] or filename
-    q1_hash = r["q1_hash"] or ""
     msg_count = r["msg_count"] or 0
     user_turns = r["user_turns"] or 0
     has_res = bool(r["has_res"])
     success = bool(r["success"])
     full_msg_count = msg_count + (1 if has_res else 0)
 
-    base_key = f"{api_key}||{q1_hash}"
+    base_key, sid, src = _lookup_identity(r)
     row = conn.execute(
         "SELECT session_key FROM chain_index WHERE lookup_key=?", (base_key,)).fetchone()
     sess_key = row["session_key"] if row else None
@@ -761,8 +819,8 @@ def _agg_one_db(conn: sqlite3.Connection, r: sqlite3.Row) -> Tuple[str, bool]:
             "SELECT * FROM sessions WHERE session_key=?", (sess_key,)).fetchone()
         session = _row_to_session_state(srow) if srow else None
 
-    # 新会话检测（与 _agg_one 完全一致的判据与碰撞规避）
-    if session is not None and user_turns <= 1 and \
+    # 新会话检测（与 _agg_one 完全一致的判据与碰撞规避；sid 命中时同样跳过）
+    if session is not None and not sid and user_turns <= 1 and \
        user_turns < session.get("_max_real_turns", 1):
         suffix = 1
         new_lookup = f"{base_key}##session_{suffix}"
@@ -783,12 +841,13 @@ def _agg_one_db(conn: sqlite3.Connection, r: sqlite3.Row) -> Tuple[str, bool]:
         q1 = r["q1_preview"] or (r["chain_key"] or "")[:200]
         conn.execute(
             "INSERT INTO sessions(session_key, api_key, q1, models, latest_file, msg_count, "
-            "first_ts, last_ts, has_failure, best_req_count, max_real_turns) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "first_ts, last_ts, has_failure, best_req_count, max_real_turns, "
+            "session_id, session_src) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sess_key, api_key, q1, json.dumps([model] if model else [], ensure_ascii=False),
                 filename, msg_count, ts, ts,
-                0 if success else 1, msg_count, user_turns,
+                0 if success else 1, msg_count, user_turns, sid, src,
             ),
         )
         conn.execute(
@@ -810,11 +869,13 @@ def _agg_one_db(conn: sqlite3.Connection, r: sqlite3.Row) -> Tuple[str, bool]:
         conn.execute(
             "UPDATE sessions SET api_key=?, models=?, latest_file=?, msg_count=?, "
             "last_ts=?, best_req_count=?, max_real_turns=?, "
-            "has_failure=CASE WHEN ? THEN 1 ELSE has_failure END "
+            "has_failure=CASE WHEN ? THEN 1 ELSE has_failure END, "
+            "session_id=COALESCE(NULLIF(session_id,''), ?), "
+            "session_src=COALESCE(NULLIF(session_src,''), ?) "
             "WHERE session_key=?",
             (
                 api_key, json.dumps(models, ensure_ascii=False), new_latest, new_msg,
-                ts, new_best, max_turns, 0 if success else 1, sess_key,
+                ts, new_best, max_turns, 0 if success else 1, sid, src, sess_key,
             ),
         )
         # 惰性维护 chain_index：base_key 若尚未指向本会话则补上
@@ -875,7 +936,8 @@ def sync_sessions(leaf_dir: str, batch: int = 500) -> Dict[str, Any]:
             while True:
                 rows = conn.execute(
                     "SELECT rowid AS _rid, req_file, ts, model, api_key, q1_hash, msg_count, "
-                    "user_turns, q1_preview, chain_key, has_res, success FROM requests "
+                    "user_turns, q1_preview, chain_key, has_res, success, "
+                    "session_id, session_src FROM requests "
                     "WHERE rowid > ? ORDER BY rowid LIMIT ?",
                     (newest, batch),
                 ).fetchall()
@@ -1143,6 +1205,9 @@ def _row_to_session(row: sqlite3.Row) -> Dict[str, Any]:
         # 由 list_sessions / get_sessions_chain_map 用 chain_index 补齐；SELECT * 拿不到
         # （它在另一张表里），故 keys 存在时取，缺失留空由调用方按 q1 回退。
         "chain_lookup": (row["chain_lookup"] if "chain_lookup" in row.keys() else "") or "",
+        # 聚合方式：session_id | user_id_json | user_id | ''(按 q1_hash 聚合)
+        "session_id": (row["session_id"] if "session_id" in row.keys() else "") or "",
+        "session_src": (row["session_src"] if "session_src" in row.keys() else "") or "",
     }
 
 
@@ -1535,9 +1600,12 @@ def export_sessions(leaf_dir: str, api_key: str = "") -> List[Dict[str, Any]]:
             "latest_file": s["latest_file"],
             "msg_count": s["msg_count"],
             "trace_list": traces_by_key.get(sk, []),
-            # 跨小时叶子的链标识（api_key||q1_hash）。索引库里它是唯一的跨叶身份，
-            # 导出的多目录合并要靠它把同一段对话切成的小时段拼回去。
+            # 跨小时叶子的链标识（sid||{session_id} 或 api_key||q1_hash）。索引库里它是
+            # 唯一的跨叶身份，导出的多目录合并要靠它把同一段对话切成的小时段拼回去。
             "chain_lookup": s.get("chain_lookup", "") or "",
+            # 聚合方式与上游会话 id，供下游区分「权威 session_id」与「q1 推断」
+            "session_id": s.get("session_id", "") or "",
+            "session_src": s.get("session_src", "") or "",
         })
     return result
 

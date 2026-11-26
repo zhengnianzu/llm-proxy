@@ -310,6 +310,49 @@ def _normalize_body(body: Any) -> Tuple[List[dict], Any]:
     return msgs, system
 
 
+def extract_session_identity(*bodies: Any) -> Tuple[str, str]:
+    """从请求体的 metadata 提取上游会话身份，返回 (sid, source)。
+
+    上游（new-api 的 up_req）从 2026-11 起在 body.metadata 写：
+        {"session_id": "...", "taichu_loop_turn_index": 3, "user_id": "..."}
+    有了权威 session_id 就不该再靠 q1_hash 猜同一段对话。
+
+    source 取值（空串表示没拿到，调用方回退 q1_hash）：
+      "session_id"   metadata.session_id 直接命中
+      "user_id_json" metadata.user_id 本身是 JSON 串且内层有非空 session_id
+                     （Claude Code 风格：{"device_id":..,"session_id":".."}）
+      "user_id"      只有 metadata.user_id（普通字符串），拿它当会话身份
+      ""             无可用 metadata
+
+    按顺序在多个 body 里找（req 常被采集侧写空，metadata 只在 up_req 里），
+    取第一个命中的。
+    """
+    for body in bodies:
+        if not isinstance(body, dict):
+            continue
+        meta = body.get("metadata")
+        if not isinstance(meta, dict):
+            continue
+        sid = meta.get("session_id")
+        if isinstance(sid, str) and sid.strip():
+            return sid.strip(), "session_id"
+        uid = meta.get("user_id")
+        if isinstance(uid, str) and uid.strip():
+            uid = uid.strip()
+            # user_id 可能是个 JSON 串，内层埋着真正的 session_id
+            if uid.startswith("{"):
+                try:
+                    inner = json.loads(uid)
+                except (json.JSONDecodeError, ValueError):
+                    inner = None
+                if isinstance(inner, dict):
+                    isid = inner.get("session_id")
+                    if isinstance(isid, str) and isid.strip():
+                        return isid.strip(), "user_id_json"
+            return uid, "user_id"
+    return "", ""
+
+
 def parse_combined_file(path: Path) -> Optional[Dict[str, Any]]:
     """解析合并文件，返回统一结构。用于预览与会话聚合。
 
@@ -321,14 +364,26 @@ def parse_combined_file(path: Path) -> Optional[Dict[str, Any]]:
 
     req_body = _req_to_dict(data.get("req"))
     messages, system = _normalize_body(req_body)
+    up_body: Optional[dict] = None
+    up_parsed = False
     # 采集侧从 2026-11-19 起 req 写空（up_req 正常）。没有 messages 就回退到 up_req，
     # 否则整批新数据解析成空，Q1/会话列表全部失效。
     if not messages:
         up_body = _req_to_dict(data.get("up_req"))
+        up_parsed = True
         up_msgs, up_system = _normalize_body(up_body)
         if up_msgs:
             messages, req_body = up_msgs, up_body
             system = system or up_system
+    # metadata 只在 up_req 里，且 req 有 messages 时 req_body 不会被换成 up_body，
+    # 所以要单独看 up_body。但 up_req 动辄 128KB~1.2MB，老数据（req 非空）上白解
+    # 一遍很贵 —— 只在 req_body 自己没有 metadata 时才去解 up_req。
+    session_id, session_src = extract_session_identity(req_body)
+    if not session_src:
+        if not up_parsed:
+            up_body = _req_to_dict(data.get("up_req"))
+            up_parsed = True
+        session_id, session_src = extract_session_identity(up_body)
     resp_raw = data.get("resp", "")
     # 采集侧从 2026-11-19 起 resp 也写空（up_resp 正常）。没有响应就回退到 up_resp，
     # 否则 assistant_content 解析为 None，浏览页看不到助手回复内容。
@@ -356,6 +411,9 @@ def parse_combined_file(path: Path) -> Optional[Dict[str, Any]]:
         "tok_in": tok_in,
         "tok_out": tok_out,
         "success": tok_out > 0,
+        # 上游权威会话身份（见 extract_session_identity）。空串 = 回退 q1_hash 聚合。
+        "session_id": session_id,
+        "session_src": session_src,
     }
 
 

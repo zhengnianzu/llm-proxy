@@ -75,6 +75,26 @@ _SYSTEM_REMINDER_RE = re.compile(
     r"[ \t]*<system-reminder>[\s\S]*?</system-reminder>[ \t]*\n?", re.IGNORECASE
 )
 
+# 小艺（openclaw-task）把运行时上下文作为独立的一条 user 消息注入，形如：
+#   Current runtime context. This snapshot supersedes earlier runtime-context snapshots.
+#   <current_date>…</current_date><timezone>…</timezone>
+#   <utc_offset>…</utc_offset><current_session_workspace>…</current_session_workspace>
+# 实测（2026-11-26，proxy-004 多个 key / kimi-k3 / deepseek / openPangu）这个块总以
+# </current_session_workspace> 收尾，且约一半的消息在块之后紧跟真实诉求
+# （如「用brower工具访问豆瓣首页…」），另一半是纯注入。
+# 所以与 system-reminder 同策略：只剥块、不丢整条消息；剥空了才由调用方跳到下一条。
+# 同样替换成换行以保留分段。
+_RUNTIME_CONTEXT_RE = re.compile(
+    r"[ \t]*Current runtime context\.[\s\S]*?</current_session_workspace>[ \t]*\n?",
+    re.IGNORECASE,
+)
+
+# 兜底：块被截断导致没有闭合标签时，上面的非贪婪匹配会失配而整段残留。
+# 仅在以该抬头起头时吃掉剩余全部（此时整条消息都是注入，没有真实诉求可救）。
+_RUNTIME_CONTEXT_OPEN_RE = re.compile(
+    r"^\s*Current runtime context\.[\s\S]*\Z", re.IGNORECASE
+)
+
 _COMPACTION_GOAL_RE = re.compile(
     r"## Goal\s*\n(.*?)(?:\n##|\n</summary>|\Z)", re.DOTALL
 )
@@ -174,9 +194,11 @@ def _strip_noise(text: str) -> str:
     """循环去除已知噪声前缀，直到稳定。"""
     while True:
         prev = text
-        # 先处理成对的 <system-reminder>（替换为换行以保留分段），再跑删除型模式：
-        # 这样未闭合兜底只会碰到真正不成对的标签。
+        # 先处理成对的注入块（替换为换行以保留分段），再跑删除型模式：
+        # 这样未闭合兜底只会碰到真正不成对的块。
         text = _SYSTEM_REMINDER_RE.sub("\n", text)
+        text = _RUNTIME_CONTEXT_RE.sub("\n", text)
+        text = _RUNTIME_CONTEXT_OPEN_RE.sub("", text)
         for pat in _NOISE_PATTERNS:
             text = pat.sub("", text)
         if text == prev:

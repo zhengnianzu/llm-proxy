@@ -1118,9 +1118,11 @@ def _build_agg_items(preloaded: List[Tuple[dict, str]], with_traces: bool = Fals
             "latest_file": session.get("latest_file", ""),
             "api_key": session.get("api_key", ""),
             "q1_preview": session.get("q1", ""),
-            # 跨叶合并用的链标识（api_key||q1_hash）。缺失时由 _merge_chain_segments
-            # 回退到 (api_key, q1_preview) 分组。
+            # 跨叶合并用的链标识（sid||{session_id} 或 api_key||q1_hash）。缺失时由
+            # _merge_chain_segments 回退到 (api_key, q1_preview) 分组。
             "chain_lookup": session.get("chain_lookup", "") or "",
+            # 聚合方式：session_id | user_id_json | user_id | ''(按 q1_hash 推断)
+            "session_src": session.get("session_src", "") or "",
             # 会话标识：前端把选中会话写进 URL(?session=...)，分享链接可直接定位。
             "session_key": session.get("session_key", "") or sk,
         }

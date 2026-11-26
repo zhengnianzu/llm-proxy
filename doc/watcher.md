@@ -278,6 +278,61 @@ curl -s http://127.0.0.1:8084/api/watch/status -H "x-requested-with: XMLHttpRequ
 就停下**，水位只推进到最后一行成功折叠处。这样既不会跳过还没 enrich 完的行，
 也不会打乱 `index.jsonl` 的追加顺序。
 
+### 聚合身份：session_id > user_id > q1_hash
+
+上游 new-api 从 2026-11 起在 `up_req.metadata` 里写了会话标识，不必再靠首条用户
+消息的内容哈希去猜同一段对话。聚合键（`chain_index.lookup_key`，对外叫
+`chain_lookup`）按下面的优先级取，由 `newapi_index_db._lookup_identity()` 统一产出
+（**改聚合口径只改这一个函数**）：
+
+| 优先级 | 来源 | `session_src` | 聚合键 |
+|---|---|---|---|
+| 1 | `metadata.session_id` | `session_id` | `sid\|\|{session_id}` |
+| 2 | `metadata.user_id` 是 JSON 串、内层有 `session_id` | `user_id_json` | `sid\|\|{内层 session_id}` |
+| 3 | `metadata.user_id`（普通字符串） | `user_id` | `sid\|\|{user_id}` |
+| 4 | 都没有 → 回退内容哈希 | `''` | `{api_key}\|\|{q1_hash}` |
+
+- 提取逻辑在 `newapi_format.extract_session_identity()`，归一后落到
+  `requests.session_id` + `requests.session_src` 两列（enrich 阶段写入）。
+- `sid||` 前缀是命名空间隔离，避免与 `{api_key}||{q1_hash}` 形态撞车。
+  键里**不含 api_key**：上游 session_id 全局唯一，同一会话换 key 转发也应并一起。
+- **sid 命中时跳过 `##session_N` 启发式切分**：上游 session_id 本身就是权威边界，
+  再按 `user_turns` 回落切分只会把一条真会话切碎。无 sid 时行为与历史完全一致。
+- 实测（proxy-004 `261126/26112616`，394 条请求）：旧口径 118 个会话 →
+  新口径 80 个，被 q1_hash 错切开的 38 段合回去了。
+
+#### 存量不回填
+
+`index.jsonl` 里没有 metadata，`session_id` **只能在 enrich 解析 ~1MB 合并文件时**
+取到；而已 enrich 的行 `q1_hash IS NOT NULL`、不会被重扫。所以老库 `_migrate` 补列
+后留空，历史叶子继续按 q1_hash 聚合，只有新 enrich 的行走新口径。
+
+后果：同一条跨小时对话若一半叶子在改动前已 enrich、一半在改动后，会拿到两个不同的
+`chain_lookup`，跨叶合并把它切成两段。要彻底统一就得重跑 enrich
+（参照 `test/refill_q1_worker.py` 的 reset → enrich → `rebuild_sessions` 三步），
+代价是重新解析海量合并文件（实测单叶 400~600s）。
+
+#### 注意：user_id 档会过度合并
+
+`user_id` 是「人」不是「会话」，按它聚合会把该用户的多段不同对话并成一条。
+这是刻意选的口径（「有其中一个就行」）。若会话列表出现异常巨大的条目，
+体检与回退：
+
+```bash
+# 各档的会话数 / 单会话最大 trace 数
+python3 -c "
+import sqlite3
+c=sqlite3.connect('<leaf>/index.db'); c.row_factory=sqlite3.Row
+for r in c.execute('''SELECT COALESCE(NULLIF(s.session_src,\"\"),\"(q1_hash)\") src,
+  COUNT(*) n, MAX(t.c) mx FROM sessions s LEFT JOIN
+  (SELECT session_key,COUNT(*) c FROM traces GROUP BY 1) t
+  ON t.session_key=s.session_key GROUP BY 1'''): print(dict(r))"
+```
+
+`user_id` 档的 `mx` 远大于 `session_id` 档就说明发生了；最小回退是把
+`_lookup_identity()` 里 user_id 档改成 `f"uid||{uid}||{q1_hash}"`（既借 user_id
+跨 key 收敛，又不把一个人的多段对话错并）。
+
 ---
 
 ## 故障排查
@@ -315,7 +370,8 @@ sqlite3 "$LOG_DIR/log_dir.db" "DELETE FROM watch_queue;"
 | `src/watch/discover.py` | 每源发现逻辑、两档扫描、优先级 |
 | `utils/watch_config.py` | 全部可调参数（唯一配置入口） |
 | `utils/newapi_watcher.py` | `flush_leaf()`（ingest→enrich→sync 一趟）+ 跨进程 `flock` |
-| `utils/newapi_index_db.py` | 三段式实现的实体：`ingest` / `enrich` / `sync_sessions` |
+| `utils/newapi_index_db.py` | 三段式实现的实体：`ingest` / `enrich` / `sync_sessions`；聚合身份 `_lookup_identity` |
+| `utils/newapi_format.py` | `parse_combined_file()` + `extract_session_identity()`（metadata 会话标识） |
 | `utils/logdir_store.py` | `watch_queue` / `watch_source_stats` 表与增删查 |
 | `utils/logs_routes.py` | `/watch` 页面、`/api/watch/status` |
 | `templates/watch.html` | 看板前端（5s 轮询） |
