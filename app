@@ -1803,54 +1803,134 @@ def _stop_all_workers(args: argparse.Namespace) -> None:
 
 def _add_worker_subparser(subparsers, name: str, dest: str, cmd_func) -> None:
     """给 build_parser 注册一个 worker 命令组（start/stop/logs/status/list）。"""
-    p = subparsers.add_parser(name, help=f"Manage {name} worker daemon (start/stop/logs/status)")
+    p = subparsers.add_parser(
+        name,
+        help=f"Manage {name} worker daemon (start/stop/logs/status/list)",
+        description=(
+            f"管理 {name} worker 独立进程。\n"
+            f"worker 以 `python -m {_WORKER_SPECS[name].module}` 运行，独立 pid / 日志 / 信号处理，"
+            f"不随 app 进程退出。"
+        ),
+        epilog=(
+            f"重启方式（二选一）：\n"
+            f"  1) 只重启本 worker：  ./app {name} stop && ./app {name} start\n"
+            f"  2) 随 app 全量重启：  ./app restart --with-workers\n"
+            f"\n"
+            f"注意：`./app restart` 默认不停 worker，已在跑的实例会被 start 判为\n"
+            f"\"already running\" 而跳过，因此改了 worker 代码必须用上面 1) 或 2)。\n"
+            f"`./app {name} start` 是幂等的：已在跑的实例不重启，只补齐缺失的。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = p.add_subparsers(dest=dest, required=True)
 
-    ps = sub.add_parser("start", help=f"Start {name} worker daemon")
+    ps = sub.add_parser("start", help=f"Start {name} worker daemon",
+                        description=f"确保 {name} worker 达到目标实例数。"
+                                    f"已在跑的实例跳过（不重启），只补齐缺失的。")
     ps.add_argument("--env", dest="env_file", help="Env file to use")
     ps.add_argument("--instances", type=int, default=None,
                     help="要确保在跑的实例数（默认取环境变量，如 EXPORT_CONCURRENCY；否则 1）")
     ps.set_defaults(func=cmd_func)
 
-    pt = sub.add_parser("stop", help=f"Stop {name} worker daemon")
+    pt = sub.add_parser("stop", help=f"Stop {name} worker daemon",
+                        description=f"按进程组发 SIGTERM 停止 {name} worker，"
+                                    f"正在跑的任务在分片 sleep 中退出；超时后 SIGKILL。")
     pt.add_argument("--env", dest="env_file", help="Env file whose worker to stop")
     pt.set_defaults(func=cmd_func)
 
-    pl = sub.add_parser("logs", help=f"Show {name} worker logs")
+    pl = sub.add_parser("logs", help=f"Show {name} worker logs",
+                        description=f"查看 {name} worker 日志（所有实例共用一个日志文件）。")
     pl.add_argument("--env", dest="env_file", help="Env file whose worker logs to show")
     pl.add_argument("-f", "--follow", action="store_true", help="Follow the log file")
     pl.add_argument("-n", "--lines", type=int, default=100, help="Number of lines to show")
     pl.set_defaults(func=cmd_func)
 
-    pst = sub.add_parser("status", help=f"Show {name} worker status")
+    pst = sub.add_parser("status", help=f"Show {name} worker status",
+                         description=f"显示 {name} worker 各实例 pid 与存活状态。")
     pst.set_defaults(func=cmd_func)
 
-    pls = sub.add_parser("list", help=f"List all recorded {name} workers")
+    pls = sub.add_parser("list", help=f"List all recorded {name} workers",
+                         description=f"列出已记录的 {name} worker 实例。")
     pls.set_defaults(func=cmd_func)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LLM proxy service CLI")
+    parser = argparse.ArgumentParser(
+        description="LLM proxy service CLI",
+        epilog=(
+            "独立 worker 进程\n"
+            "  app 进程之外还有 8 类长期运行的后台 worker，各自是独立的 `python -m` 进程，\n"
+            "  有独立 pid 文件、日志、信号处理与 DB 连接，不随 app 退出：\n"
+            "    export    导出任务执行       utils.export_worker      (EXPORT_CONCURRENCY)\n"
+            "    backfill  回填任务执行       src.backfill.worker\n"
+            "    watch     new-api 实时索引   src.watch.worker\n"
+            "    session   统计快照预热       src.session.worker\n"
+            "    backup    OBS 上传/归档      src.backup.worker\n"
+            "    clear     本地目录清理       src.backup.clear_worker (CLEAR_CONCURRENCY)\n"
+            "    keyframe  关键帧分析         src.keyframe.worker      (KEYFRAME_CONCURRENCY)\n"
+            "    actions   动作决策分析       src.actions.worker      (ACTIONS_CONCURRENCY)\n"
+            "\n"
+            "拉起方式\n"
+            "  ./app start                 启动 app，并补齐所有缺失的 worker 实例（默认行为）\n"
+            "  ./app start --no-workers    只起 app，不碰 worker\n"
+            "  ./app <worker> start        单独拉起某类 worker（幂等：已在跑的跳过，只补缺失）\n"
+            "         [--instances N]      覆盖实例数，优先级高于环境变量\n"
+            "  worker 数量默认为 1；export/clear/keyframe/actions 由对应 *_CONCURRENCY 决定\n"
+            "\n"
+            "停止与重启\n"
+            "  ./app stop                  只停 app，worker 继续跑（设计如此，见下）\n"
+            "  ./app stop --with-workers   连 worker 一起停（按进程组 SIGTERM）\n"
+            "  ./app restart               停 app → 起 app → 补齐缺失 worker；存活实例不受影响\n"
+            "  ./app restart --with-workers  真正全量重启：worker 全停再全拉\n"
+            "  ./app <worker> stop && ./app <worker> start   只重启某类 worker\n"
+            "\n"
+            "为什么默认不重启 worker\n"
+            "  worker 持有独立 DB 连接与 owner_worker + 心跳。平台/app 重启期间让它们存活，\n"
+            "  正在执行的任务靠心跳续命，别的 worker 启动时不会把在途任务误判成孤儿重新认领。\n"
+            "  代价是：改了 worker 代码后 `./app restart` 不会加载新代码——已存活的实例会被\n"
+            "  start 判为 \"already running\" 跳过。此时必须用 `--with-workers`，或用\n"
+            "  `./app <worker> stop && ./app <worker> start` 单独重载。\n"
+            "\n"
+            "排查\n"
+            "  ./app <worker> status       查看各实例 pid 与存活状态\n"
+            "  ./app <worker> logs -f      跟踪日志（所有实例共用一个日志文件）\n"
+            "  ./app status                查看 app 自身 pid / port / started_at\n"
+            "  对比 app 与 worker 的 started_at 即可判断 worker 是否还是老进程。\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    p_start = subparsers.add_parser("start", help="Start app.py using configured source_env")
+    p_start = subparsers.add_parser(
+        "start", help="Start app.py using configured source_env",
+        description="启动 app 进程，随后补齐导出/回填/实时索引/session/备份/清理/关键帧/动作\n"
+                    "八类独立 worker 中缺失的实例（幂等，已在跑的不会被重启）。",
+    )
     p_start.add_argument("--env", dest="env_file", help="Env file to use for this start")
     p_start.add_argument("--sync", action="store_true", help="Also start sync daemon (requires obs_base configured)")
     p_start.add_argument("--no-workers", dest="no_workers", action="store_true",
-                         help="Do not start export/backfill workers with the app")
+                         help="只起 app，不拉起任何 worker（默认会补齐缺失的实例）")
     p_start.set_defaults(func=cmd_start)
 
-    p_stop = subparsers.add_parser("stop", help="Stop the running app")
+    p_stop = subparsers.add_parser(
+        "stop", help="Stop the running app",
+        description="停止 app 进程。默认不动 worker：它们是独立进程，拥有自己的 DB 连接与\n"
+                    "心跳，可跨平台重启存活。",
+    )
     p_stop.add_argument("--env", dest="env_file", help="Env file to stop")
     p_stop.add_argument("--with-workers", dest="with_workers", action="store_true",
-                        help="同时停掉 export/backfill worker（默认不动：worker 是独立进程，可跨平台重启存活）")
+                        help="同时停掉全部 worker（默认不动：worker 是独立进程，可跨平台重启存活）")
     p_stop.set_defaults(func=cmd_stop)
 
-    p_restart = subparsers.add_parser("restart", help="Restart the app")
+    p_restart = subparsers.add_parser(
+        "restart", help="Restart the app",
+        description="stop + start。默认 worker 跨重启存活，start 只补齐缺失实例，因此改了\n"
+                    "worker 代码需要用 --with-workers 或单独 stop/start 该 worker。",
+    )
     p_restart.add_argument("--env", dest="env_file", help="Env file to restart")
     p_restart.add_argument("--sync", action="store_true", help="Also start sync daemon after restart")
     p_restart.add_argument("--no-workers", dest="no_workers", action="store_true",
-                           help="重启后不补齐 export/backfill worker（默认会补齐缺失的实例）")
+                           help="重启后不补齐任何 worker（默认会补齐缺失的实例）")
     p_restart.add_argument("--with-workers", dest="with_workers", action="store_true",
                            help="重启时连同 worker 一起停掉再拉起（默认不停，worker 跨重启存活）")
     p_restart.set_defaults(func=cmd_restart)

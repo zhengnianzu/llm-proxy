@@ -1123,6 +1123,8 @@ def _build_agg_items(preloaded: List[Tuple[dict, str]], with_traces: bool = Fals
             "chain_lookup": session.get("chain_lookup", "") or "",
             # 聚合方式：session_id | user_id_json | user_id | ''(按 q1_hash 推断)
             "session_src": session.get("session_src", "") or "",
+            # 上游 metadata 给的会话标识本身（session_src 非空时有值），详情面板展示
+            "session_id": session.get("session_id", "") or "",
             # 会话标识：前端把选中会话写进 URL(?session=...)，分享链接可直接定位。
             "session_key": session.get("session_key", "") or sk,
         }

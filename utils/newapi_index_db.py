@@ -867,7 +867,14 @@ def _agg_one_db(conn: sqlite3.Connection, r: sqlite3.Row) -> Tuple[str, bool]:
             new_msg = full_msg_count
             new_best = msg_count
         conn.execute(
-            "UPDATE sessions SET api_key=?, models=?, latest_file=?, msg_count=?, "
+            # api_key 用 COALESCE(NULLIF(...)) 只在原值为空时补：**首个 api_key 胜出**，
+            # 与 _agg_one 的内存分支一致（它只在建会话时写一次，更新分支不碰）。
+            # 这在 sid 聚合下是必须的：sid|| 键不含 api_key，同一会话可以跨多个 key
+            # （实测 proxy-004 有 user_id 会话横跨两个 key），若这里无条件覆盖，
+            # 增量路径取「最后一个」、全量重建取「第一个」，两条路径会产出不同的
+            # sessions.api_key —— 而它是列表页过滤与 export_sessions 下推的依据。
+            "UPDATE sessions SET api_key=COALESCE(NULLIF(api_key,''), ?), "
+            "models=?, latest_file=?, msg_count=?, "
             "last_ts=?, best_req_count=?, max_real_turns=?, "
             "has_failure=CASE WHEN ? THEN 1 ELSE has_failure END, "
             "session_id=COALESCE(NULLIF(session_id,''), ?), "

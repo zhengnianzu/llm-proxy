@@ -161,8 +161,6 @@
             letter-spacing: .04em; padding: 4px 0; user-select: none;
         }
         .trace-toggle:hover { color: var(--foreground); }
-        .trace-toggle .trace-chevron { font-size: 9px; transition: transform .15s; }
-        .trace-toggle .trace-chevron.open { transform: rotate(90deg); }
         .trace-list { display: none; margin-top: 4px; }
         .trace-list.open { display: block; }
         .trace-item {
@@ -1790,6 +1788,7 @@ async function selectAggChain(idx, el) {
             total_attempts: _failedTrace ? _failedTrace.total_attempts || 1 : 1,
             keyframe: keyframe || null,
             session_src: chain.session_src || '',
+            session_id: chain.session_id || '',
             // 关键帧分析要绝对路径：logDir 只是相对 dir_key（"261029/26102906"），
             // 后端 session-traces 返回的 leaf_path 才是可读文件的真实目录。
             leaf_path: window._kfLeafPath || logDir || '',
@@ -1958,6 +1957,7 @@ function _kfPaint(chain, logDir, keyframe) {
         leaf_path: window._kfLeafPath || logDir || '',
         session_key: window._kfSessionKey || '',
         session_src: chain.session_src || '',
+        session_id: chain.session_id || '',
     });
 }
 
@@ -2534,20 +2534,30 @@ function renderDetailPanel(data) {
         html += `<div class="detail-item"><div class="detail-label">模型</div><div class="detail-value">${data.models.map(esc).join(', ')}</div></div>`;
     }
     // 会话标识：同一会话的所有请求共享这个 session_key，排查时可直接对照 DB / 导出。
+    // 注意与上游 metadata.session_id 区别开 —— 那个在「聚合依据」里单独显示。
     if (data.session_key) {
-        html += `<div class="detail-item"><div class="detail-label">Session ID</div>`
-             + `<div class="detail-value" style="font-family:ui-monospace,monospace;font-size:11.5px;word-break:break-all;user-select:all" title="点击可选中复制">${esc(data.session_key)}</div></div>`;
+        html += `<div class="detail-item"><div class="detail-label">会话标识</div>`
+             + `<div class="detail-value" style="font-family:ui-monospace,monospace;font-size:11.5px;word-break:break-all;user-select:all" title="本项目内部的会话键（session_key），点击可选中复制">${esc(data.session_key)}</div></div>`;
     }
     html += `<div class="detail-item"><div class="detail-label">消息数</div><div class="detail-value">${data.message_count || 0}</div></div>`;
-    // 聚合方式：上游 metadata 给的权威身份，还是按 q1 内容推断的
-    if (data.session_src) {
+    // 聚合依据：这条会话是靠什么把多次请求归到一起的。
+    // 上游 metadata 给了权威标识就显示标识本身；没有则说明是按首条用户消息的内容哈希推断。
+    {
         const SRC_DESC = {
             session_id: 'metadata.session_id',
             user_id_json: 'metadata.user_id 内嵌 session_id',
             user_id: 'metadata.user_id',
         };
+        const _src = data.session_src || '';
+        const _desc = SRC_DESC[_src] || (_src ? esc(_src) : 'Q1 内容哈希（上游未给标识）');
+        let _val = `<div style="font-size:11.5px">${_desc}</div>`;
+        if (_src && data.session_id) {
+            _val += `<div style="font-family:ui-monospace,monospace;font-size:11px;`
+                  + `word-break:break-all;user-select:all;color:var(--muted-foreground);margin-top:2px"`
+                  + ` title="上游 metadata 里的标识值，点击可选中复制">${esc(data.session_id)}</div>`;
+        }
         html += `<div class="detail-item"><div class="detail-label">聚合依据</div>`
-             + `<div class="detail-value" style="font-size:11.5px">${esc(SRC_DESC[data.session_src] || data.session_src)}</div></div>`;
+             + `<div class="detail-value">${_val}</div></div>`;
     }
     if (data.first_time) {
         html += `<div class="detail-item"><div class="detail-label">首次时间</div><div class="detail-value">${esc(data.first_time)}</div></div>`;
@@ -2576,7 +2586,7 @@ function renderDetailPanel(data) {
         // 关联列表改为点击弹窗（表格形态）；摘要仍留在详情面板里
         html += `<div class="trace-section">`;
         html += `<div class="trace-toggle${kfDoneCls}" onclick="_openTraceList(this)">`;
-        html += `<span class="trace-chevron">&#9654;</span> 关联列表 (${data.trace_list.length})`;
+        html += `关联列表 (${data.trace_list.length})`;
         if (kfBusy) html += `<span class="kf-state">分析中…</span>`;
         else if (kf) html += `<span class="kf-state">已分析</span>`;
         html += `</div>`;
@@ -2599,9 +2609,11 @@ function renderDetailPanel(data) {
             const _ke = document.getElementById('filterKey');
             if (_ke && _ke.value) _tdp.set('key', _ke.value);
             const _qs = _tdp.toString();
-            html += `<a class="kf-summary" style="display:block;margin-top:6px;color:var(--primary);text-decoration:none;font-size:12px"
+            // padding 与 .trace-toggle 的 `4px 0` 对齐（.kf-summary 自带 8px 左内缩，
+            // 会和上面的「关联列表」错开一格），两行都不带三角。
+            html += `<a class="kf-summary" style="display:block;padding:4px 0;color:var(--primary);text-decoration:none;font-size:12px"
                         href="/history/trajectory${_qs ? '?' + _qs : ''}" title="把会话里的工具调用画成动作决策链">
-                        &#9654; 动作决策图（工具调用成功/失败/修复）→</a>`;
+                        动作决策图（工具调用成功/失败/修复）→</a>`;
         }
         if (kf && kf.summary) {
             const s = kf.summary;
